@@ -137,6 +137,19 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"月度预测任务已添加: {cron}")
+
+        # 告警升级任务（每5分钟检查一次）
+        alert_upgrade_config = self.config.get('alert_upgrade_job', {})
+        if alert_upgrade_config.get('enabled', True):
+            cron = alert_upgrade_config.get('cron', '*/5 * * * *')
+            self.scheduler.add_job(
+                self._alert_upgrade_job,
+                CronTrigger.from_crontab(cron),
+                id='alert_upgrade_job',
+                name='告警自动升级任务',
+                replace_existing=True
+            )
+            logger.info(f"告警升级任务已添加: {cron}")
     
     def _training_job(self) -> None:
         """
@@ -225,6 +238,29 @@ class TaskScheduler:
             
         except Exception as e:
             logger.error(f"月度预测任务失败: {e}")
+
+    def _alert_upgrade_job(self) -> None:
+        """
+        告警自动升级任务
+
+        每5分钟扫描一次，超时未处理的告警自动升级。
+        默认30分钟未处理升级（可由告警规则单独配置）。
+        """
+        logger.info("开始执行告警升级任务")
+
+        try:
+            from app.services.alert import AlertService
+
+            alert_service = AlertService()
+            upgraded_count = alert_service.process_pending_upgrades()
+
+            if upgraded_count > 0:
+                logger.info(f"告警升级任务完成，共升级 {upgraded_count} 条告警")
+            else:
+                logger.info("告警升级任务完成，无需升级的告警")
+
+        except Exception as e:
+            logger.error(f"告警升级任务失败: {e}")
     
     def get_jobs(self) -> list:
         """

@@ -16,9 +16,10 @@ API路由定义
 
 import numpy as np
 import pandas as pd
+import json
 from datetime import datetime
-from typing import Optional
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from typing import Optional, Dict, Any, List
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from loguru import logger
 
 from app.api.schemas import (
@@ -39,7 +40,16 @@ from app.api.schemas import (
     FederatedModelHistoryRequest, FederatedModelHistoryResponse,
     FederatedClientStatusResponse,
     FederatedLocalTrainRequest, FederatedLocalTrainResponse,
-    FederatedPrivacyConfig, FederatedAggregatorConfig
+    FederatedPrivacyConfig, FederatedAggregatorConfig,
+    AlertRuleCreate, AlertRuleUpdate, AlertRuleResponse,
+    AlertEventResponse, AlertHandleRequest, AlertListResponse,
+    AlertSubscriptionCreate, AlertSubscriptionUpdate, AlertSubscriptionResponse,
+    NotificationChannelCreate, NotificationChannelUpdate, NotificationChannelResponse,
+    NotificationLogResponse,
+    WorkOrderCreate, WorkOrderUpdate, WorkOrderResponse,
+    WorkOrderAssignRequest, WorkOrderResolveRequest,
+    WorkOrderStatusUpdateRequest, WorkOrderListResponse,
+    AlertUpgradeTriggerResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -1036,4 +1046,841 @@ async def configure_aggregator(aggregator_config: FederatedAggregatorConfig):
         
     except Exception as e:
         logger.error(f"配置聚合器失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 辅助函数 ====================
+
+def _alert_to_dict(alert) -> Dict[str, Any]:
+    """将告警 ORM 对象转为响应字典"""
+    data = {
+        'id': alert.id,
+        'alert_no': alert.alert_no,
+        'rule_id': alert.rule_id,
+        'alert_level': alert.alert_level,
+        'original_level': alert.original_level,
+        'node_type': alert.node_type,
+        'node_id': alert.node_id,
+        'title': alert.title,
+        'content': alert.content,
+        'confidence': alert.confidence,
+        'risk_score': alert.risk_score,
+        'status': alert.status,
+        'handler_id': alert.handler_id,
+        'handler_name': alert.handler_name,
+        'handle_time': alert.handle_time,
+        'handle_note': alert.handle_note,
+        'is_upgraded': bool(alert.is_upgraded),
+        'upgrade_count': alert.upgrade_count or 0,
+        'last_upgrade_time': alert.last_upgrade_time,
+        'work_order_id': alert.work_order_id,
+        'source_prediction_id': alert.source_prediction_id,
+        'silence_until': alert.silence_until,
+        'create_time': alert.create_time,
+        'update_time': alert.update_time,
+    }
+    if alert.recommendations:
+        try:
+            data['recommendations'] = json.loads(alert.recommendations)
+        except Exception:
+            data['recommendations'] = []
+    else:
+        data['recommendations'] = []
+    return data
+
+
+def _rule_to_dict(rule) -> Dict[str, Any]:
+    """将告警规则 ORM 对象转为响应字典"""
+    data = {
+        'id': rule.id,
+        'rule_name': rule.rule_name,
+        'alert_level': rule.alert_level,
+        'node_type': rule.node_type,
+        'min_confidence': rule.min_confidence,
+        'silence_period': rule.silence_period,
+        'enable_upgrade': bool(rule.enable_upgrade),
+        'upgrade_minutes': rule.upgrade_minutes,
+        'upgrade_to_level': rule.upgrade_to_level,
+        'enabled': bool(rule.enabled),
+        'description': rule.description,
+        'create_time': rule.create_time,
+        'update_time': rule.update_time,
+    }
+    if rule.node_ids:
+        try:
+            data['node_ids'] = json.loads(rule.node_ids)
+        except Exception:
+            data['node_ids'] = []
+    else:
+        data['node_ids'] = []
+    return data
+
+
+def _subscription_to_dict(sub) -> Dict[str, Any]:
+    """将订阅 ORM 对象转为响应字典"""
+    data = {
+        'id': sub.id,
+        'subscriber_type': sub.subscriber_type,
+        'subscriber_id': sub.subscriber_id,
+        'subscriber_name': sub.subscriber_name,
+        'min_alert_level': sub.min_alert_level,
+        'node_type': sub.node_type,
+        'enabled': bool(sub.enabled),
+        'create_time': sub.create_time,
+        'update_time': sub.update_time,
+    }
+    for field, attr in [
+        ('alert_levels', sub.alert_levels),
+        ('node_ids', sub.node_ids),
+        ('notify_channels', sub.notify_channels),
+    ]:
+        if attr:
+            try:
+                data[field] = json.loads(attr)
+            except Exception:
+                data[field] = []
+        else:
+            data[field] = []
+    if sub.notify_targets:
+        try:
+            data['notify_targets'] = json.loads(sub.notify_targets)
+        except Exception:
+            data['notify_targets'] = {}
+    else:
+        data['notify_targets'] = {}
+    return data
+
+
+def _channel_to_dict(ch) -> Dict[str, Any]:
+    """将通知渠道 ORM 对象转为响应字典"""
+    data = {
+        'id': ch.id,
+        'channel_type': ch.channel_type,
+        'channel_name': ch.channel_name,
+        'enabled': bool(ch.enabled),
+        'is_default': bool(ch.is_default),
+        'create_time': ch.create_time,
+        'update_time': ch.update_time,
+    }
+    if ch.config:
+        try:
+            data['config'] = json.loads(ch.config)
+        except Exception:
+            data['config'] = {}
+    else:
+        data['config'] = {}
+    return data
+
+
+def _work_order_to_dict(wo) -> Dict[str, Any]:
+    """将工单 ORM 对象转为响应字典"""
+    data = {
+        'id': wo.id,
+        'order_no': wo.order_no,
+        'alert_id': wo.alert_id,
+        'title': wo.title,
+        'description': wo.description,
+        'priority': wo.priority,
+        'status': wo.status,
+        'node_type': wo.node_type,
+        'node_id': wo.node_id,
+        'alert_level': wo.alert_level,
+        'risk_score': wo.risk_score,
+        'assignee_id': wo.assignee_id,
+        'assignee_name': wo.assignee_name,
+        'creator_id': wo.creator_id,
+        'creator_name': wo.creator_name,
+        'due_time': wo.due_time,
+        'resolve_time': wo.resolve_time,
+        'resolve_note': wo.resolve_note,
+        'create_time': wo.create_time,
+        'update_time': wo.update_time,
+    }
+    if wo.recommendations:
+        try:
+            data['recommendations'] = json.loads(wo.recommendations)
+        except Exception:
+            data['recommendations'] = []
+    else:
+        data['recommendations'] = []
+    if wo.extra_info:
+        try:
+            data['extra_info'] = json.loads(wo.extra_info)
+        except Exception:
+            data['extra_info'] = {}
+    else:
+        data['extra_info'] = {}
+    return data
+
+
+# ==================== 告警规则管理 ====================
+
+@router.get(
+    "/alert/rules",
+    response_model=List[AlertRuleResponse],
+    tags=["告警管理"],
+    summary="查询告警规则列表"
+)
+async def list_alert_rules(
+    enabled: Optional[bool] = Query(None, description="是否启用"),
+    alert_level: Optional[int] = Query(None, ge=1, le=4, description="告警级别"),
+):
+    """查询告警规则列表"""
+    try:
+        from app.services.alert import AlertService
+        service = AlertService()
+        rules = service.list_rules(enabled=enabled, alert_level=alert_level)
+        return [_rule_to_dict(r) for r in rules]
+    except Exception as e:
+        logger.error(f"查询告警规则失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/alert/rules",
+    response_model=AlertRuleResponse,
+    tags=["告警管理"],
+    summary="创建告警规则"
+)
+async def create_alert_rule(request: AlertRuleCreate):
+    """创建告警规则"""
+    try:
+        from app.services.alert import AlertService
+        service = AlertService()
+        data = request.model_dump()
+        if 'node_ids' in data and data['node_ids']:
+            data['node_ids'] = json.dumps(data['node_ids'], ensure_ascii=False)
+        rule = service.create_rule(**data)
+        if not rule:
+            raise HTTPException(status_code=500, detail="创建规则失败")
+        return _rule_to_dict(rule)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建告警规则失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/alert/rules/{rule_id}",
+    response_model=AlertRuleResponse,
+    tags=["告警管理"],
+    summary="更新告警规则"
+)
+async def update_alert_rule(rule_id: int, request: AlertRuleUpdate):
+    """更新告警规则"""
+    try:
+        from app.services.alert import AlertService
+        service = AlertService()
+        data = request.model_dump(exclude_unset=True)
+        if 'node_ids' in data and data['node_ids']:
+            data['node_ids'] = json.dumps(data['node_ids'], ensure_ascii=False)
+        rule = service.update_rule(rule_id, **data)
+        if not rule:
+            raise HTTPException(status_code=404, detail="规则不存在")
+        return _rule_to_dict(rule)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新告警规则失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/alert/rules/{rule_id}",
+    tags=["告警管理"],
+    summary="删除告警规则"
+)
+async def delete_alert_rule(rule_id: int):
+    """删除告警规则"""
+    try:
+        from app.services.alert import AlertService
+        service = AlertService()
+        ok = service.delete_rule(rule_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="规则不存在")
+        return {"status": "success", "message": "规则已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除告警规则失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 告警事件管理 ====================
+
+@router.get(
+    "/alert/events",
+    response_model=AlertListResponse,
+    tags=["告警管理"],
+    summary="查询告警事件列表"
+)
+async def list_alert_events(
+    status: Optional[str] = Query(None, description="状态 pending/processing/resolved/ignored"),
+    alert_level: Optional[int] = Query(None, ge=1, le=4, description="告警级别"),
+    node_type: Optional[str] = Query(None, description="节点类型 bolt/flange"),
+    node_id: Optional[str] = Query(None, description="节点ID"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """查询告警事件列表"""
+    try:
+        from app.services.alert import AlertService
+        service = AlertService()
+        alerts = service.list_alerts(
+            status=status, alert_level=alert_level,
+            node_type=node_type, node_id=node_id,
+            limit=limit, offset=offset,
+        )
+        items = [_alert_to_dict(a) for a in alerts]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询告警事件失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/alert/events/{alert_id}",
+    response_model=AlertEventResponse,
+    tags=["告警管理"],
+    summary="获取告警详情"
+)
+async def get_alert_event(alert_id: int):
+    """获取单条告警详情"""
+    try:
+        from app.services.alert import AlertService
+        service = AlertService()
+        alert = service.get_alert(alert_id)
+        if not alert:
+            raise HTTPException(status_code=404, detail="告警不存在")
+        return _alert_to_dict(alert)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取告警详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/alert/events/{alert_id}/handle",
+    response_model=AlertEventResponse,
+    tags=["告警管理"],
+    summary="处理告警"
+)
+async def handle_alert_event(alert_id: int, request: AlertHandleRequest):
+    """
+    处理告警
+
+    action:
+    - acknowledge: 确认（状态变为 processing）
+    - resolve: 解决（状态变为 resolved）
+    - ignore: 忽略（状态变为 ignored，可选静默期）
+    """
+    try:
+        from app.services.alert import AlertService
+        service = AlertService()
+        alert = service.handle_alert(
+            alert_id=alert_id,
+            action=request.action,
+            handler_id=request.handler_id,
+            handler_name=request.handler_name,
+            handle_note=request.handle_note,
+            silence_minutes=request.silence_minutes,
+        )
+        if not alert:
+            raise HTTPException(status_code=404, detail="告警不存在")
+        return _alert_to_dict(alert)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"处理告警失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/alert/upgrade/trigger",
+    response_model=AlertUpgradeTriggerResponse,
+    tags=["告警管理"],
+    summary="手动触发告警升级检查"
+)
+async def trigger_alert_upgrade():
+    """
+    手动触发告警升级检查
+
+    扫描所有待处理告警，对超时未处理的告警执行自动升级。
+    调度器默认每5分钟执行一次。
+    """
+    try:
+        from app.services.alert import AlertService
+        service = AlertService()
+        count = service.process_pending_upgrades()
+        return {
+            "upgraded_count": count,
+            "message": f"已处理 {count} 条告警升级",
+        }
+    except Exception as e:
+        logger.error(f"手动触发告警升级失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 告警订阅管理 ====================
+
+@router.get(
+    "/alert/subscriptions",
+    response_model=List[AlertSubscriptionResponse],
+    tags=["告警订阅"],
+    summary="查询订阅列表"
+)
+async def list_alert_subscriptions(
+    subscriber_type: Optional[str] = Query(None, description="订阅者类型 role/user/device"),
+    subscriber_id: Optional[str] = Query(None, description="订阅者ID"),
+    enabled: Optional[bool] = Query(None, description="是否启用"),
+):
+    """查询告警订阅列表"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        subs = service.list_subscriptions(
+            subscriber_type=subscriber_type,
+            subscriber_id=subscriber_id,
+            enabled=enabled,
+        )
+        return [_subscription_to_dict(s) for s in subs]
+    except Exception as e:
+        logger.error(f"查询订阅列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/alert/subscriptions/{sub_id}",
+    response_model=AlertSubscriptionResponse,
+    tags=["告警订阅"],
+    summary="获取订阅详情"
+)
+async def get_alert_subscription(sub_id: int):
+    """获取单个订阅详情"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        sub = service.get_subscription(sub_id)
+        if not sub:
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        return _subscription_to_dict(sub)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取订阅详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/alert/subscriptions",
+    response_model=AlertSubscriptionResponse,
+    tags=["告警订阅"],
+    summary="创建订阅"
+)
+async def create_alert_subscription(request: AlertSubscriptionCreate):
+    """创建告警订阅"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        data = request.model_dump()
+        sub = service.create_subscription(**data)
+        if not sub:
+            raise HTTPException(status_code=500, detail="创建订阅失败")
+        return _subscription_to_dict(sub)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建订阅失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/alert/subscriptions/{sub_id}",
+    response_model=AlertSubscriptionResponse,
+    tags=["告警订阅"],
+    summary="更新订阅"
+)
+async def update_alert_subscription(sub_id: int, request: AlertSubscriptionUpdate):
+    """更新告警订阅"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        data = request.model_dump(exclude_unset=True)
+        sub = service.update_subscription(sub_id, **data)
+        if not sub:
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        return _subscription_to_dict(sub)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新订阅失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/alert/subscriptions/{sub_id}",
+    tags=["告警订阅"],
+    summary="删除订阅"
+)
+async def delete_alert_subscription(sub_id: int):
+    """删除告警订阅"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        ok = service.delete_subscription(sub_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        return {"status": "success", "message": "订阅已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除订阅失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 通知渠道管理 ====================
+
+@router.get(
+    "/notification/channels",
+    response_model=List[NotificationChannelResponse],
+    tags=["通知渠道"],
+    summary="查询通知渠道列表"
+)
+async def list_notification_channels():
+    """查询所有通知渠道"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        channels = service.list_channels()
+        return [_channel_to_dict(c) for c in channels]
+    except Exception as e:
+        logger.error(f"查询通知渠道失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/notification/channels",
+    response_model=NotificationChannelResponse,
+    tags=["通知渠道"],
+    summary="创建通知渠道"
+)
+async def create_notification_channel(request: NotificationChannelCreate):
+    """创建通知渠道"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        data = request.model_dump()
+        ch = service.create_channel(**data)
+        if not ch:
+            raise HTTPException(status_code=500, detail="创建渠道失败")
+        return _channel_to_dict(ch)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建通知渠道失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/notification/channels/{channel_id}",
+    response_model=NotificationChannelResponse,
+    tags=["通知渠道"],
+    summary="更新通知渠道"
+)
+async def update_notification_channel(
+    channel_id: int,
+    request: NotificationChannelUpdate,
+):
+    """更新通知渠道"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        data = request.model_dump(exclude_unset=True)
+        ch = service.update_channel(channel_id, **data)
+        if not ch:
+            raise HTTPException(status_code=404, detail="渠道不存在")
+        return _channel_to_dict(ch)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新通知渠道失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/notification/channels/{channel_id}",
+    tags=["通知渠道"],
+    summary="删除通知渠道"
+)
+async def delete_notification_channel(channel_id: int):
+    """删除通知渠道"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        ok = service.delete_channel(channel_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="渠道不存在")
+        return {"status": "success", "message": "渠道已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除通知渠道失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/notification/logs",
+    response_model=List[NotificationLogResponse],
+    tags=["通知渠道"],
+    summary="查询通知发送日志"
+)
+async def list_notification_logs(
+    alert_id: Optional[int] = Query(None, description="关联告警ID"),
+    status: Optional[str] = Query(None, description="发送状态 success/failed/pending"),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """查询通知发送日志"""
+    try:
+        from app.services.alert import NotificationService
+        service = NotificationService()
+        logs = service.list_notification_logs(
+            alert_id=alert_id, status=status, limit=limit,
+        )
+        return [
+            {
+                'id': log.id,
+                'alert_id': log.alert_id,
+                'channel_type': log.channel_type,
+                'subscriber_id': log.subscriber_id,
+                'subscriber_name': log.subscriber_name,
+                'target': log.target,
+                'title': log.title,
+                'content': log.content,
+                'status': log.status,
+                'error_message': log.error_message,
+                'retry_count': log.retry_count or 0,
+                'send_time': log.send_time,
+            }
+            for log in logs
+        ]
+    except Exception as e:
+        logger.error(f"查询通知日志失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 工单管理 ====================
+
+@router.get(
+    "/work-orders",
+    response_model=WorkOrderListResponse,
+    tags=["工单管理"],
+    summary="查询工单列表"
+)
+async def list_work_orders(
+    status: Optional[str] = Query(None, description="状态 open/assigned/in_progress/resolved/closed"),
+    priority: Optional[str] = Query(None, description="优先级 low/medium/high/urgent"),
+    assignee_id: Optional[str] = Query(None, description="处理人ID"),
+    alert_id: Optional[int] = Query(None, description="关联告警ID"),
+    node_type: Optional[str] = Query(None, description="节点类型"),
+    node_id: Optional[str] = Query(None, description="节点ID"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """查询工单列表"""
+    try:
+        from app.services.alert import WorkOrderService
+        service = WorkOrderService()
+        wos = service.list_work_orders(
+            status=status, priority=priority, assignee_id=assignee_id,
+            alert_id=alert_id, node_type=node_type, node_id=node_id,
+            limit=limit, offset=offset,
+        )
+        items = [_work_order_to_dict(w) for w in wos]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询工单列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/work-orders/{work_order_id}",
+    response_model=WorkOrderResponse,
+    tags=["工单管理"],
+    summary="获取工单详情"
+)
+async def get_work_order(work_order_id: int):
+    """获取工单详情"""
+    try:
+        from app.services.alert import WorkOrderService
+        service = WorkOrderService()
+        wo = service.get_work_order(work_order_id)
+        if not wo:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        return _work_order_to_dict(wo)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取工单详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/work-orders",
+    response_model=WorkOrderResponse,
+    tags=["工单管理"],
+    summary="手动创建工单"
+)
+async def create_work_order(request: WorkOrderCreate):
+    """手动创建工单"""
+    try:
+        from app.services.alert import WorkOrderService
+        service = WorkOrderService()
+        data = request.model_dump()
+        due_hours = data.pop('due_hours', 48)
+        wo = service.create_manual_work_order(
+            due_hours=due_hours, **data
+        )
+        if not wo:
+            raise HTTPException(status_code=500, detail="创建工单失败")
+        return _work_order_to_dict(wo)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建工单失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/work-orders/{work_order_id}",
+    response_model=WorkOrderResponse,
+    tags=["工单管理"],
+    summary="更新工单信息"
+)
+async def update_work_order(work_order_id: int, request: WorkOrderUpdate):
+    """更新工单信息"""
+    try:
+        from app.services.alert import WorkOrderService
+        from app.utils.database import get_db, WorkOrder
+        data = request.model_dump(exclude_unset=True)
+        if 'recommendations' in data and data['recommendations']:
+            data['recommendations'] = json.dumps(
+                data['recommendations'], ensure_ascii=False
+            )
+        if 'extra_info' in data and data['extra_info']:
+            data['extra_info'] = json.dumps(
+                data['extra_info'], ensure_ascii=False
+            )
+
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=500, detail="数据库不可用")
+            wo = db.query(WorkOrder).filter(
+                WorkOrder.id == work_order_id
+            ).first()
+            if not wo:
+                raise HTTPException(status_code=404, detail="工单不存在")
+            for k, v in data.items():
+                if hasattr(wo, k):
+                    setattr(wo, k, v)
+            db.commit()
+            wo = db.query(WorkOrder).filter(
+                WorkOrder.id == work_order_id
+            ).first()
+        return _work_order_to_dict(wo)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新工单失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/work-orders/{work_order_id}/assign",
+    response_model=WorkOrderResponse,
+    tags=["工单管理"],
+    summary="指派工单"
+)
+async def assign_work_order(work_order_id: int, request: WorkOrderAssignRequest):
+    """指派工单处理人"""
+    try:
+        from app.services.alert import WorkOrderService
+        service = WorkOrderService()
+        wo = service.assign_work_order(
+            work_order_id=work_order_id,
+            assignee_id=request.assignee_id,
+            assignee_name=request.assignee_name,
+            assigner_id=request.assigner_id,
+            assigner_name=request.assigner_name,
+        )
+        if not wo:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        return _work_order_to_dict(wo)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"指派工单失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/work-orders/{work_order_id}/status",
+    response_model=WorkOrderResponse,
+    tags=["工单管理"],
+    summary="更新工单状态"
+)
+async def update_work_order_status(
+    work_order_id: int,
+    request: WorkOrderStatusUpdateRequest,
+):
+    """更新工单状态"""
+    try:
+        from app.services.alert import WorkOrderService
+        service = WorkOrderService()
+        wo = service.update_work_order_status(
+            work_order_id=work_order_id,
+            status=request.status,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+            note=request.note,
+        )
+        if not wo:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        return _work_order_to_dict(wo)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新工单状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/work-orders/{work_order_id}/resolve",
+    response_model=WorkOrderResponse,
+    tags=["工单管理"],
+    summary="解决工单"
+)
+async def resolve_work_order(work_order_id: int, request: WorkOrderResolveRequest):
+    """解决工单（便捷接口）"""
+    try:
+        from app.services.alert import WorkOrderService
+        service = WorkOrderService()
+        wo = service.resolve_work_order(
+            work_order_id=work_order_id,
+            resolve_note=request.resolve_note,
+            resolver_id=request.resolver_id,
+            resolver_name=request.resolver_name,
+        )
+        if not wo:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        return _work_order_to_dict(wo)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"解决工单失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

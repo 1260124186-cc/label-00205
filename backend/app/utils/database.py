@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Generator, Optional, List
 
-from sqlalchemy import create_engine, Column, BigInteger, String, Float, DateTime, Index
+from sqlalchemy import create_engine, Column, BigInteger, String, Float, DateTime, Index, Text, Boolean, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from loguru import logger
@@ -142,6 +142,310 @@ class MonthPrediction(Base):
     confidence = Column(Float, comment='预测置信度')
     rec_measures = Column(String(1000), comment='推荐措施')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+
+# ============================================================
+# 告警与通知模块数据表模型
+# ============================================================
+
+class AlertRule(Base):
+    """
+    告警规则表模型
+    
+    对应数据库表: sc_alert_rules
+    定义告警触发条件：等级、节点、静默期、升级策略
+    
+    Attributes:
+        id: 主键
+        rule_name: 规则名称
+        alert_level: 告警级别 (1=关注, 2=检查, 3=紧急, 4=故障)
+        node_type: 节点类型 (bolt/flange/all)
+        node_ids: 节点ID列表 (JSON, 空表示全部)
+        min_confidence: 最低置信度阈值
+        silence_period: 静默期（分钟），同节点同级别在此期间不重复告警
+        enable_upgrade: 是否启用自动升级
+        upgrade_minutes: 未处理自动升级时间（分钟）
+        upgrade_to_level: 升级到的级别
+        enabled: 是否启用
+        description: 规则描述
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_alert_rules'
+    
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    rule_name = Column(String(200), nullable=False, comment='规则名称')
+    alert_level = Column(Integer, nullable=False, comment='告警级别 1-4')
+    node_type = Column(String(20), default='all', comment='节点类型 bolt/flange/all')
+    node_ids = Column(Text, comment='节点ID列表 JSON')
+    min_confidence = Column(Float, default=0.0, comment='最低置信度')
+    silence_period = Column(Integer, default=30, comment='静默期（分钟）')
+    enable_upgrade = Column(Boolean, default=True, comment='是否启用自动升级')
+    upgrade_minutes = Column(Integer, default=30, comment='未处理升级时间（分钟）')
+    upgrade_to_level = Column(Integer, comment='升级到的级别')
+    enabled = Column(Boolean, default=True, comment='是否启用')
+    description = Column(String(500), comment='规则描述')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+    
+    __table_args__ = (
+        Index('idx_alert_level', 'alert_level'),
+        Index('idx_enabled', 'enabled'),
+    )
+
+
+class AlertEvent(Base):
+    """
+    告警事件表模型
+    
+    对应数据库表: sc_alert_events
+    存储实际产生的告警事件
+    
+    Attributes:
+        id: 主键
+        alert_no: 告警编号
+        rule_id: 关联规则ID
+        alert_level: 当前告警级别
+        original_level: 原始告警级别
+        node_type: 节点类型
+        node_id: 节点ID
+        title: 告警标题
+        content: 告警内容
+        confidence: 置信度
+        risk_score: 风险评分
+        recommendations: 推荐措施 JSON
+        status: 状态 (pending=待处理, processing=处理中, resolved=已解决, ignored=已忽略)
+        handler_id: 处理人ID
+        handler_name: 处理人姓名
+        handle_time: 处理时间
+        handle_note: 处理备注
+        is_upgraded: 是否已升级
+        upgrade_count: 升级次数
+        last_upgrade_time: 最后升级时间
+        work_order_id: 关联工单ID
+        source_prediction_id: 来源预测记录ID
+        silence_until: 静默截止时间
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_alert_events'
+    
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    alert_no = Column(String(50), unique=True, comment='告警编号')
+    rule_id = Column(BigInteger, comment='关联规则ID')
+    alert_level = Column(Integer, nullable=False, comment='当前告警级别')
+    original_level = Column(Integer, comment='原始告警级别')
+    node_type = Column(String(20), comment='节点类型')
+    node_id = Column(String(100), comment='节点ID')
+    title = Column(String(200), comment='告警标题')
+    content = Column(Text, comment='告警内容')
+    confidence = Column(Float, comment='置信度')
+    risk_score = Column(Float, comment='风险评分')
+    recommendations = Column(Text, comment='推荐措施 JSON')
+    status = Column(String(20), default='pending', comment='状态 pending/processing/resolved/ignored')
+    handler_id = Column(String(50), comment='处理人ID')
+    handler_name = Column(String(100), comment='处理人姓名')
+    handle_time = Column(DateTime, comment='处理时间')
+    handle_note = Column(Text, comment='处理备注')
+    is_upgraded = Column(Boolean, default=False, comment='是否已升级')
+    upgrade_count = Column(Integer, default=0, comment='升级次数')
+    last_upgrade_time = Column(DateTime, comment='最后升级时间')
+    work_order_id = Column(BigInteger, comment='关联工单ID')
+    source_prediction_id = Column(BigInteger, comment='来源预测记录ID')
+    silence_until = Column(DateTime, comment='静默截止时间')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+    
+    __table_args__ = (
+        Index('idx_status', 'status'),
+        Index('idx_level', 'alert_level'),
+        Index('idx_node', 'node_type', 'node_id'),
+        Index('idx_create_time', 'create_time'),
+    )
+
+
+class AlertSubscription(Base):
+    """
+    告警订阅管理表模型
+    
+    对应数据库表: sc_alert_subscriptions
+    按角色/装置订阅不同级别的告警
+    
+    Attributes:
+        id: 主键
+        subscriber_type: 订阅者类型 (role/user/device)
+        subscriber_id: 订阅者ID (角色ID/用户ID/装置ID)
+        subscriber_name: 订阅者名称
+        min_alert_level: 最低订阅级别 (1-4)
+        alert_levels: 订阅的告警级别列表 JSON (如 [3,4] 表示只订阅紧急和故障)
+        node_type: 节点类型过滤 (bolt/flange/all)
+        node_ids: 节点ID列表 JSON (空表示全部)
+        notify_channels: 通知渠道 JSON (如 ["email", "sms", "webhook"])
+        notify_targets: 通知目标 JSON (如 {"email": ["a@b.com"], "sms": ["138xxxx"]})
+        enabled: 是否启用
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_alert_subscriptions'
+    
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    subscriber_type = Column(String(20), nullable=False, comment='订阅者类型 role/user/device')
+    subscriber_id = Column(String(100), nullable=False, comment='订阅者ID')
+    subscriber_name = Column(String(200), comment='订阅者名称')
+    min_alert_level = Column(Integer, default=1, comment='最低订阅级别')
+    alert_levels = Column(Text, comment='订阅的告警级别列表 JSON')
+    node_type = Column(String(20), default='all', comment='节点类型过滤')
+    node_ids = Column(Text, comment='节点ID列表 JSON')
+    notify_channels = Column(Text, comment='通知渠道 JSON')
+    notify_targets = Column(Text, comment='通知目标 JSON')
+    enabled = Column(Boolean, default=True, comment='是否启用')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+    
+    __table_args__ = (
+        Index('idx_subscriber', 'subscriber_type', 'subscriber_id'),
+        Index('idx_enabled', 'enabled'),
+    )
+
+
+class NotificationChannel(Base):
+    """
+    通知渠道配置表模型
+    
+    对应数据库表: sc_notification_channels
+    配置各类通知渠道的参数
+    
+    Attributes:
+        id: 主键
+        channel_type: 渠道类型 (email/sms/webhook/dingtalk/wechat)
+        channel_name: 渠道名称
+        config: 渠道配置 JSON
+        enabled: 是否启用
+        is_default: 是否为默认渠道
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_notification_channels'
+    
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    channel_type = Column(String(50), nullable=False, comment='渠道类型')
+    channel_name = Column(String(200), comment='渠道名称')
+    config = Column(Text, comment='渠道配置 JSON')
+    enabled = Column(Boolean, default=True, comment='是否启用')
+    is_default = Column(Boolean, default=False, comment='是否默认渠道')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+    
+    __table_args__ = (
+        Index('idx_channel_type', 'channel_type'),
+    )
+
+
+class NotificationLog(Base):
+    """
+    通知发送日志表模型
+    
+    对应数据库表: sc_notification_logs
+    记录每次通知发送结果
+    
+    Attributes:
+        id: 主键
+        alert_id: 关联告警ID
+        channel_type: 通知渠道
+        subscriber_id: 接收者ID
+        subscriber_name: 接收者名称
+        target: 发送目标 (邮箱/手机号/URL)
+        title: 通知标题
+        content: 通知内容
+        status: 发送状态 (success/failed/pending)
+        error_message: 错误信息
+        retry_count: 重试次数
+        send_time: 发送时间
+    """
+    __tablename__ = 'sc_notification_logs'
+    
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    alert_id = Column(BigInteger, comment='关联告警ID')
+    channel_type = Column(String(50), comment='通知渠道')
+    subscriber_id = Column(String(100), comment='接收者ID')
+    subscriber_name = Column(String(200), comment='接收者名称')
+    target = Column(String(500), comment='发送目标')
+    title = Column(String(200), comment='通知标题')
+    content = Column(Text, comment='通知内容')
+    status = Column(String(20), default='pending', comment='发送状态')
+    error_message = Column(Text, comment='错误信息')
+    retry_count = Column(Integer, default=0, comment='重试次数')
+    send_time = Column(DateTime, default=datetime.now, comment='发送时间')
+    
+    __table_args__ = (
+        Index('idx_alert_id', 'alert_id'),
+        Index('idx_status', 'status'),
+    )
+
+
+class WorkOrder(Base):
+    """
+    工单表模型
+    
+    对应数据库表: sc_work_orders
+    与告警联动，紧急预警自动建单
+    
+    Attributes:
+        id: 主键
+        order_no: 工单编号
+        alert_id: 关联告警ID
+        title: 工单标题
+        description: 工单描述
+        priority: 优先级 (low/medium/high/urgent)
+        status: 状态 (open/assigned/in_progress/resolved/closed)
+        node_type: 节点类型
+        node_id: 节点ID
+        alert_level: 告警级别
+        risk_score: 风险评分
+        assignee_id: 指派处理人ID
+        assignee_name: 指派处理人姓名
+        creator_id: 创建人ID
+        creator_name: 创建人姓名
+        due_time: 截止时间
+        resolve_time: 解决时间
+        resolve_note: 解决备注
+        recommendations: 推荐措施 JSON
+        extra_info: 扩展信息 JSON
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_work_orders'
+    
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    order_no = Column(String(50), unique=True, comment='工单编号')
+    alert_id = Column(BigInteger, comment='关联告警ID')
+    title = Column(String(200), nullable=False, comment='工单标题')
+    description = Column(Text, comment='工单描述')
+    priority = Column(String(20), default='medium', comment='优先级')
+    status = Column(String(20), default='open', comment='状态')
+    node_type = Column(String(20), comment='节点类型')
+    node_id = Column(String(100), comment='节点ID')
+    alert_level = Column(Integer, comment='告警级别')
+    risk_score = Column(Float, comment='风险评分')
+    assignee_id = Column(String(50), comment='处理人ID')
+    assignee_name = Column(String(100), comment='处理人姓名')
+    creator_id = Column(String(50), comment='创建人ID')
+    creator_name = Column(String(100), comment='创建人姓名')
+    due_time = Column(DateTime, comment='截止时间')
+    resolve_time = Column(DateTime, comment='解决时间')
+    resolve_note = Column(Text, comment='解决备注')
+    recommendations = Column(Text, comment='推荐措施 JSON')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+    
+    __table_args__ = (
+        Index('idx_status', 'status'),
+        Index('idx_priority', 'priority'),
+        Index('idx_alert_id', 'alert_id'),
+        Index('idx_assignee', 'assignee_id'),
+        Index('idx_create_time', 'create_time'),
+    )
 
 
 class DatabaseManager:

@@ -403,3 +403,296 @@ class FederatedAggregatorConfig(BaseModel):
     server_learning_rate: float = Field(1.0, description="服务器学习率")
     min_clients_per_round: int = Field(2, description="每轮最少客户端数")
     enable_outlier_detection: bool = Field(True, description="是否启用异常值检测")
+
+
+# ============================================================
+# 告警与通知模块
+# ============================================================
+
+# ---------- 告警规则 ----------
+
+class AlertRuleBase(BaseModel):
+    """告警规则基础模型"""
+    rule_name: str = Field(..., description="规则名称")
+    alert_level: int = Field(..., ge=1, le=4, description="告警级别 1-4")
+    node_type: str = Field("all", description="节点类型 bolt/flange/all")
+    node_ids: Optional[List[str]] = Field(None, description="节点ID列表，空表示全部")
+    min_confidence: float = Field(0.0, ge=0, le=1, description="最低置信度")
+    silence_period: int = Field(30, ge=0, description="静默期（分钟）")
+    enable_upgrade: bool = Field(True, description="是否启用自动升级")
+    upgrade_minutes: int = Field(30, ge=0, description="未处理升级时间（分钟）")
+    upgrade_to_level: Optional[int] = Field(None, ge=1, le=4, description="升级到的级别")
+    enabled: bool = Field(True, description="是否启用")
+    description: Optional[str] = Field(None, description="规则描述")
+
+
+class AlertRuleCreate(AlertRuleBase):
+    """创建告警规则请求"""
+    pass
+
+
+class AlertRuleUpdate(BaseModel):
+    """更新告警规则请求"""
+    rule_name: Optional[str] = None
+    alert_level: Optional[int] = Field(None, ge=1, le=4)
+    node_type: Optional[str] = None
+    node_ids: Optional[List[str]] = None
+    min_confidence: Optional[float] = Field(None, ge=0, le=1)
+    silence_period: Optional[int] = Field(None, ge=0)
+    enable_upgrade: Optional[bool] = None
+    upgrade_minutes: Optional[int] = Field(None, ge=0)
+    upgrade_to_level: Optional[int] = Field(None, ge=1, le=4)
+    enabled: Optional[bool] = None
+    description: Optional[str] = None
+
+
+class AlertRuleResponse(AlertRuleBase):
+    """告警规则响应"""
+    id: int
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ---------- 告警事件 ----------
+
+class AlertEventResponse(BaseModel):
+    """告警事件响应"""
+    id: int
+    alert_no: str
+    rule_id: Optional[int] = None
+    alert_level: int
+    original_level: Optional[int] = None
+    node_type: Optional[str] = None
+    node_id: Optional[str] = None
+    title: Optional[str] = None
+    content: Optional[str] = None
+    confidence: Optional[float] = None
+    risk_score: Optional[float] = None
+    recommendations: Optional[List[str]] = None
+    status: str
+    handler_id: Optional[str] = None
+    handler_name: Optional[str] = None
+    handle_time: Optional[datetime] = None
+    handle_note: Optional[str] = None
+    is_upgraded: bool = False
+    upgrade_count: int = 0
+    last_upgrade_time: Optional[datetime] = None
+    work_order_id: Optional[int] = None
+    source_prediction_id: Optional[int] = None
+    silence_until: Optional[datetime] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AlertHandleRequest(BaseModel):
+    """处理告警请求"""
+    action: str = Field(..., description="处理动作: acknowledge/resolve/ignore")
+    handler_id: Optional[str] = Field(None, description="处理人ID")
+    handler_name: Optional[str] = Field(None, description="处理人姓名")
+    handle_note: Optional[str] = Field(None, description="处理备注")
+    silence_minutes: Optional[int] = Field(None, ge=0, description="忽略时的静默期（分钟）")
+
+
+class AlertListResponse(BaseModel):
+    """告警列表响应"""
+    total: int
+    items: List[AlertEventResponse]
+
+
+# ---------- 告警订阅 ----------
+
+class AlertSubscriptionBase(BaseModel):
+    """告警订阅基础模型"""
+    subscriber_type: str = Field(..., description="订阅者类型 role/user/device")
+    subscriber_id: str = Field(..., description="订阅者ID")
+    subscriber_name: Optional[str] = Field(None, description="订阅者名称")
+    min_alert_level: int = Field(1, ge=1, le=4, description="最低订阅级别")
+    alert_levels: Optional[List[int]] = Field(None, description="订阅的告警级别列表")
+    node_type: str = Field("all", description="节点类型过滤 bolt/flange/all")
+    node_ids: Optional[List[str]] = Field(None, description="节点ID列表")
+    notify_channels: Optional[List[str]] = Field(None, description="通知渠道列表")
+    notify_targets: Optional[Dict[str, List[str]]] = Field(None, description="通知目标 {渠道: [目标]}")
+    enabled: bool = Field(True, description="是否启用")
+
+
+class AlertSubscriptionCreate(AlertSubscriptionBase):
+    """创建订阅请求"""
+    pass
+
+
+class AlertSubscriptionUpdate(BaseModel):
+    """更新订阅请求"""
+    subscriber_type: Optional[str] = None
+    subscriber_id: Optional[str] = None
+    subscriber_name: Optional[str] = None
+    min_alert_level: Optional[int] = Field(None, ge=1, le=4)
+    alert_levels: Optional[List[int]] = None
+    node_type: Optional[str] = None
+    node_ids: Optional[List[str]] = None
+    notify_channels: Optional[List[str]] = None
+    notify_targets: Optional[Dict[str, List[str]]] = None
+    enabled: Optional[bool] = None
+
+
+class AlertSubscriptionResponse(AlertSubscriptionBase):
+    """订阅响应"""
+    id: int
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ---------- 通知渠道 ----------
+
+class NotificationChannelBase(BaseModel):
+    """通知渠道基础模型"""
+    channel_type: str = Field(..., description="渠道类型 email/sms/webhook/dingtalk/wechat")
+    channel_name: Optional[str] = Field(None, description="渠道名称")
+    config: Optional[Dict[str, Any]] = Field(None, description="渠道配置")
+    enabled: bool = Field(True, description="是否启用")
+    is_default: bool = Field(False, description="是否默认渠道")
+
+
+class NotificationChannelCreate(NotificationChannelBase):
+    """创建通知渠道请求"""
+    pass
+
+
+class NotificationChannelUpdate(BaseModel):
+    """更新通知渠道请求"""
+    channel_type: Optional[str] = None
+    channel_name: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+    enabled: Optional[bool] = None
+    is_default: Optional[bool] = None
+
+
+class NotificationChannelResponse(NotificationChannelBase):
+    """通知渠道响应"""
+    id: int
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ---------- 通知日志 ----------
+
+class NotificationLogResponse(BaseModel):
+    """通知日志响应"""
+    id: int
+    alert_id: Optional[int] = None
+    channel_type: Optional[str] = None
+    subscriber_id: Optional[str] = None
+    subscriber_name: Optional[str] = None
+    target: Optional[str] = None
+    title: Optional[str] = None
+    content: Optional[str] = None
+    status: str
+    error_message: Optional[str] = None
+    retry_count: int = 0
+    send_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ---------- 工单 ----------
+
+class WorkOrderBase(BaseModel):
+    """工单基础模型"""
+    title: str = Field(..., description="工单标题")
+    description: Optional[str] = Field(None, description="工单描述")
+    priority: str = Field("medium", description="优先级 low/medium/high/urgent")
+    status: Optional[str] = Field("open", description="状态 open/assigned/in_progress/resolved/closed")
+    node_type: Optional[str] = Field(None, description="节点类型")
+    node_id: Optional[str] = Field(None, description="节点ID")
+    alert_level: Optional[int] = Field(None, description="告警级别")
+    risk_score: Optional[float] = Field(None, description="风险评分")
+    assignee_id: Optional[str] = Field(None, description="处理人ID")
+    assignee_name: Optional[str] = Field(None, description="处理人姓名")
+    creator_id: Optional[str] = Field("manual", description="创建人ID")
+    creator_name: Optional[str] = Field("人工创建", description="创建人姓名")
+    due_time: Optional[datetime] = Field(None, description="截止时间")
+    recommendations: Optional[List[str]] = Field(None, description="推荐措施")
+    extra_info: Optional[Dict[str, Any]] = Field(None, description="扩展信息")
+
+
+class WorkOrderCreate(WorkOrderBase):
+    """创建工单请求"""
+    due_hours: Optional[int] = Field(48, description="多少小时后截止，due_time未设置时生效")
+    pass
+
+
+class WorkOrderUpdate(BaseModel):
+    """更新工单请求"""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    status: Optional[str] = None
+    assignee_id: Optional[str] = None
+    assignee_name: Optional[str] = None
+    due_time: Optional[datetime] = None
+    recommendations: Optional[List[str]] = None
+    extra_info: Optional[Dict[str, Any]] = None
+
+
+class WorkOrderAssignRequest(BaseModel):
+    """指派工单请求"""
+    assignee_id: str = Field(..., description="处理人ID")
+    assignee_name: str = Field(..., description="处理人姓名")
+    assigner_id: Optional[str] = Field(None, description="指派人ID")
+    assigner_name: Optional[str] = Field(None, description="指派人姓名")
+
+
+class WorkOrderResolveRequest(BaseModel):
+    """解决工单请求"""
+    resolve_note: str = Field(..., description="解决备注")
+    resolver_id: Optional[str] = Field(None, description="解决人ID")
+    resolver_name: Optional[str] = Field(None, description="解决人姓名")
+
+
+class WorkOrderStatusUpdateRequest(BaseModel):
+    """更新工单状态请求"""
+    status: str = Field(..., description="新状态")
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+    note: Optional[str] = Field(None, description="备注")
+
+
+class WorkOrderResponse(WorkOrderBase):
+    """工单响应"""
+    id: int
+    order_no: str
+    alert_id: Optional[int] = None
+    resolve_time: Optional[datetime] = None
+    resolve_note: Optional[str] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class WorkOrderListResponse(BaseModel):
+    """工单列表响应"""
+    total: int
+    items: List[WorkOrderResponse]
+
+
+# ---------- 告警调度 ----------
+
+class AlertUpgradeTriggerResponse(BaseModel):
+    """手动触发告警升级响应"""
+    upgraded_count: int
+    message: str
+

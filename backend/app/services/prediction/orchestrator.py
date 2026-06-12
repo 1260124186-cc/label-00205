@@ -171,6 +171,16 @@ class PredictionOrchestrator:
         if save_to_db:
             self.repository.save_bolt_prediction(bolt_id, result)
 
+        # Step 6: 告警评估
+        try:
+            self._evaluate_alert(
+                node_type='bolt',
+                node_id=bolt_id,
+                result=result,
+            )
+        except Exception as e:
+            logger.warning(f"螺栓 {bolt_id} 告警评估异常: {e}")
+
         logger.info(f"螺栓预测完成: {bolt_id} -> {status}")
         return result
 
@@ -248,6 +258,16 @@ class PredictionOrchestrator:
         # Step 5: 持久化
         if save_to_db:
             self.repository.save_flange_prediction(flange_id, result)
+
+        # Step 6: 告警评估
+        try:
+            self._evaluate_alert(
+                node_type='flange',
+                node_id=flange_id,
+                result=result,
+            )
+        except Exception as e:
+            logger.warning(f"法兰面 {flange_id} 告警评估异常: {e}")
 
         logger.info(f"法兰面预测完成: {flange_id} -> {status}")
         return result
@@ -379,3 +399,48 @@ class PredictionOrchestrator:
                 logger.error(f"法兰面 {flange_id} 预测失败: {e}")
 
         logger.info(f"批量法兰面预测完成，共 {len(flange_ids)} 个")
+
+    # ---------- 告警评估 ----------
+
+    def _evaluate_alert(
+        self,
+        node_type: str,
+        node_id: str,
+        result: Dict[str, Any],
+    ) -> None:
+        """
+        评估预测结果并触发告警（如有）
+
+        Args:
+            node_type: 节点类型 bolt/flange
+            node_id: 节点ID
+            result: 预测结果字典
+        """
+        try:
+            from app.services.alert import AlertService
+        except ImportError:
+            logger.debug("告警服务未启用，跳过告警评估")
+            return
+
+        status_code = result.get('status_code', 0)
+        if status_code <= 0:
+            return
+
+        try:
+            alert_service = AlertService()
+            alert = alert_service.evaluate_prediction(
+                node_type=node_type,
+                node_id=node_id,
+                status_code=status_code,
+                confidence=float(result.get('confidence', 0)),
+                risk_score=float(result.get('risk_score', 0)),
+                diagnosis=str(result.get('diagnosis', '')),
+                recommendations=result.get('recommendations', []),
+            )
+            if alert:
+                logger.info(
+                    f"预测触发告警: {alert.alert_no}, "
+                    f"级别={alert.alert_level}, node={node_type}/{node_id}"
+                )
+        except Exception as e:
+            logger.error(f"告警评估失败 node={node_type}/{node_id}: {e}")

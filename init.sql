@@ -168,5 +168,176 @@ DELIMITER ;
 CALL generate_test_data();
 DROP PROCEDURE IF EXISTS generate_test_data;
 
+-- ============================================================
+-- 告警规则表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_alert_rules (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    rule_name VARCHAR(200) NOT NULL COMMENT '规则名称',
+    alert_level INT NOT NULL COMMENT '告警级别 1-4',
+    node_type VARCHAR(20) DEFAULT 'all' COMMENT '节点类型 bolt/flange/all',
+    node_ids TEXT COMMENT '节点ID列表 JSON',
+    min_confidence FLOAT DEFAULT 0.0 COMMENT '最低置信度',
+    silence_period INT DEFAULT 30 COMMENT '静默期（分钟）',
+    enable_upgrade TINYINT(1) DEFAULT 1 COMMENT '是否启用自动升级',
+    upgrade_minutes INT DEFAULT 30 COMMENT '未处理升级时间（分钟）',
+    upgrade_to_level INT COMMENT '升级到的级别',
+    enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
+    description VARCHAR(500) COMMENT '规则描述',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_alert_level (alert_level),
+    INDEX idx_enabled (enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警规则表';
+
+-- ============================================================
+-- 告警事件表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_alert_events (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    alert_no VARCHAR(50) UNIQUE COMMENT '告警编号',
+    rule_id BIGINT COMMENT '关联规则ID',
+    alert_level INT NOT NULL COMMENT '当前告警级别',
+    original_level INT COMMENT '原始告警级别',
+    node_type VARCHAR(20) COMMENT '节点类型',
+    node_id VARCHAR(100) COMMENT '节点ID',
+    title VARCHAR(200) COMMENT '告警标题',
+    content TEXT COMMENT '告警内容',
+    confidence FLOAT COMMENT '置信度',
+    risk_score FLOAT COMMENT '风险评分',
+    recommendations TEXT COMMENT '推荐措施 JSON',
+    status VARCHAR(20) DEFAULT 'pending' COMMENT '状态 pending/processing/resolved/ignored',
+    handler_id VARCHAR(50) COMMENT '处理人ID',
+    handler_name VARCHAR(100) COMMENT '处理人姓名',
+    handle_time DATETIME COMMENT '处理时间',
+    handle_note TEXT COMMENT '处理备注',
+    is_upgraded TINYINT(1) DEFAULT 0 COMMENT '是否已升级',
+    upgrade_count INT DEFAULT 0 COMMENT '升级次数',
+    last_upgrade_time DATETIME COMMENT '最后升级时间',
+    work_order_id BIGINT COMMENT '关联工单ID',
+    source_prediction_id BIGINT COMMENT '来源预测记录ID',
+    silence_until DATETIME COMMENT '静默截止时间',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_status (status),
+    INDEX idx_level (alert_level),
+    INDEX idx_node (node_type, node_id),
+    INDEX idx_create_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警事件表';
+
+-- ============================================================
+-- 告警订阅管理表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_alert_subscriptions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    subscriber_type VARCHAR(20) NOT NULL COMMENT '订阅者类型 role/user/device',
+    subscriber_id VARCHAR(100) NOT NULL COMMENT '订阅者ID',
+    subscriber_name VARCHAR(200) COMMENT '订阅者名称',
+    min_alert_level INT DEFAULT 1 COMMENT '最低订阅级别',
+    alert_levels TEXT COMMENT '订阅的告警级别列表 JSON',
+    node_type VARCHAR(20) DEFAULT 'all' COMMENT '节点类型过滤',
+    node_ids TEXT COMMENT '节点ID列表 JSON',
+    notify_channels TEXT COMMENT '通知渠道 JSON',
+    notify_targets TEXT COMMENT '通知目标 JSON',
+    enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_subscriber (subscriber_type, subscriber_id),
+    INDEX idx_enabled (enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警订阅管理表';
+
+-- ============================================================
+-- 通知渠道配置表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_notification_channels (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    channel_type VARCHAR(50) NOT NULL COMMENT '渠道类型',
+    channel_name VARCHAR(200) COMMENT '渠道名称',
+    config TEXT COMMENT '渠道配置 JSON',
+    enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
+    is_default TINYINT(1) DEFAULT 0 COMMENT '是否默认渠道',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_channel_type (channel_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通知渠道配置表';
+
+-- ============================================================
+-- 通知发送日志表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_notification_logs (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    alert_id BIGINT COMMENT '关联告警ID',
+    channel_type VARCHAR(50) COMMENT '通知渠道',
+    subscriber_id VARCHAR(100) COMMENT '接收者ID',
+    subscriber_name VARCHAR(200) COMMENT '接收者名称',
+    target VARCHAR(500) COMMENT '发送目标',
+    title VARCHAR(200) COMMENT '通知标题',
+    content TEXT COMMENT '通知内容',
+    status VARCHAR(20) DEFAULT 'pending' COMMENT '发送状态',
+    error_message TEXT COMMENT '错误信息',
+    retry_count INT DEFAULT 0 COMMENT '重试次数',
+    send_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间',
+    INDEX idx_alert_id (alert_id),
+    INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通知发送日志表';
+
+-- ============================================================
+-- 工单表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_work_orders (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    order_no VARCHAR(50) UNIQUE COMMENT '工单编号',
+    alert_id BIGINT COMMENT '关联告警ID',
+    title VARCHAR(200) NOT NULL COMMENT '工单标题',
+    description TEXT COMMENT '工单描述',
+    priority VARCHAR(20) DEFAULT 'medium' COMMENT '优先级',
+    status VARCHAR(20) DEFAULT 'open' COMMENT '状态',
+    node_type VARCHAR(20) COMMENT '节点类型',
+    node_id VARCHAR(100) COMMENT '节点ID',
+    alert_level INT COMMENT '告警级别',
+    risk_score FLOAT COMMENT '风险评分',
+    assignee_id VARCHAR(50) COMMENT '处理人ID',
+    assignee_name VARCHAR(100) COMMENT '处理人姓名',
+    creator_id VARCHAR(50) COMMENT '创建人ID',
+    creator_name VARCHAR(100) COMMENT '创建人姓名',
+    due_time DATETIME COMMENT '截止时间',
+    resolve_time DATETIME COMMENT '解决时间',
+    resolve_note TEXT COMMENT '解决备注',
+    recommendations TEXT COMMENT '推荐措施 JSON',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_status (status),
+    INDEX idx_priority (priority),
+    INDEX idx_alert_id (alert_id),
+    INDEX idx_assignee (assignee_id),
+    INDEX idx_create_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='工单表';
+
+-- ============================================================
+-- 插入默认告警规则数据
+-- ============================================================
+INSERT INTO sc_alert_rules (rule_name, alert_level, node_type, min_confidence, silence_period, enable_upgrade, upgrade_minutes, upgrade_to_level, description) VALUES
+('关注级预警规则', 1, 'all', 0.7, 60, 0, 30, 2, '关注级预警，静默期60分钟，不自动升级'),
+('检查级预警规则', 2, 'all', 0.7, 30, 1, 30, 3, '检查级预警，30分钟未处理升级为紧急级'),
+('紧急级预警规则', 3, 'all', 0.7, 15, 1, 30, 4, '紧急级预警，15分钟静默期，30分钟未处理升级为故障级'),
+('故障级告警规则', 4, 'all', 0.5, 10, 0, 30, 4, '故障级告警，最高级别，静默期10分钟');
+
+-- ============================================================
+-- 插入默认通知渠道配置（示例）
+-- ============================================================
+INSERT INTO sc_notification_channels (channel_type, channel_name, config, enabled, is_default) VALUES
+('email', '邮件通知', '{"smtp_host":"smtp.example.com","smtp_port":587,"username":"alert@example.com","password":"","use_tls":true}', 1, 1),
+('sms', '短信通知', '{"api_url":"https://sms.example.com/api","api_key":""}', 1, 0),
+('webhook', 'Webhook回调', '{"url":""}', 0, 0);
+
+-- ============================================================
+-- 插入默认订阅配置（管理员角色订阅全部级别）
+-- ============================================================
+INSERT INTO sc_alert_subscriptions (subscriber_type, subscriber_id, subscriber_name, min_alert_level, alert_levels, notify_channels, notify_targets) VALUES
+('role', 'admin', '系统管理员', 1, '[1,2,3,4]', '["email"]', '{"email":["admin@example.com"]}'),
+('role', 'operator', '运维工程师', 2, '[2,3,4]', '["email","sms"]', '{"email":["ops@example.com"],"sms":["13800000000"]}'),
+('role', 'manager', '部门经理', 3, '[3,4]', '["email"]', '{"email":["manager@example.com"]}');
+
 -- 显示创建的表
 SHOW TABLES;
