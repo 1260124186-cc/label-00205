@@ -156,3 +156,77 @@ llm:
 model_version:
   max_versions: 10            # 每个模型最大保留版本数
   auto_cleanup: true          # 是否自动清理旧版本
+
+# ============================================================
+# 联邦学习配置
+# ============================================================
+federated:
+  # 是否启用联邦学习
+  enabled: true
+  
+  # 聚合策略: fedavg, weighted_avg, median, trimmed_mean, fedprox, fedopt
+  aggregation_strategy: "weighted_avg"
+  
+  # 聚合器配置
+  aggregation_config:
+    trim_ratio: 0.1           # 修剪均值比例
+    mu: 0.01                  # FedProx近端项系数
+    server_learning_rate: 1.0 # 服务器学习率
+    enable_outlier_detection: true  # 是否启用异常值检测
+    outlier_threshold: 2.0    # 异常值检测阈值（标准差倍数）
+  
+  # 隐私保护配置（全局默认，客户端可单独配置）
+  privacy_config:
+    mechanism: "none"         # none, dp, secagg, combined
+    epsilon: 1.0              # 差分隐私epsilon
+    delta: 1e-5               # 差分隐私delta
+    noise_scale: 0.1          # 噪声缩放系数
+    clip_norm: 1.0            # 梯度裁剪范数
+    num_parties: 3            # 安全聚合参与方数量
+    secret_share_threshold: 2 # 秘密共享阈值
+  
+  # 轮次配置
+  max_rounds: 100             # 最大轮次
+  round_timeout: 3600         # 轮次超时时间（秒）
+  min_clients_per_round: 2    # 每轮最少客户端数
+  
+  # 全局模型保存路径
+  save_path: "./trained_models/federated"
+  max_versions: 10            # 每个模型最大保留版本数
+  
+  # 两层架构配置
+  enable_two_level_arch: true # 是否启用全局+本地微调两层架构
+  
+  # 客户端配置
+  client_config:
+    # 更新类型: weights, gradients, difference
+    update_type: "difference"
+    
+    # 本地训练参数
+    local_epochs: 5           # 本地训练轮数
+    local_batch_size: 32      # 本地批次大小
+    local_learning_rate: 0.001 # 本地学习率
+    
+    # 本地微调参数
+    fine_tune_epochs: 3       # 微调轮数
+    fine_tune_layers:         # 需要微调的层名
+      - "output"
+      - "fc"
+    
+    # 两层架构
+    enable_two_level_arch: true
+    
+    # 数据采样
+    sample_ratio: 1.0         # 本地数据采样比例
+    
+    # 客户端隐私配置（覆盖全局配置）
+    privacy_config:
+      mechanism: "none"
+      epsilon: 1.0
+      delta: 1e-5
+      noise_scale: 0.1
+      clip_norm: 1.0
+  
+  # 客户端选择
+  enable_client_selection: false  # 是否启用客户端选择
+  client_selection_ratio: 0.8     # 每轮选择的客户端比例

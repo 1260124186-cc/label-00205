@@ -12,7 +12,7 @@ API请求和响应模型定义
 
 from datetime import datetime
 from typing import List, Optional, Any, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 # ==================== 基础模型 ====================
@@ -222,3 +222,184 @@ class StrategyConfigResponse(BaseModel):
     false_positive_threshold: Optional[float]
     false_negative_threshold: Optional[float]
     updated_at: datetime
+
+
+# ==================== 联邦学习 ====================
+
+class FederatedClientRegisterRequest(BaseModel):
+    """联邦学习客户端注册请求"""
+    client_id: str = Field(..., description="客户端/厂区ID")
+    factory_name: Optional[str] = Field(None, description="厂区名称")
+    location: Optional[str] = Field(None, description="厂区位置")
+    client_info: Optional[Dict[str, Any]] = Field(None, description="客户端附加信息")
+
+
+class FederatedClientRegisterResponse(BaseModel):
+    """联邦学习客户端注册响应"""
+    client_id: str
+    status: str
+    message: str
+    registered_at: datetime
+
+
+class FederatedGlobalModelRequest(BaseModel):
+    """获取全局模型请求"""
+    client_id: str = Field(..., description="客户端ID")
+    model_type: str = Field(..., description="模型类型: bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+
+
+class FederatedGlobalModelResponse(BaseModel):
+    """获取全局模型响应"""
+    model_type: str
+    node_id: str
+    round_id: int
+    version: Optional[int] = None
+    weights: Dict[str, Any]
+    server_time: datetime
+    enable_two_level_arch: bool = True
+    metrics: Optional[Dict[str, Any]] = None
+
+
+class FederatedUpdateUploadRequest(BaseModel):
+    """上传模型更新请求"""
+    client_id: str = Field(..., description="客户端ID")
+    model_type: str = Field(..., description="模型类型: bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+    round_id: int = Field(..., description="联邦学习轮次ID")
+    weights: Dict[str, Any] = Field(..., description="模型更新（权重或差异）")
+    num_samples: int = Field(..., description="训练样本数量")
+    metrics: Optional[Dict[str, float]] = Field(None, description="训练指标")
+    encrypted: bool = Field(False, description="是否加密")
+    encrypted_update: Optional[str] = Field(None, description="加密后的更新（Base64编码）")
+    update_type: str = Field("difference", description="更新类型: weights/gradients/difference")
+
+
+class FederatedUpdateUploadResponse(BaseModel):
+    """上传模型更新响应"""
+    client_id: str
+    round_id: int
+    status: str
+    message: str
+    received_at: datetime
+
+
+class FederatedRoundStartRequest(BaseModel):
+    """开始联邦学习轮次请求"""
+    model_type: str = Field(..., description="模型类型: bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+    expected_clients: Optional[List[str]] = Field(None, description="期望参与的客户端列表")
+
+
+class FederatedRoundStartResponse(BaseModel):
+    """开始联邦学习轮次响应"""
+    round_id: int
+    model_type: str
+    node_id: str
+    status: str
+    expected_clients: List[str]
+    started_at: datetime
+
+
+class FederatedRoundAggregateRequest(BaseModel):
+    """聚合模型更新请求"""
+    model_type: str = Field(..., description="模型类型: bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+
+
+class FederatedRoundAggregateResponse(BaseModel):
+    """聚合模型更新响应"""
+    round_id: int
+    model_type: str
+    node_id: str
+    status: str
+    message: str
+    num_clients_aggregated: int
+    version: Optional[int] = None
+    metrics: Optional[Dict[str, Any]] = None
+    aggregated_at: datetime
+
+
+class FederatedServerStatusResponse(BaseModel):
+    """联邦学习服务器状态响应"""
+    registered_clients: int
+    active_clients: int
+    total_rounds: int
+    completed_rounds: int
+    failed_rounds: int
+    aggregation_strategy: str
+    managed_models: List[str]
+    current_round: Optional[Dict[str, Any]] = None
+
+
+class FederatedModelHistoryRequest(BaseModel):
+    """获取模型历史请求"""
+    model_type: str = Field(..., description="模型类型: bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+
+
+class FederatedModelHistoryResponse(BaseModel):
+    """获取模型历史响应"""
+    model_type: str
+    node_id: str
+    history: List[Dict[str, Any]]
+
+
+class FederatedClientStatusResponse(BaseModel):
+    """客户端状态响应"""
+    client_id: str
+    factory_id: str
+    model_type: Optional[str]
+    node_id: Optional[str]
+    current_round: int
+    has_global_model: bool
+    has_local_model: bool
+    training_count: int
+    privacy_mechanism: str
+    update_type: str
+    two_level_arch_enabled: bool
+    last_update_time: Optional[datetime]
+
+
+class FederatedLocalTrainRequest(BaseModel):
+    """本地训练请求"""
+    client_id: str = Field(..., description="客户端ID")
+    model_type: str = Field(..., description="模型类型: bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+    local_epochs: Optional[int] = Field(None, description="本地训练轮数")
+    fine_tune: bool = Field(False, description="是否执行本地微调（第二层）")
+    train_data: Optional[List[Any]] = Field(None, description="训练数据（可选，自动加载）")
+    train_labels: Optional[List[int]] = Field(None, description="训练标签（可选，自动加载）")
+
+
+class FederatedLocalTrainResponse(BaseModel):
+    """本地训练响应"""
+    client_id: str
+    model_type: str
+    node_id: str
+    status: str
+    message: str
+    num_samples: int
+    training_time: float
+    metrics: Dict[str, float]
+
+
+class FederatedPrivacyConfig(BaseModel):
+    """隐私保护配置"""
+    mechanism: str = Field("none", description="隐私机制: none/dp/secagg/combined")
+    epsilon: float = Field(1.0, description="差分隐私epsilon")
+    delta: float = Field(1e-5, description="差分隐私delta")
+    noise_scale: float = Field(0.1, description="噪声缩放系数")
+    clip_norm: float = Field(1.0, description="梯度裁剪范数")
+    num_parties: int = Field(3, description="安全聚合参与方数量")
+    secret_share_threshold: int = Field(2, description="秘密共享阈值")
+
+
+class FederatedAggregatorConfig(BaseModel):
+    """聚合器配置"""
+    strategy: str = Field("weighted_avg", description="聚合策略: fedavg/weighted_avg/median/trimmed_mean/fedprox/fedopt")
+    trim_ratio: float = Field(0.1, description="修剪均值比例")
+    mu: float = Field(0.01, description="FedProx近端项系数")
+    server_learning_rate: float = Field(1.0, description="服务器学习率")
+    min_clients_per_round: int = Field(2, description="每轮最少客户端数")
+    enable_outlier_detection: bool = Field(True, description="是否启用异常值检测")

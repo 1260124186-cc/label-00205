@@ -29,7 +29,17 @@ from app.api.schemas import (
     MonthlyForecastRequest, MonthlyForecastResponse,
     TrainingRequest, TrainingResponse,
     ModelInfoResponse,
-    StrategyConfigRequest, StrategyConfigResponse
+    StrategyConfigRequest, StrategyConfigResponse,
+    FederatedClientRegisterRequest, FederatedClientRegisterResponse,
+    FederatedGlobalModelRequest, FederatedGlobalModelResponse,
+    FederatedUpdateUploadRequest, FederatedUpdateUploadResponse,
+    FederatedRoundStartRequest, FederatedRoundStartResponse,
+    FederatedRoundAggregateRequest, FederatedRoundAggregateResponse,
+    FederatedServerStatusResponse,
+    FederatedModelHistoryRequest, FederatedModelHistoryResponse,
+    FederatedClientStatusResponse,
+    FederatedLocalTrainRequest, FederatedLocalTrainResponse,
+    FederatedPrivacyConfig, FederatedAggregatorConfig
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -43,6 +53,8 @@ router = APIRouter()
 # 服务实例
 prediction_service = None
 training_service = None
+federated_server = None
+federated_clients: Dict[str, Any] = {}
 
 
 def get_prediction_service() -> PredictionService:
@@ -59,6 +71,54 @@ def get_training_service() -> TrainingService:
     if training_service is None:
         training_service = TrainingService()
     return training_service
+
+
+def get_federated_server():
+    """获取联邦学习服务器实例"""
+    global federated_server
+    if federated_server is None:
+        from app.federated import FederatedServer, ServerConfig, AggregationStrategy
+        
+        # 从配置获取参数
+        fed_config = config.get('federated', {})
+        
+        server_config = ServerConfig(
+            aggregation_strategy=AggregationStrategy(
+                fed_config.get('aggregation_strategy', 'weighted_avg')
+            ),
+            aggregation_config=fed_config.get('aggregation_config'),
+            privacy_config=fed_config.get('privacy_config'),
+            min_clients_per_round=fed_config.get('min_clients_per_round', 2),
+            enable_two_level_arch=fed_config.get('enable_two_level_arch', True),
+            save_path=fed_config.get('save_path', './trained_models/federated')
+        )
+        
+        federated_server = FederatedServer(server_config)
+    return federated_server
+
+
+def get_federated_client(client_id: str):
+    """获取或创建联邦学习客户端实例"""
+    global federated_clients
+    
+    if client_id not in federated_clients:
+        from app.federated import FederatedClient, ClientConfig, UpdateType
+        
+        # 从配置获取参数
+        fed_config = config.get('federated', {})
+        client_config_dict = fed_config.get('client_config', {})
+        
+        client_config = ClientConfig(
+            factory_id=client_id,
+            update_type=UpdateType(client_config_dict.get('update_type', 'difference')),
+            local_epochs=client_config_dict.get('local_epochs', 5),
+            enable_two_level_arch=client_config_dict.get('enable_two_level_arch', True),
+            privacy_config=client_config_dict.get('privacy_config')
+        )
+        
+        federated_clients[client_id] = FederatedClient(client_id, client_config)
+    
+    return federated_clients[client_id]
 
 
 # ==================== 健康检查 ====================
@@ -439,4 +499,541 @@ async def batch_predict(
         
     except Exception as e:
         logger.error(f"批量预测启动失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 联邦学习 - 服务器端 ====================
+
+@router.post(
+    "/federated/client/register",
+    response_model=FederatedClientRegisterResponse,
+    tags=["联邦学习"],
+    summary="注册联邦学习客户端"
+)
+async def register_federated_client(request: FederatedClientRegisterRequest):
+    """
+    注册联邦学习客户端（厂区）
+    
+    各厂区在参与联邦学习前需要先注册。
+    """
+    try:
+        server = get_federated_server()
+        
+        client_info = {
+            'factory_name': request.factory_name,
+            'location': request.location,
+            **(request.client_info or {})
+        }
+        
+        server.register_client(request.client_id, client_info)
+        
+        return FederatedClientRegisterResponse(
+            client_id=request.client_id,
+            status="success",
+            message=f"客户端 {request.client_id} 注册成功",
+            registered_at=datetime.now()
+        )
+        
+    except Exception as e:
+        logger.error(f"客户端注册失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/federated/server/status",
+    response_model=FederatedServerStatusResponse,
+    tags=["联邦学习"],
+    summary="获取联邦学习服务器状态"
+)
+async def get_federated_server_status():
+    """获取联邦学习服务器的整体状态"""
+    try:
+        server = get_federated_server()
+        status = server.get_server_status()
+        
+        return FederatedServerStatusResponse(**status)
+        
+    except Exception as e:
+        logger.error(f"获取服务器状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/federated/round/start",
+    response_model=FederatedRoundStartResponse,
+    tags=["联邦学习"],
+    summary="开始联邦学习轮次"
+)
+async def start_federated_round(request: FederatedRoundStartRequest):
+    """
+    开始新的联邦学习轮次
+    
+    由中心服务器启动，指定要训练的模型和参与的客户端。
+    """
+    try:
+        server = get_federated_server()
+        
+        round_info = server.start_round(
+            model_type=request.model_type,
+            node_id=request.node_id,
+            expected_clients=request.expected_clients
+        )
+        
+        return FederatedRoundStartResponse(
+            round_id=round_info.round_id,
+            model_type=round_info.model_type,
+            node_id=round_info.node_id,
+            status=round_info.status.value,
+            expected_clients=round_info.expected_clients,
+            started_at=datetime.fromtimestamp(round_info.start_time)
+        )
+        
+    except Exception as e:
+        logger.error(f"开始联邦学习轮次失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/federated/round/status",
+    tags=["联邦学习"],
+    summary="获取当前轮次状态"
+)
+async def get_federated_round_status():
+    """获取当前进行中的联邦学习轮次状态"""
+    try:
+        server = get_federated_server()
+        status = server.get_current_round_status()
+        
+        if status is None:
+            return {"status": "no_active_round", "message": "没有进行中的轮次"}
+        
+        return status
+        
+    except Exception as e:
+        logger.error(f"获取轮次状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/federated/round/aggregate",
+    response_model=FederatedRoundAggregateResponse,
+    tags=["联邦学习"],
+    summary="聚合并更新全局模型"
+)
+async def aggregate_federated_updates(request: FederatedRoundAggregateRequest):
+    """
+    聚合各客户端的模型更新，生成新的全局模型
+    
+    在收集到足够的客户端更新后调用此接口。
+    """
+    try:
+        server = get_federated_server()
+        
+        aggregated = server.aggregate_updates()
+        
+        if aggregated is None:
+            raise HTTPException(status_code=400, detail="聚合条件不满足或聚合失败")
+        
+        current_round = server.round_manager.round_history[-1]
+        
+        return FederatedRoundAggregateResponse(
+            round_id=current_round.round_id,
+            model_type=request.model_type,
+            node_id=request.node_id,
+            status="success",
+            message=f"成功聚合 {current_round.metrics.get('num_clients', 0)} 个客户端的更新",
+            num_clients_aggregated=current_round.metrics.get('num_clients', 0),
+            version=server.model_manager.get_latest_version(
+                request.model_type, request.node_id
+            ).version,
+            metrics=current_round.metrics,
+            aggregated_at=datetime.now()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"聚合更新失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/federated/model/history/{model_type}/{node_id}",
+    response_model=FederatedModelHistoryResponse,
+    tags=["联邦学习"],
+    summary="获取全局模型历史"
+)
+async def get_federated_model_history(model_type: str, node_id: str):
+    """
+    获取全局模型的版本历史和性能指标
+    """
+    try:
+        server = get_federated_server()
+        history = server.get_model_history(model_type, node_id)
+        
+        return FederatedModelHistoryResponse(
+            model_type=model_type,
+            node_id=node_id,
+            history=history
+        )
+        
+    except Exception as e:
+        logger.error(f"获取模型历史失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 联邦学习 - 客户端端 ====================
+
+@router.post(
+    "/federated/client/model/download",
+    response_model=FederatedGlobalModelResponse,
+    tags=["联邦学习"],
+    summary="下载全局模型"
+)
+async def download_global_model(request: FederatedGlobalModelRequest):
+    """
+    客户端下载全局模型
+    
+    各厂区在本地训练前下载最新的全局模型。
+    """
+    try:
+        server = get_federated_server()
+        
+        model_data = server.get_global_model_for_client(
+            client_id=request.client_id,
+            model_type=request.model_type,
+            node_id=request.node_id
+        )
+        
+        # 获取最新版本号
+        latest_version = server.model_manager.get_latest_version(
+            request.model_type, request.node_id
+        )
+        
+        return FederatedGlobalModelResponse(
+            model_type=model_data['model_type'],
+            node_id=model_data['node_id'],
+            round_id=model_data['round_id'],
+            version=latest_version.version if latest_version else None,
+            weights=model_data['weights'],
+            server_time=datetime.fromtimestamp(model_data['server_time']),
+            enable_two_level_arch=model_data['enable_two_level_arch'],
+            metrics=latest_version.metrics if latest_version else None
+        )
+        
+    except Exception as e:
+        logger.error(f"下载全局模型失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/federated/client/update/upload",
+    response_model=FederatedUpdateUploadResponse,
+    tags=["联邦学习"],
+    summary="上传模型更新"
+)
+async def upload_model_update(request: FederatedUpdateUploadRequest):
+    """
+    客户端上传本地训练后的模型更新
+    
+    可以上传完整权重、梯度或权重差异。
+    """
+    try:
+        server = get_federated_server()
+        
+        update_data = {
+            'client_id': request.client_id,
+            'model_type': request.model_type,
+            'node_id': request.node_id,
+            'round_id': request.round_id,
+            'weights': request.weights,
+            'num_samples': request.num_samples,
+            'metrics': request.metrics or {},
+            'encrypted': request.encrypted,
+            'encrypted_update': request.encrypted_update
+        }
+        
+        success = server.receive_client_update(update_data)
+        
+        if not success:
+            raise HTTPException(status_code=400, detail="无法接收更新，请检查轮次状态")
+        
+        return FederatedUpdateUploadResponse(
+            client_id=request.client_id,
+            round_id=request.round_id,
+            status="success",
+            message="模型更新已成功接收",
+            received_at=datetime.now()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"上传模型更新失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/federated/client/model/distribute/{model_type}/{node_id}",
+    tags=["联邦学习"],
+    summary="分发最新全局模型"
+)
+async def distribute_global_model(model_type: str, node_id: str):
+    """
+    分发最新聚合后的全局模型给所有客户端
+    """
+    try:
+        server = get_federated_server()
+        
+        model_data = server.distribute_model(model_type, node_id)
+        
+        return {
+            "status": "success",
+            "message": f"模型已准备好分发，version={model_data['version']}",
+            "model_type": model_type,
+            "node_id": node_id,
+            "version": model_data['version'],
+            "round_id": model_data['round_id'],
+            "num_clients_included": model_data['num_clients'],
+            "metrics": model_data['metrics'],
+            "enable_two_level_arch": model_data['enable_two_level_arch'],
+            "distributed_at": datetime.now()
+        }
+        
+    except Exception as e:
+        logger.error(f"分发模型失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 联邦学习 - 本地训练 ====================
+
+@router.get(
+    "/federated/client/status/{client_id}",
+    response_model=FederatedClientStatusResponse,
+    tags=["联邦学习"],
+    summary="获取客户端状态"
+)
+async def get_federated_client_status(client_id: str):
+    """获取指定客户端的状态"""
+    try:
+        client = get_federated_client(client_id)
+        status = client.get_status()
+        
+        last_update = None
+        if status.get('last_update_time'):
+            last_update = datetime.fromtimestamp(status['last_update_time'])
+        
+        return FederatedClientStatusResponse(
+            client_id=client_id,
+            factory_id=status['factory_id'],
+            model_type=status.get('model_type'),
+            node_id=status.get('node_id'),
+            current_round=status.get('current_round', 0),
+            has_global_model=status.get('has_global_model', False),
+            has_local_model=status.get('has_local_model', False),
+            training_count=status.get('training_count', 0),
+            privacy_mechanism=status.get('privacy_mechanism', 'none'),
+            update_type=status.get('update_type', 'difference'),
+            two_level_arch_enabled=status.get('two_level_arch_enabled', True),
+            last_update_time=last_update
+        )
+        
+    except Exception as e:
+        logger.error(f"获取客户端状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/federated/client/train/local",
+    response_model=FederatedLocalTrainResponse,
+    tags=["联邦学习"],
+    summary="执行本地训练"
+)
+async def local_train_federated(
+    request: FederatedLocalTrainRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    在客户端执行本地训练
+    
+    支持全量训练和本地微调（两层架构的第二层）。
+    """
+    try:
+        client = get_federated_client(request.client_id)
+        
+        # 准备数据
+        train_data = None
+        train_labels = None
+        if request.train_data:
+            train_data = np.array(request.train_data)
+        if request.train_labels:
+            train_labels = np.array(request.train_labels)
+        
+        # 如果有自定义的本地训练轮数
+        if request.local_epochs:
+            client.config.local_epochs = request.local_epochs
+        
+        # 执行训练
+        if request.fine_tune:
+            # 本地微调（第二层）
+            result = client.fine_tune(
+                model_type=request.model_type,
+                node_id=request.node_id,
+                fine_tune_data=train_data,
+                fine_tune_labels=train_labels
+            )
+        else:
+            # 全量本地训练（第一层）
+            result = client.local_train(
+                model_type=request.model_type,
+                node_id=request.node_id,
+                train_data=train_data,
+                train_labels=train_labels
+            )
+        
+        return FederatedLocalTrainResponse(
+            client_id=request.client_id,
+            model_type=request.model_type,
+            node_id=request.node_id,
+            status="success",
+            message=f"本地训练完成，样本数: {result.num_samples}",
+            num_samples=result.num_samples,
+            training_time=result.training_time,
+            metrics=result.metrics
+        )
+        
+    except Exception as e:
+        logger.error(f"本地训练失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/federated/client/update/get/{client_id}",
+    tags=["联邦学习"],
+    summary="获取客户端模型更新（用于上传）"
+)
+async def get_client_model_update(client_id: str, apply_privacy: bool = True):
+    """
+    获取客户端的模型更新，准备上传到服务器
+    """
+    try:
+        client = get_federated_client(client_id)
+        
+        update = client.get_model_update(apply_privacy=apply_privacy)
+        
+        # 转换为可序列化格式
+        weights_np = {k: v.cpu().numpy().tolist() for k, v in update.weights.items()}
+        
+        response = {
+            "client_id": update.client_id,
+            "round_id": update.round_id,
+            "weights": weights_np,
+            "num_samples": update.num_samples,
+            "metrics": update.metrics,
+            "timestamp": datetime.fromtimestamp(update.timestamp),
+            "update_type": client.config.update_type.value,
+            "privacy_applied": apply_privacy and client.privacy_engine is not None
+        }
+        
+        if update.encrypted_update:
+            import base64
+            response["encrypted"] = True
+            response["encrypted_update"] = base64.b64encode(update.encrypted_update).decode()
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"获取模型更新失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 联邦学习 - 配置管理 ====================
+
+@router.post(
+    "/federated/config/privacy",
+    tags=["联邦学习"],
+    summary="配置隐私保护参数"
+)
+async def configure_privacy(
+    client_id: str,
+    privacy_config: FederatedPrivacyConfig
+):
+    """
+    配置客户端的隐私保护参数
+    
+    支持差分隐私、安全聚合等机制。
+    """
+    try:
+        client = get_federated_client(client_id)
+        
+        from app.federated.privacy import create_privacy_engine
+        
+        privacy_config_dict = {
+            'mechanism': privacy_config.mechanism,
+            'epsilon': privacy_config.epsilon,
+            'delta': privacy_config.delta,
+            'noise_scale': privacy_config.noise_scale,
+            'clip_norm': privacy_config.clip_norm,
+            'num_parties': privacy_config.num_parties,
+            'secret_share_threshold': privacy_config.secret_share_threshold
+        }
+        
+        client.privacy_engine = create_privacy_engine(privacy_config_dict)
+        client.config.privacy_config = privacy_config_dict
+        
+        return {
+            "status": "success",
+            "message": f"隐私配置已更新，机制: {privacy_config.mechanism}",
+            "client_id": client_id,
+            "privacy_mechanism": privacy_config.mechanism,
+            "configured_at": datetime.now()
+        }
+        
+    except Exception as e:
+        logger.error(f"配置隐私参数失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/federated/config/aggregator",
+    tags=["联邦学习"],
+    summary="配置聚合器参数"
+)
+async def configure_aggregator(aggregator_config: FederatedAggregatorConfig):
+    """
+    配置服务器端的聚合器参数
+    
+    支持FedAvg、加权平均、中位数、修剪均值等聚合策略。
+    """
+    try:
+        server = get_federated_server()
+        
+        from app.federated.aggregator import create_aggregator, AggregationStrategy
+        
+        agg_config_dict = {
+            'trim_ratio': aggregator_config.trim_ratio,
+            'mu': aggregator_config.mu,
+            'server_learning_rate': aggregator_config.server_learning_rate,
+            'min_clients_ratio': aggregator_config.min_clients_per_round / max(1, len(server.registered_clients)),
+            'enable_outlier_detection': aggregator_config.enable_outlier_detection
+        }
+        
+        server.aggregator = create_aggregator(
+            strategy=AggregationStrategy(aggregator_config.strategy),
+            config=agg_config_dict
+        )
+        
+        server.config.aggregation_strategy = AggregationStrategy(aggregator_config.strategy)
+        server.config.aggregation_config = agg_config_dict
+        server.config.min_clients_per_round = aggregator_config.min_clients_per_round
+        
+        return {
+            "status": "success",
+            "message": f"聚合器配置已更新，策略: {aggregator_config.strategy}",
+            "strategy": aggregator_config.strategy,
+            "configured_at": datetime.now()
+        }
+        
+    except Exception as e:
+        logger.error(f"配置聚合器失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
