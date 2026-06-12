@@ -50,6 +50,9 @@ from app.api.schemas import (
     WorkOrderAssignRequest, WorkOrderResolveRequest,
     WorkOrderStatusUpdateRequest, WorkOrderListResponse,
     AlertUpgradeTriggerResponse,
+    AuditRecordResponse, AuditListResponse,
+    AuditRetentionUpdateRequest, AuditCleanupResponse,
+    AuditExportRequest, ExplainabilityReportResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -1883,4 +1886,253 @@ async def resolve_work_order(work_order_id: int, request: WorkOrderResolveReques
         raise
     except Exception as e:
         logger.error(f"解决工单失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 辅助函数: 审计 ====================
+
+def _audit_to_dict(record) -> Dict[str, Any]:
+    """将审计 ORM 对象转为响应字典"""
+    data = {
+        'id': record.id,
+        'prediction_id': record.prediction_id,
+        'node_type': record.node_type,
+        'node_id': record.node_id,
+        'input_hash': record.input_hash,
+        'model_version': record.model_version,
+        'model_type': record.model_type,
+        'retention_years': record.retention_years,
+        'expire_time': record.expire_time,
+        'create_time': record.create_time,
+        'strategy_version': record.strategy_version,
+        'strategy_type': record.strategy_type,
+    }
+    for field, attr in [
+        ('feature_summary', record.feature_summary),
+        ('intermediate_results', record.intermediate_results),
+        ('final_decision', record.final_decision),
+        ('explainability', record.explainability),
+    ]:
+        if attr:
+            try:
+                data[field] = json.loads(attr)
+            except Exception:
+                data[field] = None
+        else:
+            data[field] = None
+    return data
+
+
+# ==================== 合规审计管理 ====================
+
+@router.get(
+    "/audit/records",
+    response_model=AuditListResponse,
+    tags=["合规审计"],
+    summary="查询审计记录列表"
+)
+async def list_audit_records(
+    node_type: Optional[str] = Query(None, description="节点类型 bolt/flange"),
+    node_id: Optional[str] = Query(None, description="节点ID"),
+    model_version: Optional[str] = Query(None, description="模型版本"),
+    start_time: Optional[datetime] = Query(None, description="起始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """查询预测审计记录列表"""
+    try:
+        from app.services.audit import AuditService
+        service = AuditService()
+        records = service.query_audits(
+            node_type=node_type, node_id=node_id,
+            model_version=model_version,
+            start_time=start_time, end_time=end_time,
+            limit=limit, offset=offset,
+        )
+        items = [_audit_to_dict(r) for r in records]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询审计记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/audit/records/{audit_id}",
+    response_model=AuditRecordResponse,
+    tags=["合规审计"],
+    summary="获取审计记录详情"
+)
+async def get_audit_record(audit_id: int):
+    """获取单条审计记录详情"""
+    try:
+        from app.services.audit import AuditService
+        service = AuditService()
+        record = service.get_audit(audit_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="审计记录不存在")
+        return _audit_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取审计记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/audit/records/{audit_id}/retention",
+    response_model=AuditRecordResponse,
+    tags=["合规审计"],
+    summary="更新审计记录保留年限"
+)
+async def update_audit_retention(audit_id: int, request: AuditRetentionUpdateRequest):
+    """更新审计记录的保留年限（可配置 N 年保留）"""
+    try:
+        from app.services.audit import AuditService
+        service = AuditService()
+        record = service.update_retention(audit_id, request.retention_years)
+        if not record:
+            raise HTTPException(status_code=404, detail="审计记录不存在")
+        return _audit_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新保留年限失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/audit/cleanup",
+    response_model=AuditCleanupResponse,
+    tags=["合规审计"],
+    summary="清理过期审计记录"
+)
+async def cleanup_expired_audits():
+    """
+    清理已过期的审计记录
+
+    根据每条记录的 expire_time 判断是否过期，自动删除。
+    """
+    try:
+        from app.services.audit import AuditService
+        service = AuditService()
+        count = service.cleanup_expired()
+        return {
+            "cleaned_count": count,
+            "message": f"已清理 {count} 条过期审计记录",
+        }
+    except Exception as e:
+        logger.error(f"清理过期审计记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/audit/export",
+    tags=["合规审计"],
+    summary="导出审计包"
+)
+async def export_audit_package(request: AuditExportRequest):
+    """
+    按时间范围导出审计包
+
+    支持 CSV 和 PDF 格式:
+    - CSV: 返回纯文本 CSV 数据
+    - PDF: 返回 HTML 格式（可转 PDF）
+    """
+    try:
+        from app.services.audit import ExportService
+        service = ExportService()
+
+        if request.start_time >= request.end_time:
+            raise HTTPException(
+                status_code=400, detail="起始时间必须早于结束时间"
+            )
+
+        if request.format == 'csv':
+            csv_content = service.export_csv(
+                start_time=request.start_time,
+                end_time=request.end_time,
+                node_type=request.node_type,
+                node_id=request.node_id,
+            )
+            from fastapi.responses import PlainTextResponse
+            filename = (
+                f"audit_{request.start_time.strftime('%Y%m%d')}_"
+                f"{request.end_time.strftime('%Y%m%d')}.csv"
+            )
+            return PlainTextResponse(
+                content=csv_content,
+                media_type='text/csv',
+                headers={
+                    'Content-Disposition': f'attachment; filename="{filename}"'
+                },
+            )
+        elif request.format == 'pdf':
+            html_content = service.generate_pdf_html(
+                start_time=request.start_time,
+                end_time=request.end_time,
+                node_type=request.node_type,
+                node_id=request.node_id,
+            )
+            from fastapi.responses import HTMLResponse
+            return HTMLResponse(content=html_content)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的导出格式: {request.format}",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"导出审计包失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 可解释性报告 ====================
+
+@router.get(
+    "/audit/records/{audit_id}/explainability",
+    response_model=ExplainabilityReportResponse,
+    tags=["合规审计"],
+    summary="获取可解释性报告"
+)
+async def get_explainability_report(audit_id: int):
+    """
+    获取指定审计记录的可解释性报告
+
+    包含:
+    - LSTM 注意力权重
+    - 关键时间步
+    - 风险因子分解
+    - 规则命中项
+    """
+    try:
+        from app.services.audit import AuditService, ExplainabilityService
+        audit_service = AuditService()
+        explain_service = ExplainabilityService()
+
+        record = audit_service.get_audit(audit_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="审计记录不存在")
+
+        report = explain_service.get_explainability_for_audit(record)
+        if not report:
+            raise HTTPException(
+                status_code=404, detail="该记录无可解释性报告"
+            )
+
+        return {
+            'prediction_id': record.prediction_id,
+            'attention_weights': report.get('attention_weights'),
+            'key_timesteps': report.get('key_timesteps'),
+            'risk_factor_decomposition': report.get(
+                'risk_factor_decomposition'
+            ),
+            'rule_hits': report.get('rule_hits'),
+            'strategy_adjustment': report.get('strategy_adjustment'),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取可解释性报告失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

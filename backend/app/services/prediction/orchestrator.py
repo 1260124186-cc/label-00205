@@ -2,7 +2,7 @@
 预测编排器模块
 
 按流水线方式组织预测流程：
-    数据预处理 → 模型推断 → 风险评估 → 预警策略 → 结果持久化
+    数据预处理 → 模型推断 → 风险评估 → 预警策略 → 审计快照 → 结果持久化
 
 编排器本身不包含具体实现，而是通过组合以下组件完成：
 - DataPreprocessor / FeatureEngineer: 数据预处理
@@ -12,21 +12,23 @@
 - ProphetForecaster: 月度趋势预测
 - WarningStrategyPolicy: 预警策略
 - PredictionRepository: DB 读写
+- AuditService / ExplainabilityService: 合规审计与可解释性
 """
 
 import numpy as np
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from loguru import logger
 
 from app.models.bolt_lstm import BoltLSTMModel, STATUS_LABELS
 from app.models.flange_attention import FlangeAttentionModel
-from app.models.risk_model import BayesianRiskModel
+from app.models.risk_model import BayesianRiskModel, RiskAssessment
 from app.models.prophet_forecaster import ProphetForecaster
 from app.services.preprocessing import DataPreprocessor
 from app.services.feature_engineering import FeatureEngineer
 from app.services.prediction.rule_classifier import RuleBasedClassifier
 from app.services.prediction.warning_strategy import WarningStrategyPolicy
 from app.services.prediction.repository import PredictionRepository
+from app.core.model_version import version_manager
 
 
 class PredictionOrchestrator:
@@ -107,7 +109,7 @@ class PredictionOrchestrator:
         """
         螺栓状态预测（完整流水线）
 
-        流程: 预处理 → 模型/规则 → 风险评估 → 预警策略 → 持久化
+        流程: 预处理 → 模型/规则 → 风险评估 → 预警策略 → 审计快照 → 持久化
 
         Args:
             bolt_id: 螺栓ID
@@ -120,6 +122,11 @@ class PredictionOrchestrator:
         """
         logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}")
 
+        original_status_code = 0
+        original_status = ''
+        model_type = 'rule'
+        probs = None
+
         # Step 1: 数据预处理
         processed = self.preprocessor.process(
             data,
@@ -130,35 +137,39 @@ class PredictionOrchestrator:
 
         # Step 2: 模型推断（模型未训练则规则兜底）
         model = self.get_bolt_model(bolt_id)
+        model_version = 'unknown'
         if model.is_trained:
-            status_code, confidence, probs = model.predict(
+            model_version = self._get_model_version('bolt', bolt_id)
+            original_status_code, confidence, probs = model.predict(
                 processed.data,
                 return_proba=True,
             )
+            model_type = 'lstm'
         else:
-            status_code, confidence, probs = self.rule_classifier.predict(data)
+            original_status_code, confidence, probs = self.rule_classifier.predict(data)
+            model_type = 'rule'
 
-        status = STATUS_LABELS.get(status_code, '未知')
+        original_status = STATUS_LABELS.get(original_status_code, '未知')
 
         # Step 3: 风险评估
         risk_assessment = self.risk_model.assess_risk(
             data,
             lstm_probs=probs,
-            lstm_class=status_code,
+            lstm_class=original_status_code,
         )
 
         # Step 4: 应用预警策略
-        status_code, status = self.warning_policy.apply(
-            status_code, status, confidence
+        final_status_code, final_status = self.warning_policy.apply(
+            original_status_code, original_status, confidence
         )
 
         # 推荐措施（优先用模型建议，兜底使用风险评估建议）
-        recommendations = model.get_recommendation(status_code, confidence)
+        recommendations = model.get_recommendation(final_status_code, confidence)
 
         result = {
             'bolt_id': bolt_id,
-            'status': status,
-            'status_code': status_code,
+            'status': final_status,
+            'status_code': final_status_code,
             'confidence': float(confidence),
             'risk_score': float(risk_assessment.score),
             'risk_level': risk_assessment.level.value,
@@ -167,11 +178,31 @@ class PredictionOrchestrator:
             'recent_time': timestamps[-1] if timestamps else None,
         }
 
-        # Step 5: 持久化
+        # Step 5: 审计快照
+        try:
+            self._record_audit_snapshot(
+                node_type='bolt',
+                node_id=bolt_id,
+                input_data=data,
+                processed_data=processed.data,
+                model_version=model_version,
+                model_type=model_type,
+                original_status_code=original_status_code,
+                confidence=float(confidence),
+                probs=probs,
+                risk_assessment=risk_assessment,
+                final_status_code=final_status_code,
+                final_status=final_status,
+                recommendations=risk_assessment.recommendations,
+            )
+        except Exception as e:
+            logger.warning(f"螺栓 {bolt_id} 审计快照记录异常: {e}")
+
+        # Step 6: 持久化
         if save_to_db:
             self.repository.save_bolt_prediction(bolt_id, result)
 
-        # Step 6: 告警评估
+        # Step 7: 告警评估
         try:
             self._evaluate_alert(
                 node_type='bolt',
@@ -181,7 +212,7 @@ class PredictionOrchestrator:
         except Exception as e:
             logger.warning(f"螺栓 {bolt_id} 告警评估异常: {e}")
 
-        logger.info(f"螺栓预测完成: {bolt_id} -> {status}")
+        logger.info(f"螺栓预测完成: {bolt_id} -> {final_status}")
         return result
 
     # ---------- 法兰面预测 ----------
@@ -195,6 +226,8 @@ class PredictionOrchestrator:
         """
         法兰面状态预测（完整流水线）
 
+        流程: 预处理 → 模型/规则 → 风险评估 → 预警策略 → 审计快照 → 持久化
+
         Args:
             flange_id: 法兰面ID
             multi_bolt_data: 多螺栓数据列表
@@ -204,6 +237,9 @@ class PredictionOrchestrator:
             预测结果字典
         """
         logger.info(f"开始法兰面预测: {flange_id}, 螺栓数: {len(multi_bolt_data)}")
+
+        model_type = 'rule'
+        attention = None
 
         # Step 1: 预处理每个螺栓
         processed_bolts = []
@@ -218,35 +254,40 @@ class PredictionOrchestrator:
 
         # Step 2: 模型推断（模型未训练则规则聚合兜底）
         model = self.get_flange_model(flange_id)
+        model_version = 'unknown'
         if model.is_trained:
-            status_code, confidence, attention = model.predict(
+            model_version = self._get_model_version('flange', flange_id)
+            original_status_code, confidence, attention = model.predict(
                 processed_bolts,
                 return_attention=True,
             )
+            model_type = 'attention'
         else:
-            status_code, confidence = self.rule_classifier.aggregate_predictions(
+            original_status_code, confidence = self.rule_classifier.aggregate_predictions(
                 multi_bolt_data
             )
             attention = None
 
-        status = STATUS_LABELS.get(status_code, '未知')
+        original_status = STATUS_LABELS.get(original_status_code, '未知')
 
         # Step 3: 风险评估（使用所有螺栓数据拼接）
         all_data = np.concatenate(multi_bolt_data)
-        risk_assessment = self.risk_model.assess_risk(all_data, lstm_class=status_code)
+        risk_assessment = self.risk_model.assess_risk(
+            all_data, lstm_class=original_status_code
+        )
 
         # Step 4: 应用预警策略
-        status_code, status = self.warning_policy.apply(
-            status_code, status, confidence
+        final_status_code, final_status = self.warning_policy.apply(
+            original_status_code, original_status, confidence
         )
 
         # 推荐措施
-        recommendations = model.get_recommendation(status_code, confidence)
+        recommendations = model.get_recommendation(final_status_code, confidence)
 
         result = {
             'flange_id': flange_id,
-            'status': status,
-            'status_code': status_code,
+            'status': final_status,
+            'status_code': final_status_code,
             'confidence': float(confidence),
             'risk_score': float(risk_assessment.score),
             'risk_level': risk_assessment.level.value,
@@ -255,11 +296,33 @@ class PredictionOrchestrator:
             'recommendations': risk_assessment.recommendations,
         }
 
-        # Step 5: 持久化
+        # Step 5: 审计快照
+        try:
+            self._record_audit_snapshot(
+                node_type='flange',
+                node_id=flange_id,
+                input_data=all_data,
+                processed_data=None,
+                model_version=model_version,
+                model_type=model_type,
+                original_status_code=original_status_code,
+                confidence=float(confidence),
+                probs=None,
+                risk_assessment=risk_assessment,
+                final_status_code=final_status_code,
+                final_status=final_status,
+                recommendations=risk_assessment.recommendations,
+                attention_weights=attention,
+                multi_bolt_data=multi_bolt_data,
+            )
+        except Exception as e:
+            logger.warning(f"法兰面 {flange_id} 审计快照记录异常: {e}")
+
+        # Step 6: 持久化
         if save_to_db:
             self.repository.save_flange_prediction(flange_id, result)
 
-        # Step 6: 告警评估
+        # Step 7: 告警评估
         try:
             self._evaluate_alert(
                 node_type='flange',
@@ -269,7 +332,7 @@ class PredictionOrchestrator:
         except Exception as e:
             logger.warning(f"法兰面 {flange_id} 告警评估异常: {e}")
 
-        logger.info(f"法兰面预测完成: {flange_id} -> {status}")
+        logger.info(f"法兰面预测完成: {flange_id} -> {final_status}")
         return result
 
     # ---------- 风险评估（独立接口） ----------
@@ -399,6 +462,124 @@ class PredictionOrchestrator:
                 logger.error(f"法兰面 {flange_id} 预测失败: {e}")
 
         logger.info(f"批量法兰面预测完成，共 {len(flange_ids)} 个")
+
+    # ---------- 审计快照 ----------
+
+    @staticmethod
+    def _get_model_version(model_type: str, node_id: str) -> str:
+        """
+        获取当前活动模型版本号
+        """
+        try:
+            version = version_manager.get_version(
+                f"{model_type}_{node_id}"
+            )
+            if version:
+                return version.version
+        except Exception:
+            pass
+        return 'unversioned'
+
+    def _record_audit_snapshot(
+        self,
+        node_type: str,
+        node_id: str,
+        input_data: np.ndarray,
+        processed_data: Optional[np.ndarray],
+        model_version: str,
+        model_type: str,
+        original_status_code: int,
+        confidence: float,
+        probs: Optional[np.ndarray],
+        risk_assessment: RiskAssessment,
+        final_status_code: int,
+        final_status: str,
+        recommendations: List[str],
+        attention_weights: Optional[np.ndarray] = None,
+        multi_bolt_data: Optional[List[np.ndarray]] = None,
+    ) -> None:
+        """
+        记录预测审计快照
+
+        收集完整的预测上下文，包括输入哈希、模型版本、
+        特征摘要、中间结果、最终决策、策略版本、可解释性报告。
+        """
+        from app.services.audit import AuditService, ExplainabilityService
+
+        audit_service = AuditService()
+        explain_service = ExplainabilityService()
+
+        strategy_result = (final_status_code, final_status)
+        if node_type == 'bolt':
+            explain_report = explain_service.generate_bolt_explainability(
+                data=input_data,
+                processed_data=processed_data,
+                model_output=None,
+                risk_assessment=risk_assessment,
+                status_code=original_status_code,
+                confidence=confidence,
+                probs=probs,
+                strategy_result=strategy_result,
+            )
+        else:
+            explain_report = explain_service.generate_flange_explainability(
+                multi_bolt_data=multi_bolt_data or [input_data],
+                attention_weights=attention_weights,
+                model_output=None,
+                risk_assessment=risk_assessment,
+                status_code=original_status_code,
+                confidence=confidence,
+                strategy_result=strategy_result,
+            )
+
+        intermediate_results = {
+            'preprocessing': {
+                'original_count': int(len(input_data)),
+                'processed_count': (
+                    int(len(processed_data)) if processed_data is not None else None
+                ),
+            },
+            'model_raw_output': {
+                'original_status_code': original_status_code,
+                'original_status': STATUS_LABELS.get(original_status_code, '未知'),
+                'model_type': model_type,
+            },
+            'risk_assessment': {
+                'score': float(risk_assessment.score),
+                'level': risk_assessment.level.value,
+                'factors': risk_assessment.factors,
+                'confidence': float(risk_assessment.confidence),
+            },
+        }
+
+        final_decision = {
+            'status_code': final_status_code,
+            'status': final_status,
+            'confidence': confidence,
+            'risk_score': float(risk_assessment.score),
+            'risk_level': risk_assessment.level.value,
+            'diagnosis': risk_assessment.diagnosis,
+            'recommendations': recommendations,
+        }
+
+        strategy_version = f"v{self.warning_policy.strategy_type}"
+        if self.warning_policy.strategy_type == 1:
+            strategy_version += f"_threshold_{self.warning_policy.strategy_1_threshold}"
+        else:
+            strategy_version += f"_threshold_{self.warning_policy.strategy_2_threshold}"
+
+        audit_service.record_prediction(
+            node_type=node_type,
+            node_id=node_id,
+            input_data=input_data,
+            model_version=model_version,
+            model_type=model_type,
+            intermediate_results=intermediate_results,
+            final_decision=final_decision,
+            strategy_version=strategy_version,
+            strategy_type=self.warning_policy.strategy_type,
+            explainability=explain_report,
+        )
 
     # ---------- 告警评估 ----------
 

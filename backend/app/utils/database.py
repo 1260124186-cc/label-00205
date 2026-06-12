@@ -448,6 +448,41 @@ class WorkOrder(Base):
     )
 
 
+class PredictionAudit(Base):
+    """
+    预测审计快照表模型
+
+    对应数据库表: sc_prediction_audit
+    每次预测完整快照：输入哈希、模型版本、特征摘要、中间结果、最终决策、策略版本。
+    保留 N 年可配置。
+    """
+    __tablename__ = 'sc_prediction_audit'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    prediction_id = Column(String(64), nullable=False, comment='预测唯一ID (UUID)')
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    node_id = Column(String(100), nullable=False, comment='节点ID')
+    input_hash = Column(String(64), comment='输入数据SHA256哈希')
+    model_version = Column(String(50), comment='模型版本号')
+    model_type = Column(String(20), comment='模型类型 lstm/rule/attention')
+    feature_summary = Column(Text, comment='特征摘要 JSON: mean/std/min/max/count')
+    intermediate_results = Column(Text, comment='中间结果 JSON: 预处理/模型原始输出/风险评估')
+    final_decision = Column(Text, comment='最终决策 JSON: status_code/status/confidence/risk_score')
+    strategy_version = Column(String(50), comment='预警策略版本')
+    strategy_type = Column(Integer, comment='策略类型 1=应报尽报 2=精准报警')
+    explainability = Column(Text, comment='可解释性报告 JSON: attention/key_timesteps/factors/rules')
+    retention_years = Column(Integer, default=3, comment='保留年限')
+    expire_time = Column(DateTime, comment='过期时间 (create_time + retention_years)')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_audit_node', 'node_type', 'node_id'),
+        Index('idx_audit_time', 'create_time'),
+        Index('idx_audit_expire', 'expire_time'),
+        Index('idx_audit_model_version', 'model_version'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类

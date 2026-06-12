@@ -696,3 +696,66 @@ class AlertUpgradeTriggerResponse(BaseModel):
     upgraded_count: int
     message: str
 
+
+# ============================================================
+# 合规审计与模型可解释性
+# ============================================================
+
+class AuditRecordResponse(BaseModel):
+    """审计记录响应"""
+    id: int
+    prediction_id: str
+    node_type: str
+    node_id: str
+    input_hash: Optional[str] = None
+    model_version: Optional[str] = None
+    model_type: Optional[str] = None
+    feature_summary: Optional[Dict[str, Any]] = None
+    intermediate_results: Optional[Dict[str, Any]] = None
+    final_decision: Optional[Dict[str, Any]] = None
+    strategy_version: Optional[str] = None
+    strategy_type: Optional[int] = None
+    explainability: Optional[Dict[str, Any]] = None
+    retention_years: int = 3
+    expire_time: Optional[datetime] = None
+    create_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AuditListResponse(BaseModel):
+    """审计记录列表响应"""
+    total: int
+    items: List[AuditRecordResponse]
+
+
+class AuditRetentionUpdateRequest(BaseModel):
+    """更新审计记录保留年限请求"""
+    retention_years: int = Field(..., ge=1, le=30, description="保留年限")
+
+
+class AuditCleanupResponse(BaseModel):
+    """清理过期审计记录响应"""
+    cleaned_count: int
+    message: str
+
+
+class AuditExportRequest(BaseModel):
+    """审计导出请求"""
+    start_time: datetime = Field(..., description="起始时间")
+    end_time: datetime = Field(..., description="结束时间")
+    node_type: Optional[str] = Field(None, description="节点类型过滤 bolt/flange")
+    node_id: Optional[str] = Field(None, description="节点ID过滤")
+    format: str = Field("csv", description="导出格式 csv/pdf")
+
+
+class ExplainabilityReportResponse(BaseModel):
+    """可解释性报告响应"""
+    prediction_id: str
+    attention_weights: Optional[Dict[str, Any]] = None
+    key_timesteps: Optional[List[Dict[str, Any]]] = None
+    risk_factor_decomposition: Optional[Dict[str, Any]] = None
+    rule_hits: Optional[List[Dict[str, Any]]] = None
+    strategy_adjustment: Optional[Dict[str, Any]] = None
+

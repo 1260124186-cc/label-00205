@@ -150,6 +150,20 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"告警升级任务已添加: {cron}")
+
+        # 审计过期清理任务（每天执行一次）
+        audit_config = config.get('audit', {})
+        if audit_config.get('auto_cleanup_enabled', True):
+            cleanup_hours = audit_config.get('cleanup_interval_hours', 24)
+            cron = f'0 4 */{max(1, cleanup_hours // 24)} * *'
+            self.scheduler.add_job(
+                self._audit_cleanup_job,
+                CronTrigger.from_crontab(cron),
+                id='audit_cleanup_job',
+                name='审计过期记录清理任务',
+                replace_existing=True
+            )
+            logger.info(f"审计清理任务已添加: {cron}")
     
     def _training_job(self) -> None:
         """
@@ -261,6 +275,28 @@ class TaskScheduler:
 
         except Exception as e:
             logger.error(f"告警升级任务失败: {e}")
+
+    def _audit_cleanup_job(self) -> None:
+        """
+        审计过期记录清理任务
+
+        按配置的保留年限自动清理过期的审计快照记录。
+        """
+        logger.info("开始执行审计过期记录清理任务")
+
+        try:
+            from app.services.audit import AuditService
+
+            audit_service = AuditService()
+            cleaned_count = audit_service.cleanup_expired()
+
+            if cleaned_count > 0:
+                logger.info(f"审计清理任务完成，共清理 {cleaned_count} 条过期记录")
+            else:
+                logger.info("审计清理任务完成，无过期记录")
+
+        except Exception as e:
+            logger.error(f"审计清理任务失败: {e}")
     
     def get_jobs(self) -> list:
         """

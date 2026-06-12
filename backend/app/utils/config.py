@@ -143,6 +143,11 @@ class Config:
                     'api_key': '',
                     'model': 'qwen-turbo'
                 }
+            },
+            'audit': {
+                'retention_years': 3,
+                'auto_cleanup_enabled': True,
+                'cleanup_interval_hours': 24
             }
         }
 
