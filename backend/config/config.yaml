@@ -1,0 +1,158 @@
+# ============================================================
+# 螺栓预紧力机器学习预测系统 - 配置文件
+# ============================================================
+
+# 数据库配置
+database:
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  password: ""
+  database: "bolt_preload"
+  charset: "utf8mb4"
+  pool_size: 10
+  max_overflow: 20
+
+# API服务配置
+api:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+  workers: 4
+
+# 模型配置
+model:
+  # 螺栓LSTM模型参数
+  bolt_lstm:
+    sequence_length: 100      # 输入序列长度
+    input_dim: 2              # 输入维度 (时间, 预紧力)
+    lstm_units_1: 128         # 第一层LSTM单元数
+    lstm_units_2: 64          # 第二层LSTM单元数
+    dropout_rate: 0.2         # Dropout率
+    dense_units: 32           # 全连接层单元数
+    output_classes: 5         # 输出类别数
+    
+  # 法兰面注意力模型参数
+  flange_attention:
+    max_bolts: 20             # 最大螺栓数
+    sequence_length: 100      # 每个螺栓的序列长度
+    attention_heads: 8        # 注意力头数
+    lstm_units: 64            # LSTM单元数
+    output_classes: 5         # 输出类别数
+
+  # 训练参数
+  training:
+    batch_size: 32
+    epochs: 100
+    learning_rate: 0.001
+    early_stopping_patience: 10
+    validation_split: 0.2
+    
+  # 模型保存路径
+  save_path: "./trained_models"
+
+# 数据预处理配置
+preprocessing:
+  # 孤立森林异常检测
+  isolation_forest:
+    contamination: 0.1        # 异常比例
+    n_estimators: 100         # 树数量
+    random_state: 42
+    
+  # 卡尔曼滤波参数
+  kalman_filter:
+    process_noise: 0.01
+    measurement_noise: 0.1
+    
+  # 标准化配置
+  normalization:
+    method: "minmax"          # minmax 或 zscore
+
+# 预警策略配置
+warning_strategy:
+  # 策略类型: 1=应报尽报, 2=精准报警
+  strategy_type: 1
+  
+  # 策略一: 应报尽报
+  strategy_1:
+    false_positive_threshold: 0.05    # 误报率阈值
+    confidence_threshold: 0.7         # 置信度阈值
+    
+  # 策略二: 精准报警
+  strategy_2:
+    false_negative_threshold: 0.10    # 漏报率阈值
+    confidence_threshold: 0.95        # 置信度阈值
+
+# 风险评估配置
+risk_assessment:
+  # 风险等级阈值
+  high_risk_threshold: 3      # 1-3分为高风险
+  medium_risk_threshold: 7    # 4-7分为中风险
+  # 8-10分为低风险
+  
+  # 预紧力阈值 (可由模型动态调整)
+  preload_thresholds:
+    min_normal: 400           # 正常最小值
+    max_normal: 800           # 正常最大值
+    warning_deviation: 0.1    # 预警偏差比例
+    critical_deviation: 0.2   # 紧急偏差比例
+
+# 定时任务配置
+scheduler:
+  enabled: true
+  
+  # 模型训练任务
+  training_job:
+    enabled: true
+    cron: "0 2 * * 0"         # 每周日凌晨2点
+    
+  # 预测任务
+  prediction_job:
+    enabled: true
+    cron: "*/30 * * * *"      # 每30分钟执行一次
+    
+  # 月度预测任务
+  monthly_prediction_job:
+    enabled: true
+    cron: "0 3 1 * *"         # 每月1日凌晨3点
+
+# 日志配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./logs/app.log"
+  max_size: 10485760          # 10MB
+  backup_count: 5
+  training_dir: "./logs/training"
+
+# 硬件配置
+hardware:
+  # 自动检测GPU, 若无则使用CPU
+  prefer_gpu: true
+  gpu_memory_fraction: 0.8
+
+# API认证配置
+auth:
+  enabled: false              # 是否启用认证
+  master_key: ""              # 主密钥（留空则禁用）
+  api_keys: []                # API密钥列表
+  # - key: "your-api-key"
+  #   name: "client-name"
+  #   permissions: ["read", "write"]
+  #   rate_limit: 1000
+
+# 大模型配置
+llm:
+  provider: "local"           # local, openai, qwen
+  openai:
+    api_key: ""               # OpenAI API密钥
+    model: "gpt-3.5-turbo"
+    base_url: "https://api.openai.com/v1"
+  qwen:
+    api_key: ""               # 通义千问API密钥
+    model: "qwen-turbo"
+
+# 模型版本管理
+model_version:
+  max_versions: 10            # 每个模型最大保留版本数
+  auto_cleanup: true          # 是否自动清理旧版本

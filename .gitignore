@@ -1,0 +1,134 @@
+# ============================================================
+# 螺栓预紧力机器学习预测系统 - Git忽略规则
+# ============================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyTorch模型文件（可选：如果需要版本控制模型则注释掉）
+# *.pt
+# *.pth
+
+# 日志
+*.log
+logs/
+
+# 缓存
+.cache/
+*.cache
+
+# 数据库
+*.db
+*.sqlite3
+
+# 环境配置
+.env
+.env.local
+.env.*.local
+*.local
+
+# 测试
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Docker
+.docker/
+
+# 操作系统
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# 编译输出
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Backend 特定
+backend/__pycache__/
+backend/logs/
+backend/trained_models/*.pt
+backend/.pytest_cache/
+
+# 数据文件（如果数据太大）
+# backend/data/*.csv
+
+# Node（如果有前端）
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# 其他
+*.pid
+*.seed
+*.pid.lock
