@@ -578,3 +578,184 @@ INSERT INTO sc_tenants (tenant_code, tenant_name, contact_email, status) VALUES
 -- 插入默认配额
 INSERT INTO sc_tenant_quotas (tenant_id, max_models, max_api_calls_per_day, max_storage_mb, max_users, max_org_nodes) VALUES
 (1, 10, 10000, 5120, 50, 500);
+
+-- ============================================================
+-- 数字孪生与健康度评分模块
+-- ============================================================
+
+-- ============================================================
+-- 螺栓健康度历史表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_bolt_health_history (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    bolt_id VARCHAR(50) NOT NULL COMMENT '螺栓ID',
+    flange_id VARCHAR(100) COMMENT '法兰面ID',
+    hi_score FLOAT NOT NULL COMMENT '综合健康度指数 0-100',
+    hi_level VARCHAR(20) NOT NULL COMMENT '健康等级 excellent/good/fair/poor/critical',
+    preload_stability_score FLOAT COMMENT '预紧力稳定性得分',
+    alert_frequency_score FLOAT COMMENT '预警频率得分',
+    fault_history_score FLOAT COMMENT '故障历史得分',
+    environmental_stress_score FLOAT COMMENT '环境应力得分',
+    service_age_score FLOAT COMMENT '使用年限得分',
+    factors_detail TEXT COMMENT '各因子得分详情 JSON',
+    trend VARCHAR(20) COMMENT '健康趋势 improving/stable/declining',
+    trend_rate FLOAT COMMENT '趋势变化率',
+    current_preload FLOAT COMMENT '当前预紧力',
+    nominal_preload FLOAT COMMENT '额定预紧力',
+    preload_deviation FLOAT COMMENT '预紧力偏差率',
+    last_maintenance_date DATETIME COMMENT '上次维护日期',
+    working_condition TEXT COMMENT '工况信息 JSON',
+    data_source VARCHAR(50) DEFAULT 'automatic' COMMENT '数据来源 automatic/manual',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_bolt_health_bolt (bolt_id),
+    INDEX idx_bolt_health_flange (flange_id),
+    INDEX idx_bolt_health_time (create_time),
+    INDEX idx_bolt_health_score (hi_score),
+    INDEX idx_bolt_health_level (hi_level)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='螺栓健康度历史表';
+
+-- ============================================================
+-- 法兰面健康度历史表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_flange_health_history (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    flange_id VARCHAR(100) NOT NULL COMMENT '法兰面ID',
+    hi_score FLOAT NOT NULL COMMENT '综合健康度指数 0-100',
+    hi_level VARCHAR(20) NOT NULL COMMENT '健康等级',
+    worst_bolt_hi FLOAT COMMENT '最差螺栓健康度',
+    worst_bolt_id VARCHAR(50) COMMENT '最差螺栓ID',
+    average_bolt_hi FLOAT COMMENT '平均螺栓健康度',
+    median_bolt_hi FLOAT COMMENT '螺栓健康度中位数',
+    degradation_rate FLOAT COMMENT '劣化速率（HI/天）',
+    bolt_count INT COMMENT '螺栓总数',
+    healthy_bolt_count INT COMMENT '健康螺栓数(HI>=70)',
+    warning_bolt_count INT COMMENT '预警螺栓数(50<=HI<70)',
+    critical_bolt_count INT COMMENT '危险螺栓数(HI<50)',
+    bolts_summary TEXT COMMENT '螺栓健康度摘要 JSON',
+    trend VARCHAR(20) COMMENT '健康趋势',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_flange_health_flange (flange_id),
+    INDEX idx_flange_health_time (create_time),
+    INDEX idx_flange_health_score (hi_score)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='法兰面健康度历史表';
+
+-- ============================================================
+-- RUL预测结果表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_rul_predictions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型 bolt/flange',
+    current_hi FLOAT COMMENT '当前健康度',
+    rul_days FLOAT COMMENT '预测剩余使用寿命（天）',
+    rul_lower_bound FLOAT COMMENT 'RUL下限（天）',
+    rul_upper_bound FLOAT COMMENT 'RUL上限（天）',
+    rul_confidence FLOAT COMMENT 'RUL预测置信度',
+    failure_threshold FLOAT DEFAULT 30 COMMENT '故障阈值 HI',
+    warning_threshold FLOAT DEFAULT 50 COMMENT '预警阈值 HI',
+    days_to_warning FLOAT COMMENT '距离预警的天数',
+    historical_hi TEXT COMMENT '历史HI序列 JSON',
+    forecast_series TEXT COMMENT '预测序列 JSON',
+    degradation_model VARCHAR(50) COMMENT '劣化模型类型 linear/exponential/polynomial',
+    model_params TEXT COMMENT '模型参数 JSON',
+    model_r_squared FLOAT COMMENT '模型拟合优度 R²',
+    tenant_id BIGINT COMMENT '租户ID',
+    prediction_date DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '预测日期',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_rul_node (node_type, node_id),
+    INDEX idx_rul_time (prediction_date),
+    INDEX idx_rul_rul (rul_days)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='RUL预测结果表';
+
+-- ============================================================
+-- 产线/装置健康度汇总报表表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_health_rollup_reports (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    report_no VARCHAR(50) UNIQUE COMMENT '报表编号',
+    line_id VARCHAR(100) NOT NULL COMMENT '产线/装置ID',
+    line_name VARCHAR(200) COMMENT '产线/装置名称',
+    line_type VARCHAR(50) COMMENT '产线类型 production_line/device/unit',
+    overall_hi FLOAT NOT NULL COMMENT '整体健康度',
+    overall_level VARCHAR(20) NOT NULL COMMENT '整体健康等级',
+    total_flange_count INT COMMENT '法兰面总数',
+    total_bolt_count INT COMMENT '螺栓总数',
+    healthy_flange_count INT COMMENT '健康法兰面数',
+    warning_flange_count INT COMMENT '预警法兰面数',
+    critical_flange_count INT COMMENT '危险法兰面数',
+    healthy_bolt_count INT COMMENT '健康螺栓数',
+    warning_bolt_count INT COMMENT '预警螺栓数',
+    critical_bolt_count INT COMMENT '危险螺栓数',
+    worst_flange_hi FLOAT COMMENT '最差法兰面健康度',
+    worst_flange_id VARCHAR(100) COMMENT '最差法兰面ID',
+    average_degradation_rate FLOAT COMMENT '平均劣化速率',
+    flanges_summary TEXT COMMENT '法兰面健康度摘要 JSON',
+    risk_summary TEXT COMMENT '风险汇总 JSON',
+    maintenance_priorities TEXT COMMENT '维护优先级排序 JSON',
+    report_date DATE COMMENT '报告日期',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_rollup_line (line_id),
+    INDEX idx_rollup_date (report_date),
+    INDEX idx_rollup_time (create_time),
+    UNIQUE KEY idx_rollup_line_date (line_id, report_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='产线/装置健康度汇总报表表';
+
+-- ============================================================
+-- 劣化曲线数据表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_degradation_curves (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型 bolt/flange',
+    curve_data TEXT COMMENT '曲线数据点 JSON',
+    degradation_rate FLOAT COMMENT '劣化速率',
+    acceleration_rate FLOAT COMMENT '劣化加速度',
+    model_type VARCHAR(50) COMMENT '拟合模型类型',
+    model_params TEXT COMMENT '模型参数 JSON',
+    r_squared FLOAT COMMENT '拟合优度 R²',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_degradation_node (node_type, node_id),
+    INDEX idx_degradation_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='劣化曲线数据表';
+
+-- ============================================================
+-- 健康度配置表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_health_config (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    config_key VARCHAR(100) NOT NULL UNIQUE COMMENT '配置键',
+    config_value TEXT COMMENT '配置值 JSON',
+    config_type VARCHAR(50) COMMENT '配置类型 weights/thresholds/aging_model',
+    description VARCHAR(500) COMMENT '配置描述',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_health_config_key (config_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='健康度配置表';
+
+-- ============================================================
+-- 插入健康度默认配置
+-- ============================================================
+INSERT INTO sc_health_config (config_key, config_value, config_type, description) VALUES
+('health_weights', 
+ '{"preload_stability": 0.30, "alert_frequency": 0.20, "fault_history": 0.20, "environmental_stress": 0.15, "service_age": 0.15}',
+ 'weights', 
+ '健康度各因子权重配置，总和为1'),
+('health_thresholds',
+ '{"excellent": 90, "good": 70, "fair": 50, "poor": 30, "critical": 0}',
+ 'thresholds',
+ '健康等级划分阈值'),
+('aging_model',
+ '{"design_life_years": 15, "inflection_point_years": 8, "aging_rate": 0.05}',
+ 'aging_model',
+ '使用年限老化模型参数');
+
+-- 显示健康度模块新增的表
+SHOW TABLES LIKE 'sc_%health%';
+SHOW TABLES LIKE 'sc_%rul%';
+SHOW TABLES LIKE 'sc_%rollup%';
+SHOW TABLES LIKE 'sc_%degradation%';

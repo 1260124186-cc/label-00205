@@ -1487,3 +1487,232 @@ class CaseRecommendationResponse(BaseModel):
     aggregated_recommendations: List[str]
     rag_context: str
     confidence_score: float
+
+
+# ============================================================
+# 数字孪生与健康度评分模块
+# ============================================================
+
+# ---------- 健康度评分基础模型 ----------
+
+class HealthIndexFactorSchema(BaseModel):
+    """健康度因子详情"""
+    factor_name: str = Field(..., description='因子名称')
+    factor_code: str = Field(..., description='因子代码')
+    score: float = Field(..., ge=0, le=100, description='因子得分 0-100')
+    weight: float = Field(..., ge=0, le=1, description='因子权重')
+    contribution: float = Field(..., description='对总健康度的贡献')
+    description: Optional[str] = Field(None, description='因子描述')
+
+
+class HealthIndexDetailSchema(BaseModel):
+    """健康度指数详情"""
+    hi_score: float = Field(..., ge=0, le=100, description='综合健康度指数 0-100')
+    hi_level: str = Field(..., description='健康等级 excellent/good/fair/poor/critical')
+    factors: List[HealthIndexFactorSchema] = Field(..., description='各因子得分详情')
+    preload_stability_score: float = Field(..., ge=0, le=100, description='预紧力稳定性得分')
+    alert_frequency_score: float = Field(..., ge=0, le=100, description='预警频率得分')
+    fault_history_score: float = Field(..., ge=0, le=100, description='故障历史得分')
+    environmental_stress_score: float = Field(..., ge=0, le=100, description='环境应力得分')
+    service_age_score: float = Field(..., ge=0, le=100, description='使用年限得分')
+    trend: Optional[str] = Field(None, description='健康趋势 improving/stable/declining')
+    trend_rate: Optional[float] = Field(None, description='趋势变化率')
+    calculate_time: datetime
+
+
+class BoltHealthIndexSchema(HealthIndexDetailSchema):
+    """螺栓健康度指数"""
+    bolt_id: str
+    bolt_name: Optional[str] = None
+    current_preload: Optional[float] = None
+    nominal_preload: Optional[float] = None
+    preload_deviation: Optional[float] = None
+    last_maintenance_date: Optional[datetime] = None
+
+
+class FlangeHealthIndexSchema(BaseModel):
+    """法兰面健康度指数（聚合）"""
+    flange_id: str
+    flange_name: Optional[str] = None
+    hi_score: float = Field(..., ge=0, le=100, description='法兰面综合健康度')
+    hi_level: str = Field(..., description='健康等级')
+    worst_bolt_hi: float = Field(..., description='最差螺栓健康度')
+    worst_bolt_id: str = Field(..., description='最差螺栓ID')
+    average_bolt_hi: float = Field(..., description='平均螺栓健康度')
+    median_bolt_hi: float = Field(..., description='螺栓健康度中位数')
+    degradation_rate: float = Field(..., description='劣化速率（HI/天）')
+    bolt_count: int = Field(..., description='螺栓总数')
+    healthy_bolt_count: int = Field(..., description='健康螺栓数(HI>=70)')
+    warning_bolt_count: int = Field(..., description='预警螺栓数(50<=HI<70)')
+    critical_bolt_count: int = Field(..., description='危险螺栓数(HI<50)')
+    bolts_health: List[BoltHealthIndexSchema] = Field(..., description='各螺栓健康度详情')
+    trend: Optional[str] = None
+    calculate_time: datetime
+
+
+class ProductionLineHealthRollupSchema(BaseModel):
+    """产线/装置级健康度汇总报表"""
+    line_id: str
+    line_name: str
+    line_type: str = Field(..., description='产线类型 production_line/device/unit')
+    overall_hi: float = Field(..., ge=0, le=100, description='整体健康度')
+    overall_level: str = Field(..., description='整体健康等级')
+    total_flange_count: int = Field(..., description='法兰面总数')
+    total_bolt_count: int = Field(..., description='螺栓总数')
+    healthy_flange_count: int = Field(..., description='健康法兰面数')
+    warning_flange_count: int = Field(..., description='预警法兰面数')
+    critical_flange_count: int = Field(..., description='危险法兰面数')
+    healthy_bolt_count: int = Field(..., description='健康螺栓数')
+    warning_bolt_count: int = Field(..., description='预警螺栓数')
+    critical_bolt_count: int = Field(..., description='危险螺栓数')
+    worst_flange_hi: float = Field(..., description='最差法兰面健康度')
+    worst_flange_id: str = Field(..., description='最差法兰面ID')
+    average_degradation_rate: float = Field(..., description='平均劣化速率')
+    flanges_health: List[FlangeHealthIndexSchema] = Field(..., description='各法兰面健康度')
+    risk_summary: Dict[str, Any] = Field(..., description='风险汇总')
+    maintenance_priorities: List[Dict[str, Any]] = Field(..., description='维护优先级排序')
+    report_date: datetime
+    generate_time: datetime
+
+
+# ---------- RUL 预测模型 ----------
+
+class RULPredictionPointSchema(BaseModel):
+    """RUL预测点"""
+    date: datetime
+    predicted_hi: float
+    lower_bound: float
+    upper_bound: float
+
+
+class RULPredictionSchema(BaseModel):
+    """剩余使用寿命预测"""
+    node_id: str
+    node_type: str = Field(..., description='节点类型 bolt/flange')
+    current_hi: float
+    rul_days: float = Field(..., ge=0, description='预测剩余使用寿命（天）')
+    rul_lower_bound: float = Field(..., description='RUL下限（天）')
+    rul_upper_bound: float = Field(..., description='RUL上限（天）')
+    rul_confidence: float = Field(..., ge=0, le=1, description='RUL预测置信度')
+    failure_threshold: float = Field(default=30, description='故障阈值 HI')
+    warning_threshold: float = Field(default=50, description='预警阈值 HI')
+    days_to_warning: Optional[float] = Field(None, description='距离预警的天数')
+    historical_hi: List[Dict[str, Any]] = Field(..., description='历史HI序列')
+    forecast_series: List[RULPredictionPointSchema] = Field(..., description='预测序列')
+    degradation_model: str = Field(..., description='劣化模型类型 linear/exponential/polynomial')
+    model_params: Dict[str, Any] = Field(..., description='模型参数')
+    prediction_date: datetime
+
+
+# ---------- 劣化曲线模型 ----------
+
+class DegradationCurvePointSchema(BaseModel):
+    """劣化曲线点"""
+    time_point: datetime
+    hi_value: float
+    hi_lower: Optional[float] = None
+    hi_upper: Optional[float] = None
+    is_prediction: bool = Field(default=False, description='是否为预测值')
+
+
+class DegradationCurveSchema(BaseModel):
+    """劣化曲线"""
+    node_id: str
+    node_type: str
+    curve_points: List[DegradationCurvePointSchema]
+    degradation_rate: float
+    acceleration_rate: Optional[float] = None
+    model_type: str
+    r_squared: Optional[float] = None
+
+
+# ---------- 请求模型 ----------
+
+class HealthIndexCalculateRequest(BaseModel):
+    """健康度计算请求"""
+    node_id: str = Field(..., description='节点ID')
+    node_type: str = Field(..., description='节点类型 bolt/flange/line')
+    data: Optional[List[List[Any]]] = Field(None, description='预紧力时序数据 [[时间, 预紧力], ...]')
+    working_condition: Optional[WorkingConditionSchema] = Field(None, description='工况信息')
+    include_history: bool = Field(default=True, description='是否包含历史数据')
+    save_to_db: bool = Field(default=True, description='是否保存到数据库')
+
+
+class HealthIndexBatchCalculateRequest(BaseModel):
+    """批量健康度计算请求"""
+    nodes: List[Dict[str, Any]] = Field(..., description='节点列表 [{node_id, node_type, data}, ...]')
+    working_condition: Optional[WorkingConditionSchema] = None
+    save_to_db: bool = True
+
+
+class HealthIndexHistoryRequest(BaseModel):
+    """健康度历史查询请求"""
+    node_id: str = Field(..., description='节点ID')
+    node_type: str = Field(..., description='节点类型 bolt/flange/line')
+    start_time: Optional[datetime] = Field(None, description='开始时间')
+    end_time: Optional[datetime] = Field(None, description='结束时间')
+    limit: int = Field(default=100, ge=1, le=1000, description='返回数量限制')
+
+
+class RULPredictionRequest(BaseModel):
+    """RUL预测请求"""
+    node_id: str = Field(..., description='节点ID')
+    node_type: str = Field(..., description='节点类型 bolt/flange')
+    forecast_days: int = Field(default=180, ge=30, le=730, description='预测天数')
+    failure_threshold: float = Field(default=30, ge=0, le=100, description='故障阈值 HI')
+    warning_threshold: float = Field(default=50, ge=0, le=100, description='预警阈值 HI')
+    model_type: Optional[str] = Field(None, description='劣化模型类型，None则自动选择')
+    use_history_days: int = Field(default=90, ge=7, le=365, description='使用多少天历史数据')
+
+
+class HealthRollupRequest(BaseModel):
+    """健康度汇总报表请求"""
+    line_id: str = Field(..., description='产线/装置ID')
+    line_name: Optional[str] = None
+    line_type: str = Field(default='production_line', description='产线类型')
+    report_date: Optional[datetime] = Field(None, description='报告日期，默认今日')
+    include_details: bool = Field(default=True, description='是否包含详细数据')
+
+
+# ---------- 响应模型 ----------
+
+class HealthIndexResponse(BaseModel):
+    """健康度计算响应"""
+    node_id: str
+    node_type: str
+    health_data: HealthIndexDetailSchema
+    saved: bool
+    calculate_time: datetime
+
+
+class HealthIndexBatchResponse(BaseModel):
+    """批量健康度计算响应"""
+    total_count: int
+    success_count: int
+    failed_count: int
+    results: List[Dict[str, Any]]
+    calculate_time: datetime
+
+
+class HealthIndexHistoryResponse(BaseModel):
+    """健康度历史查询响应"""
+    node_id: str
+    node_type: str
+    total: int
+    history: List[Dict[str, Any]]
+    trend_analysis: Optional[Dict[str, Any]] = None
+
+
+class RULPredictionResponse(BaseModel):
+    """RUL预测响应"""
+    node_id: str
+    node_type: str
+    rul_data: RULPredictionSchema
+    calculate_time: datetime
+
+
+class HealthRollupResponse(BaseModel):
+    """健康度汇总报表响应"""
+    report_id: Optional[int] = None
+    rollup_data: ProductionLineHealthRollupSchema
+    saved: bool

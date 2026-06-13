@@ -81,6 +81,17 @@ from app.api.schemas import (
     CaseVersionResponse, CaseVersionCompareResponse,
     CaseSimilaritySearchRequest, CaseSimilaritySearchResponse,
     CaseRecommendationResponse,
+    HealthIndexFactorSchema, HealthIndexDetailSchema,
+    BoltHealthIndexSchema, FlangeHealthIndexSchema,
+    ProductionLineHealthRollupSchema,
+    RULPredictionPointSchema, RULPredictionSchema,
+    DegradationCurvePointSchema, DegradationCurveSchema,
+    HealthIndexCalculateRequest, HealthIndexBatchCalculateRequest,
+    HealthIndexHistoryRequest, RULPredictionRequest,
+    HealthRollupRequest,
+    HealthIndexResponse, HealthIndexBatchResponse,
+    HealthIndexHistoryResponse,
+    RULPredictionResponse, HealthRollupResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -4565,4 +4576,255 @@ async def get_knowledge_statistics(tenant_id: Optional[int] = Query(None, descri
         return stats
     except Exception as e:
         logger.error(f"获取统计信息失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 健康度评分 ====================
+
+health_service = None
+
+
+def _get_health_service():
+    """获取健康度服务实例"""
+    global health_service
+    if health_service is None:
+        from app.services.health_service import HealthService
+        health_service = HealthService()
+    return health_service
+
+
+@router.post(
+    "/health/calculate",
+    tags=["健康度评分"],
+    summary="计算螺栓健康度指数 HI",
+    response_model=HealthIndexResponse,
+)
+async def calculate_health_index(request: HealthIndexCalculateRequest):
+    """
+    计算单个螺栓的健康度指数 HI（0-100）
+
+    综合评估维度：
+    - 预紧力稳定性（30%）
+    - 预警频率（20%）
+    - 故障历史（20%）
+    - 环境应力（15%）
+    - 使用年限（15%）
+    """
+    try:
+        service = _get_health_service()
+
+        result = service.calculate_bolt_health(
+            bolt_id=request.bolt_id,
+            data=request.data,
+            working_condition=request.working_condition,
+            nominal_preload=request.nominal_preload,
+            service_age_years=request.service_age_years,
+            flange_id=request.flange_id,
+            save_to_db=request.save_to_db,
+        )
+
+        return {
+            'success': True,
+            'data': result,
+            'message': '健康度计算成功',
+        }
+    except ValueError as e:
+        logger.warning(f"健康度计算参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"健康度计算失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/health/calculate/batch",
+    tags=["健康度评分"],
+    summary="批量计算螺栓健康度",
+    response_model=HealthIndexBatchResponse,
+)
+async def calculate_health_index_batch(request: HealthIndexBatchCalculateRequest):
+    """
+    批量计算多个螺栓的健康度，或计算整个法兰面的健康度
+
+    支持两种模式：
+    1. 批量螺栓计算：传入多个螺栓数据
+    2. 法兰面聚合计算：传入法兰面ID和螺栓数据，自动聚合
+    """
+    try:
+        service = _get_health_service()
+
+        if request.calculate_flange and request.flange_id:
+            result = service.calculate_flange_health(
+                flange_id=request.flange_id,
+                bolts_data=request.bolts_data,
+                working_condition=request.working_condition,
+                save_to_db=request.save_to_db,
+            )
+            return {
+                'success': True,
+                'data': result,
+                'message': '法兰面健康度计算成功',
+            }
+        else:
+            results = []
+            for bolt_data in request.bolts_data:
+                bolt_result = service.calculate_bolt_health(
+                    bolt_id=bolt_data['bolt_id'],
+                    data=bolt_data['data'],
+                    working_condition=request.working_condition,
+                    nominal_preload=bolt_data.get('nominal_preload'),
+                    service_age_years=bolt_data.get('service_age_years', 0),
+                    flange_id=request.flange_id,
+                    save_to_db=request.save_to_db,
+                )
+                results.append(bolt_result)
+
+            return {
+                'success': True,
+                'data': {
+                    'total': len(results),
+                    'bolts_health': results,
+                },
+                'message': '批量健康度计算成功',
+            }
+    except ValueError as e:
+        logger.warning(f"批量健康度计算参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"批量健康度计算失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/health/history",
+    tags=["健康度评分"],
+    summary="查询健康度历史记录",
+    response_model=HealthIndexHistoryResponse,
+)
+async def get_health_history(
+    node_id: str = Query(..., description="节点ID（螺栓ID或法兰面ID）"),
+    node_type: str = Query("bolt", description="节点类型：bolt 或 flange"),
+    start_time: Optional[datetime] = Query(None, description="开始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    limit: int = Query(100, description="返回记录数量限制"),
+):
+    """
+    查询螺栓或法兰面的健康度历史记录，包含趋势分析
+    """
+    try:
+        if node_type not in ['bolt', 'flange']:
+            raise ValueError("node_type 必须是 'bolt' 或 'flange'")
+
+        service = _get_health_service()
+
+        result = service.get_health_history(
+            node_id=node_id,
+            node_type=node_type,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+
+        return {
+            'success': True,
+            'data': result,
+            'message': '历史记录查询成功',
+        }
+    except ValueError as e:
+        logger.warning(f"健康度历史查询参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"健康度历史查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/health/rul/predict",
+    tags=["健康度评分"],
+    summary="预测剩余使用寿命 RUL",
+    response_model=RULPredictionResponse,
+)
+async def predict_rul(request: RULPredictionRequest):
+    """
+    基于历史健康度序列预测剩余使用寿命（RUL）
+
+    支持的劣化模型：
+    - linear: 线性模型（默认，数据不足时使用）
+    - exponential: 指数模型
+    - polynomial: 多项式模型
+    - auto: 自动选择最优模型（根据R²拟合优度）
+
+    返回结果包含：
+    - RUL 预测值及置信区间
+    - 劣化曲线预测序列
+    - 到达预警阈值的时间
+    - 模型拟合优度 R²
+    """
+    try:
+        service = _get_health_service()
+
+        result = service.predict_rul(
+            node_id=request.node_id,
+            node_type=request.node_type,
+            forecast_days=request.forecast_days,
+            failure_threshold=request.failure_threshold,
+            warning_threshold=request.warning_threshold,
+            model_type=request.model_type,
+            use_history_days=request.use_history_days,
+            save_to_db=request.save_to_db,
+        )
+
+        return {
+            'success': True,
+            'data': result,
+            'message': 'RUL预测成功',
+        }
+    except ValueError as e:
+        logger.warning(f"RUL预测参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"RUL预测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/health/rollup",
+    tags=["健康度评分"],
+    summary="生成产线/装置级健康度汇总报表",
+    response_model=HealthRollupResponse,
+)
+async def generate_health_rollup(request: HealthRollupRequest):
+    """
+    生成产线或装置级的健康度汇总报表
+
+    包含：
+    - 整体健康度评分和等级
+    - 各法兰面健康度统计
+    - 风险汇总分析
+    - 维护优先级排序
+    - 劣化速率统计
+    """
+    try:
+        service = _get_health_service()
+
+        result = service.generate_rollup_report(
+            line_id=request.line_id,
+            line_name=request.line_name,
+            line_type=request.line_type,
+            flanges_data=request.flanges_data,
+            report_date=request.report_date,
+            include_details=request.include_details,
+            save_to_db=request.save_to_db,
+        )
+
+        return {
+            'success': True,
+            'data': result,
+            'message': '汇总报表生成成功',
+        }
+    except ValueError as e:
+        logger.warning(f"汇总报表生成参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"汇总报表生成失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

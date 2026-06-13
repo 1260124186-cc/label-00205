@@ -822,6 +822,235 @@ class KnowledgeCaseReview(Base):
     )
 
 
+# ============================================================
+# 数字孪生与健康度评分模块 ORM 模型
+# ============================================================
+
+class BoltHealthHistory(Base):
+    """
+    螺栓健康度历史表模型
+
+    对应数据库表: sc_bolt_health_history
+    存储螺栓每次计算的健康度指数历史记录。
+
+    Attributes:
+        id: 主键
+        bolt_id: 螺栓ID
+        flange_id: 法兰面ID
+        hi_score: 综合健康度指数 0-100
+        hi_level: 健康等级 excellent/good/fair/poor/critical
+        preload_stability_score: 预紧力稳定性得分
+        alert_frequency_score: 预警频率得分
+        fault_history_score: 故障历史得分
+        environmental_stress_score: 环境应力得分
+        service_age_score: 使用年限得分
+        factors_detail: 各因子得分详情 JSON
+        trend: 健康趋势 improving/stable/declining
+        trend_rate: 趋势变化率
+        current_preload: 当前预紧力
+        nominal_preload: 额定预紧力
+        preload_deviation: 预紧力偏差率
+        last_maintenance_date: 上次维护日期
+        working_condition: 工况信息 JSON
+        data_source: 数据来源 automatic/manual
+        tenant_id: 租户ID
+        create_time: 创建时间
+    """
+    __tablename__ = 'sc_bolt_health_history'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    bolt_id = Column(String(50), nullable=False, comment='螺栓ID')
+    flange_id = Column(String(100), comment='法兰面ID')
+    hi_score = Column(Float, nullable=False, comment='综合健康度指数 0-100')
+    hi_level = Column(String(20), nullable=False, comment='健康等级')
+    preload_stability_score = Column(Float, comment='预紧力稳定性得分')
+    alert_frequency_score = Column(Float, comment='预警频率得分')
+    fault_history_score = Column(Float, comment='故障历史得分')
+    environmental_stress_score = Column(Float, comment='环境应力得分')
+    service_age_score = Column(Float, comment='使用年限得分')
+    factors_detail = Column(Text, comment='各因子得分详情 JSON')
+    trend = Column(String(20), comment='健康趋势')
+    trend_rate = Column(Float, comment='趋势变化率')
+    current_preload = Column(Float, comment='当前预紧力')
+    nominal_preload = Column(Float, comment='额定预紧力')
+    preload_deviation = Column(Float, comment='预紧力偏差率')
+    last_maintenance_date = Column(DateTime, comment='上次维护日期')
+    working_condition = Column(Text, comment='工况信息 JSON')
+    data_source = Column(String(50), default='automatic', comment='数据来源')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_bolt_health_bolt', 'bolt_id'),
+        Index('idx_bolt_health_flange', 'flange_id'),
+        Index('idx_bolt_health_time', 'create_time'),
+        Index('idx_bolt_health_score', 'hi_score'),
+        Index('idx_bolt_health_level', 'hi_level'),
+    )
+
+
+class FlangeHealthHistory(Base):
+    """
+    法兰面健康度历史表模型
+
+    对应数据库表: sc_flange_health_history
+    存储法兰面每次计算的健康度指数历史记录。
+    """
+    __tablename__ = 'sc_flange_health_history'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    flange_id = Column(String(100), nullable=False, comment='法兰面ID')
+    hi_score = Column(Float, nullable=False, comment='综合健康度指数 0-100')
+    hi_level = Column(String(20), nullable=False, comment='健康等级')
+    worst_bolt_hi = Column(Float, comment='最差螺栓健康度')
+    worst_bolt_id = Column(String(50), comment='最差螺栓ID')
+    average_bolt_hi = Column(Float, comment='平均螺栓健康度')
+    median_bolt_hi = Column(Float, comment='螺栓健康度中位数')
+    degradation_rate = Column(Float, comment='劣化速率（HI/天）')
+    bolt_count = Column(Integer, comment='螺栓总数')
+    healthy_bolt_count = Column(Integer, comment='健康螺栓数(HI>=70)')
+    warning_bolt_count = Column(Integer, comment='预警螺栓数(50<=HI<70)')
+    critical_bolt_count = Column(Integer, comment='危险螺栓数(HI<50)')
+    bolts_summary = Column(Text, comment='螺栓健康度摘要 JSON')
+    trend = Column(String(20), comment='健康趋势')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_flange_health_flange', 'flange_id'),
+        Index('idx_flange_health_time', 'create_time'),
+        Index('idx_flange_health_score', 'hi_score'),
+    )
+
+
+class RULPrediction(Base):
+    """
+    RUL预测结果表模型
+
+    对应数据库表: sc_rul_predictions
+    存储剩余使用寿命预测结果。
+    """
+    __tablename__ = 'sc_rul_predictions'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    node_id = Column(String(100), nullable=False, comment='节点ID')
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    current_hi = Column(Float, comment='当前健康度')
+    rul_days = Column(Float, comment='预测剩余使用寿命（天）')
+    rul_lower_bound = Column(Float, comment='RUL下限（天）')
+    rul_upper_bound = Column(Float, comment='RUL上限（天）')
+    rul_confidence = Column(Float, comment='RUL预测置信度')
+    failure_threshold = Column(Float, default=30, comment='故障阈值 HI')
+    warning_threshold = Column(Float, default=50, comment='预警阈值 HI')
+    days_to_warning = Column(Float, comment='距离预警的天数')
+    historical_hi = Column(Text, comment='历史HI序列 JSON')
+    forecast_series = Column(Text, comment='预测序列 JSON')
+    degradation_model = Column(String(50), comment='劣化模型类型')
+    model_params = Column(Text, comment='模型参数 JSON')
+    model_r_squared = Column(Float, comment='模型拟合优度 R²')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    prediction_date = Column(DateTime, default=datetime.now, comment='预测日期')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_rul_node', 'node_type', 'node_id'),
+        Index('idx_rul_time', 'prediction_date'),
+        Index('idx_rul_rul', 'rul_days'),
+    )
+
+
+class HealthRollupReport(Base):
+    """
+    产线/装置健康度汇总报表表模型
+
+    对应数据库表: sc_health_rollup_reports
+    存储产线/装置级的健康度汇总报表。
+    """
+    __tablename__ = 'sc_health_rollup_reports'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    report_no = Column(String(50), unique=True, comment='报表编号')
+    line_id = Column(String(100), nullable=False, comment='产线/装置ID')
+    line_name = Column(String(200), comment='产线/装置名称')
+    line_type = Column(String(50), comment='产线类型')
+    overall_hi = Column(Float, nullable=False, comment='整体健康度')
+    overall_level = Column(String(20), nullable=False, comment='整体健康等级')
+    total_flange_count = Column(Integer, comment='法兰面总数')
+    total_bolt_count = Column(Integer, comment='螺栓总数')
+    healthy_flange_count = Column(Integer, comment='健康法兰面数')
+    warning_flange_count = Column(Integer, comment='预警法兰面数')
+    critical_flange_count = Column(Integer, comment='危险法兰面数')
+    healthy_bolt_count = Column(Integer, comment='健康螺栓数')
+    warning_bolt_count = Column(Integer, comment='预警螺栓数')
+    critical_bolt_count = Column(Integer, comment='危险螺栓数')
+    worst_flange_hi = Column(Float, comment='最差法兰面健康度')
+    worst_flange_id = Column(String(100), comment='最差法兰面ID')
+    average_degradation_rate = Column(Float, comment='平均劣化速率')
+    flanges_summary = Column(Text, comment='法兰面健康度摘要 JSON')
+    risk_summary = Column(Text, comment='风险汇总 JSON')
+    maintenance_priorities = Column(Text, comment='维护优先级排序 JSON')
+    report_date = Column(DateTime, comment='报告日期')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_rollup_line', 'line_id'),
+        Index('idx_rollup_date', 'report_date'),
+        Index('idx_rollup_time', 'create_time'),
+        Index('idx_rollup_line_date', 'line_id', 'report_date', unique=True),
+    )
+
+
+class DegradationCurve(Base):
+    """
+    劣化曲线数据表模型
+
+    对应数据库表: sc_degradation_curves
+    存储劣化曲线拟合数据。
+    """
+    __tablename__ = 'sc_degradation_curves'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    node_id = Column(String(100), nullable=False, comment='节点ID')
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    curve_data = Column(Text, comment='曲线数据点 JSON')
+    degradation_rate = Column(Float, comment='劣化速率')
+    acceleration_rate = Column(Float, comment='劣化加速度')
+    model_type = Column(String(50), comment='拟合模型类型')
+    model_params = Column(Text, comment='模型参数 JSON')
+    r_squared = Column(Float, comment='拟合优度 R²')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_degradation_node', 'node_type', 'node_id'),
+        Index('idx_degradation_time', 'create_time'),
+    )
+
+
+class HealthConfig(Base):
+    """
+    健康度配置表模型
+
+    对应数据库表: sc_health_config
+    存储健康度计算的配置参数，如权重、阈值等。
+    """
+    __tablename__ = 'sc_health_config'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    config_key = Column(String(100), nullable=False, unique=True, comment='配置键')
+    config_value = Column(Text, comment='配置值 JSON')
+    config_type = Column(String(50), comment='配置类型')
+    description = Column(String(500), comment='配置描述')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_health_config_key', 'config_key'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类
