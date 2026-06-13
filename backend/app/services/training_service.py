@@ -31,6 +31,17 @@ from app.services.feature_engineering import FeatureEngineer
 from app.utils.config import config
 from app.utils.database import get_db, BoltData
 
+_data_quality_engine = None
+
+
+def get_data_quality_engine():
+    """获取数据质量引擎实例（懒加载）"""
+    global _data_quality_engine
+    if _data_quality_engine is None:
+        from app.services.data_quality import DataQualityEngine
+        _data_quality_engine = DataQualityEngine()
+    return _data_quality_engine
+
 
 class TrainingService:
     """
@@ -320,24 +331,101 @@ class TrainingService:
         """
         加载螺栓训练数据
         
-        尝试从数据库加载，如果没有则从CSV加载
+        尝试从数据库加载，如果没有则从CSV加载。
+        自动应用数据质量过滤，低质量数据不参与训练。
         """
+        # 检查是否启用数据质量过滤
+        dq_enabled = config.get('data_quality.enabled', True)
+        auto_filter = config.get(
+            'data_quality.integration.auto_filter_training_data', True
+        )
+
         # 尝试从数据库加载
         try:
             with get_db() as db:
                 data = db.query(BoltData).filter(
                     BoltData.sensor_id == int(bolt_id) if bolt_id.isdigit() else BoltData.sensor_id == bolt_id
                 ).order_by(BoltData.create_time.asc()).all()
-            
+
             if data and len(data) >= 100:
                 values = np.array([d.ptf for d in data])
+                timestamps = np.array([d.create_time for d in data])
+
+                # 应用数据质量过滤
+                if dq_enabled and auto_filter:
+                    try:
+                        engine = get_data_quality_engine()
+                        filter_result = engine.filter_training_data(
+                            sensor_id=bolt_id,
+                            values=values,
+                            timestamps=timestamps,
+                        )
+
+                        filtered_values = filter_result.filtered_data
+                        original_count = len(values)
+                        filtered_count = len(filtered_values)
+
+                        if filter_result.valid_for_training:
+                            if filtered_count != original_count:
+                                logger.info(
+                                    f"训练数据过滤: 螺栓 {bolt_id}, "
+                                    f"原始 {original_count} 条, 过滤后 {filtered_count} 条, "
+                                    f"移除 {original_count - filtered_count} 条"
+                                )
+                            labels = self._generate_labels(filtered_values)
+                            return filtered_values, labels
+                        else:
+                            logger.warning(
+                                f"螺栓 {bolt_id} 数据质量过低，不适用于训练。"
+                                f"质量评分: {filter_result.quality_score.overall_score:.1f}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"数据质量过滤失败，使用原始数据: {e}")
+
                 labels = self._generate_labels(values)
                 return values, labels
         except Exception as e:
             logger.warning(f"从数据库加载失败: {e}")
-        
+
         # 从CSV加载
         return self._load_bolt_from_csv(bolt_id)
+
+    def _filter_data_by_quality(
+        self,
+        bolt_id: str,
+        values: np.ndarray,
+        timestamps: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        根据数据质量过滤数据
+
+        Args:
+            bolt_id: 螺栓ID
+            values: 数据值数组
+            timestamps: 时间戳数组
+
+        Returns:
+            np.ndarray: 过滤后的数据
+        """
+        try:
+            engine = get_data_quality_engine()
+            filter_result = engine.filter_training_data(
+                sensor_id=bolt_id,
+                values=values,
+                timestamps=timestamps,
+            )
+
+            if not filter_result.valid_for_training:
+                logger.warning(
+                    f"螺栓 {bolt_id} 数据质量评分 "
+                    f"{filter_result.quality_score.overall_score:.1f}，"
+                    f"不适合训练，但仍使用过滤后的数据"
+                )
+
+            return filter_result.filtered_data
+        except Exception as e:
+            logger.warning(f"数据质量过滤失败: {e}")
+            return values
     
     def _load_bolt_from_csv(
         self, 

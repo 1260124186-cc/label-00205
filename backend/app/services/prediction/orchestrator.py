@@ -29,6 +29,18 @@ from app.services.prediction.rule_classifier import RuleBasedClassifier
 from app.services.prediction.warning_strategy import WarningStrategyPolicy
 from app.services.prediction.repository import PredictionRepository
 from app.core.model_version import version_manager
+from app.utils.config import config
+
+_data_quality_engine = None
+
+
+def get_data_quality_engine():
+    """获取数据质量引擎实例（懒加载）"""
+    global _data_quality_engine
+    if _data_quality_engine is None:
+        from app.services.data_quality import DataQualityEngine
+        _data_quality_engine = DataQualityEngine()
+    return _data_quality_engine
 
 
 class PredictionOrchestrator:
@@ -151,14 +163,74 @@ class PredictionOrchestrator:
 
         original_status = STATUS_LABELS.get(original_status_code, '未知')
 
-        # Step 3: 风险评估
+        # Step 3: 数据质量评估与置信度调整
+        dq_enabled = config.get('data_quality.enabled', True)
+        auto_adjust = config.get(
+            'data_quality.integration.auto_adjust_prediction_confidence', True
+        )
+
+        quality_info = {}
+        if dq_enabled and auto_adjust:
+            try:
+                ts_array = None
+                if timestamps:
+                    from datetime import datetime
+                    ts_array = np.array([
+                        datetime.fromisoformat(t.replace('Z', '+00:00'))
+                        if isinstance(t, str) else t
+                        for t in timestamps
+                    ])
+
+                dq_engine = get_data_quality_engine()
+                check_result, quality_score = dq_engine.evaluate_quality_only(
+                    sensor_id=bolt_id,
+                    values=data,
+                    timestamps=ts_array,
+                )
+
+                filter_result = dq_engine.data_filter.filter_for_prediction(
+                    data=data,
+                    timestamps=ts_array,
+                    check_result=check_result,
+                    quality_score=quality_score,
+                )
+
+                adjusted_confidence = dq_engine.data_filter.adjust_prediction_confidence(
+                    original_confidence=confidence,
+                    quality_score=quality_score,
+                    filter_result=filter_result,
+                )
+
+                quality_info = {
+                    'quality_score': quality_score.overall_score,
+                    'quality_level': quality_score.overall_level.value,
+                    'original_confidence': float(confidence),
+                    'adjusted_confidence': float(adjusted_confidence),
+                    'adjustment_factor': adjusted_confidence / max(confidence, 0.0001),
+                    'valid_for_training': quality_score.valid_for_training,
+                    'confidence_adjustment': quality_score.confidence_adjustment,
+                }
+
+                if adjusted_confidence != confidence:
+                    logger.info(
+                        f"置信度调整: 螺栓 {bolt_id}, "
+                        f"原始 {confidence:.3f} → 调整后 {adjusted_confidence:.3f}, "
+                        f"质量评分 {quality_score.overall_score:.1f}"
+                    )
+
+                confidence = adjusted_confidence
+            except Exception as e:
+                logger.warning(f"数据质量置信度调整失败，使用原始置信度: {e}")
+                quality_info = {'error': str(e)}
+
+        # Step 4: 风险评估
         risk_assessment = self.risk_model.assess_risk(
             data,
             lstm_probs=probs,
             lstm_class=original_status_code,
         )
 
-        # Step 4: 应用预警策略
+        # Step 5: 应用预警策略
         final_status_code, final_status = self.warning_policy.apply(
             original_status_code, original_status, confidence
         )
@@ -176,6 +248,7 @@ class PredictionOrchestrator:
             'diagnosis': risk_assessment.diagnosis,
             'recommendations': risk_assessment.recommendations,
             'recent_time': timestamps[-1] if timestamps else None,
+            'data_quality': quality_info if quality_info else None,
         }
 
         # Step 5: 审计快照

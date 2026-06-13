@@ -53,6 +53,11 @@ from app.api.schemas import (
     AuditRecordResponse, AuditListResponse,
     AuditRetentionUpdateRequest, AuditCleanupResponse,
     AuditExportRequest, ExplainabilityReportResponse,
+    DataQualityCheckRequest, DataQualityCheckBatchRequest,
+    QualityReportRequest, DataQualityHistoryRequest,
+    ConfidenceAdjustmentRequest, ConfidenceAdjustmentResponse,
+    QualityEvaluationResponse, DailyQualityReportSchema,
+    SensorQualityScoreSchema,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -2136,3 +2141,737 @@ async def get_explainability_report(audit_id: int):
     except Exception as e:
         logger.error(f"获取可解释性报告失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 数据质量治理 ====================
+
+_data_quality_engine = None
+
+
+def get_data_quality_engine():
+    """获取数据质量引擎实例"""
+    global _data_quality_engine
+    if _data_quality_engine is None:
+        from app.services.data_quality import DataQualityEngine
+        _data_quality_engine = DataQualityEngine()
+    return _data_quality_engine
+
+
+def _parse_time_series_data(data: List[List[Any]]):
+    """解析时序数据"""
+    timestamps = []
+    values = []
+    for item in data:
+        if len(item) >= 2:
+            t = item[0]
+            v = item[1]
+            if isinstance(t, str):
+                try:
+                    t = datetime.fromisoformat(t.replace('Z', '+00:00'))
+                except Exception:
+                    t = None
+            timestamps.append(t)
+            try:
+                values.append(float(v) if v is not None else float('nan'))
+            except (ValueError, TypeError):
+                values.append(float('nan'))
+    return np.array(values), np.array(timestamps) if timestamps else None
+
+
+def _save_quality_check_to_db(
+    sensor_id: str,
+    check_result: Any,
+    quality_score: Any,
+):
+    """保存质量检查结果到数据库"""
+    try:
+        from app.utils.database import get_db, DataQualityCheck
+        with get_db() as db:
+            if db is None:
+                return
+            check = DataQualityCheck(
+                sensor_id=sensor_id,
+                total_points=check_result.total_points,
+                valid_points=check_result.valid_points,
+                overall_score=quality_score.overall_score,
+                completeness_score=quality_score.dimensions.get(
+                    'completeness'
+                ).score if 'completeness' in quality_score.dimensions else 100.0,
+                consistency_score=quality_score.dimensions.get(
+                    'consistency'
+                ).score if 'consistency' in quality_score.dimensions else 100.0,
+                validity_score=quality_score.dimensions.get(
+                    'validity'
+                ).score if 'validity' in quality_score.dimensions else 100.0,
+                stability_score=quality_score.dimensions.get(
+                    'stability'
+                ).score if 'stability' in quality_score.dimensions else 100.0,
+                rule_scores=str({k: v for k, v in check_result.rule_scores.items()}),
+                violations=str([v.to_dict() for v in check_result.violations]),
+                quality_level=quality_score.overall_level.value,
+                valid_for_training=quality_score.valid_for_training,
+                confidence_adjustment=quality_score.confidence_adjustment,
+                check_time=datetime.now(),
+            )
+            db.add(check)
+            db.commit()
+    except Exception as e:
+        logger.warning(f"保存质量检查结果失败: {e}")
+
+
+@router.post(
+    "/data-quality/check",
+    response_model=QualityEvaluationResponse,
+    tags=["数据质量"],
+    summary="评估传感器数据质量"
+)
+async def check_data_quality(request: DataQualityCheckRequest):
+    """
+    评估传感器数据质量（完整流程）
+
+    包含:
+    - 5项质量规则检查（缺失率、重复、时间倒挂、越界、漂移）
+    - 多维度质量评分
+    - 数据过滤建议
+    - 异常分类（可选）
+    """
+    try:
+        engine = get_data_quality_engine()
+        values, timestamps = _parse_time_series_data(request.data)
+
+        if len(values) == 0:
+            raise HTTPException(status_code=400, detail="无效的输入数据")
+
+        result = engine.evaluate_sensor_data(
+            sensor_id=request.sensor_id,
+            values=values,
+            timestamps=timestamps,
+            include_anomaly_classification=request.include_anomaly_classification,
+        )
+
+        _save_quality_check_to_db(
+            sensor_id=request.sensor_id,
+            check_result=engine.rules_engine.check(
+                request.sensor_id, values, timestamps
+            ),
+            quality_score=engine.quality_scorer.score(
+                engine.rules_engine.check(request.sensor_id, values, timestamps)
+            ),
+        )
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"数据质量检查失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/data-quality/batch-check",
+    tags=["数据质量"],
+    summary="批量评估传感器数据质量"
+)
+async def batch_check_data_quality(request: DataQualityCheckBatchRequest):
+    """批量评估多个传感器的数据质量"""
+    try:
+        engine = get_data_quality_engine()
+        results = {}
+
+        for sensor_id, data in request.sensors_data.items():
+            try:
+                values, timestamps = _parse_time_series_data(data)
+                if len(values) == 0:
+                    results[sensor_id] = {'error': '无效数据'}
+                    continue
+
+                result = engine.evaluate_sensor_data(
+                    sensor_id=sensor_id,
+                    values=values,
+                    timestamps=timestamps,
+                    include_anomaly_classification=False,
+                )
+                results[sensor_id] = result
+
+                check_result = engine.rules_engine.check(sensor_id, values, timestamps)
+                quality_score = engine.quality_scorer.score(check_result)
+                _save_quality_check_to_db(sensor_id, check_result, quality_score)
+            except Exception as e:
+                logger.error(f"评估传感器 {sensor_id} 失败: {e}")
+                results[sensor_id] = {'error': str(e)}
+
+        return {
+            'total_sensors': len(request.sensors_data),
+            'successful': len([r for r in results.values() if 'error' not in r]),
+            'failed': len([r for r in results.values() if 'error' in r]),
+            'results': results,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量质量检查失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/data-quality/score/{sensor_id}",
+    response_model=SensorQualityScoreSchema,
+    tags=["数据质量"],
+    summary="获取传感器质量评分"
+)
+async def get_sensor_quality_score(
+    sensor_id: str,
+    recent_data_limit: int = Query(100, ge=10, le=1000, description="使用最近N条数据"),
+):
+    """
+    获取传感器的质量评分
+
+    从数据库读取最近数据进行评估。
+    """
+    try:
+        from app.utils.database import get_bolt_recent_data
+
+        engine = get_data_quality_engine()
+
+        recent_data = get_bolt_recent_data(
+            sensor_id=int(sensor_id) if sensor_id.isdigit() else sensor_id,
+            limit=recent_data_limit,
+        )
+
+        if not recent_data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"传感器 {sensor_id} 没有可用数据"
+            )
+
+        data_list = [
+            [str(d.create_time), d.ptf] for d in recent_data
+        ]
+        values, timestamps = _parse_time_series_data(data_list)
+
+        check_result, quality_score = engine.evaluate_quality_only(
+            sensor_id=sensor_id,
+            values=values,
+            timestamps=timestamps,
+        )
+
+        _save_quality_check_to_db(sensor_id, check_result, quality_score)
+
+        return {
+            'sensor_id': quality_score.sensor_id,
+            'overall_score': quality_score.overall_score,
+            'overall_level': quality_score.overall_level.value,
+            'dimensions': {
+                k.value: {
+                    'dimension': k.value,
+                    'score': v.score,
+                    'weight': v.weight,
+                    'contributing_rules': v.contributing_rules,
+                }
+                for k, v in quality_score.dimensions.items()
+            },
+            'valid_for_training': quality_score.valid_for_training,
+            'confidence_adjustment': quality_score.confidence_adjustment,
+            'rule_violations_count': {
+                k.value: v for k, v in quality_score.rule_violations_count.items()
+            },
+            'calculate_time': quality_score.calculate_time,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取传感器质量评分失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/data-quality/adjust-confidence",
+    response_model=ConfidenceAdjustmentResponse,
+    tags=["数据质量"],
+    summary="调整预测置信度"
+)
+async def adjust_prediction_confidence(request: ConfidenceAdjustmentRequest):
+    """根据数据质量调整预测置信度"""
+    try:
+        engine = get_data_quality_engine()
+        values, timestamps = _parse_time_series_data(request.data)
+
+        if len(values) == 0:
+            raise HTTPException(status_code=400, detail="无效的输入数据")
+
+        adjusted_confidence = engine.adjust_prediction_confidence(
+            sensor_id=request.sensor_id,
+            original_confidence=request.original_confidence,
+            values=values,
+            timestamps=timestamps,
+        )
+
+        check_result, quality_score = engine.evaluate_quality_only(
+            sensor_id=request.sensor_id,
+            values=values,
+            timestamps=timestamps,
+        )
+
+        reasons = []
+        if quality_score.overall_score < 60:
+            reasons.append("整体数据质量较低")
+        for dim, dim_score in quality_score.dimensions.items():
+            if dim_score.score < 70:
+                reasons.append(f"{dim.value}维度质量差: {dim_score.score:.1f}分")
+        if quality_score.confidence_adjustment < 0.8:
+            reasons.append(f"置信度调整系数: {quality_score.confidence_adjustment:.2f}")
+
+        if not reasons:
+            reasons.append("数据质量良好，置信度无需大幅调整")
+
+        return {
+            'sensor_id': request.sensor_id,
+            'original_confidence': request.original_confidence,
+            'adjusted_confidence': adjusted_confidence,
+            'quality_score': quality_score.overall_score,
+            'quality_level': quality_score.overall_level.value,
+            'adjustment_factor': adjusted_confidence / max(request.original_confidence, 0.0001),
+            'reasons': reasons,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"调整置信度失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/data-quality/report/generate",
+    response_model=DailyQualityReportSchema,
+    tags=["数据质量"],
+    summary="生成每日质量报告"
+)
+async def generate_quality_report(request: QualityReportRequest):
+    """
+    生成每日数据质量报告
+
+    包含:
+    - 整体质量统计
+    - 问题传感器排行
+    - 修复建议列表
+    - 异常分类统计
+    - 质量趋势分析
+    """
+    try:
+        engine = get_data_quality_engine()
+
+        if request.sensor_ids is None:
+            from app.utils.database import get_db
+            with get_db() as db:
+                if db is not None:
+                    from sqlalchemy import text
+                    result = db.execute(text(
+                        "SELECT DISTINCT sensor_id FROM sc_data_quality_checks "
+                        "ORDER BY check_time DESC LIMIT 50"
+                    ))
+                    request.sensor_ids = [row[0] for row in result.fetchall()]
+
+        report = engine.generate_daily_report(
+            report_date=request.report_date,
+            sensor_ids=request.sensor_ids,
+            save_to_db=request.save_to_db,
+        )
+
+        return report.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成质量报告失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/data-quality/report/latest",
+    response_model=DailyQualityReportSchema,
+    tags=["数据质量"],
+    summary="获取最新质量报告"
+)
+async def get_latest_quality_report():
+    """从数据库获取最新的质量报告"""
+    try:
+        from app.utils.database import get_db, QualityReport
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=503, detail="数据库不可用")
+
+            report = db.query(QualityReport).order_by(
+                QualityReport.report_date.desc()
+            ).first()
+
+            if not report:
+                raise HTTPException(status_code=404, detail="暂无质量报告")
+
+            import ast
+            return {
+                'report_date': report.report_date,
+                'total_sensors': report.total_sensors,
+                'average_quality_score': report.average_score,
+                'quality_distribution': ast.literal_eval(
+                    report.quality_distribution
+                ) if report.quality_distribution else {},
+                'problem_sensors': ast.literal_eval(
+                    report.problem_sensors
+                ) if report.problem_sensors else [],
+                'recommendations': ast.literal_eval(
+                    report.recommendations
+                ) if report.recommendations else [],
+                'anomaly_statistics': ast.literal_eval(
+                    report.anomaly_statistics
+                ) if report.anomaly_statistics else {},
+                'quality_trend': ast.literal_eval(
+                    report.quality_trend
+                ) if report.quality_trend else [],
+                'summary': report.summary,
+                'generated_at': report.create_time,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取最新质量报告失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/data-quality/history/{sensor_id}",
+    tags=["数据质量"],
+    summary="获取传感器质量历史记录"
+)
+async def get_sensor_quality_history(request: DataQualityHistoryRequest = None):
+    """获取传感器的质量检查历史记录"""
+    try:
+        from app.utils.database import get_db, DataQualityCheck
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=503, detail="数据库不可用")
+
+            query = db.query(DataQualityCheck).filter(
+                DataQualityCheck.sensor_id == request.sensor_id
+            )
+
+            if request.start_time:
+                query = query.filter(
+                    DataQualityCheck.check_time >= request.start_time
+                )
+            if request.end_time:
+                query = query.filter(
+                    DataQualityCheck.check_time <= request.end_time
+                )
+
+            records = query.order_by(
+                DataQualityCheck.check_time.desc()
+            ).limit(request.limit).all()
+
+            import ast
+            result = []
+            for record in records:
+                result.append({
+                    'id': record.id,
+                    'sensor_id': record.sensor_id,
+                    'total_points': record.total_points,
+                    'valid_points': record.valid_points,
+                    'overall_score': record.overall_score,
+                    'completeness_score': record.completeness_score,
+                    'consistency_score': record.consistency_score,
+                    'validity_score': record.validity_score,
+                    'stability_score': record.stability_score,
+                    'quality_level': record.quality_level,
+                    'valid_for_training': record.valid_for_training,
+                    'confidence_adjustment': record.confidence_adjustment,
+                    'violations': ast.literal_eval(
+                        record.violations
+                    ) if record.violations else [],
+                    'check_time': record.check_time,
+                })
+
+            return {
+                'sensor_id': request.sensor_id,
+                'total_records': len(records),
+                'records': result,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取质量历史失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/data-quality/problem-sensors",
+    tags=["数据质量"],
+    summary="获取问题传感器列表"
+)
+async def get_problem_sensors(
+    min_score: float = Query(60.0, ge=0.0, le=100.0, description="最低评分阈值"),
+    limit: int = Query(20, ge=1, le=100, description="返回数量限制"),
+):
+    """
+    获取问题传感器列表（按问题严重程度排序）
+
+    Args:
+        min_score: 低于此分数的传感器被视为问题传感器
+        limit: 返回数量限制
+    """
+    try:
+        from app.utils.database import get_db, DataQualityCheck
+        from sqlalchemy import text
+
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=503, detail="数据库不可用")
+
+            query = text("""
+                SELECT
+                    dqc.sensor_id,
+                    dqc.overall_score,
+                    dqc.quality_level,
+                    dqc.valid_for_training,
+                    dqc.confidence_adjustment,
+                    dqc.check_time
+                FROM sc_data_quality_checks dqc
+                INNER JOIN (
+                    SELECT sensor_id, MAX(check_time) as max_time
+                    FROM sc_data_quality_checks
+                    GROUP BY sensor_id
+                ) latest ON dqc.sensor_id = latest.sensor_id
+                    AND dqc.check_time = latest.max_time
+                WHERE dqc.overall_score < :min_score
+                ORDER BY dqc.overall_score ASC
+                LIMIT :limit
+            """)
+
+            result = db.execute(query, {
+                'min_score': min_score,
+                'limit': limit,
+            })
+
+            problem_sensors = []
+            for row in result.fetchall():
+                problem_sensors.append({
+                    'sensor_id': row[0],
+                    'overall_score': row[1],
+                    'quality_level': row[2],
+                    'valid_for_training': bool(row[3]),
+                    'confidence_adjustment': row[4],
+                    'check_time': row[5],
+                })
+
+            return {
+                'min_score_threshold': min_score,
+                'total_problems': len(problem_sensors),
+                'problem_sensors': problem_sensors,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取问题传感器列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/data-quality/anomalies/{sensor_id}/classify",
+    tags=["数据质量"],
+    summary="分类传感器异常"
+)
+async def classify_sensor_anomalies(
+    sensor_id: str,
+    start_time: Optional[datetime] = Query(None, description="开始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    recent_data_limit: int = Query(200, ge=50, le=2000, description="使用最近N条数据"),
+):
+    """
+    分类传感器异常，区分真异常与采集异常
+
+    从数据库获取异常数据和原始数据进行分析。
+    """
+    try:
+        from app.utils.database import get_bolt_recent_data
+
+        engine = get_data_quality_engine()
+
+        recent_data = get_bolt_recent_data(
+            sensor_id=int(sensor_id) if sensor_id.isdigit() else sensor_id,
+            limit=recent_data_limit,
+        )
+
+        if not recent_data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"传感器 {sensor_id} 没有可用数据"
+            )
+
+        data_list = [
+            [str(d.create_time), d.ptf] for d in recent_data
+        ]
+        values, timestamps = _parse_time_series_data(data_list)
+
+        result = engine.classify_sensor_anomalies(
+            sensor_id=sensor_id,
+            data=values,
+            timestamps=timestamps,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        if result is None:
+            return {
+                'sensor_id': sensor_id,
+                'message': '未找到需要分类的异常数据',
+                'total_anomalies': 0,
+                'classified_anomalies': [],
+            }
+
+        return result.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"分类异常失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/data-quality/summary",
+    tags=["数据质量"],
+    summary="获取数据质量总览"
+)
+async def get_data_quality_summary(
+    days: int = Query(7, ge=1, le=30, description="统计天数"),
+):
+    """
+    获取数据质量总览
+
+    包含:
+    - 整体质量分布
+    - 质量趋势
+    - 问题统计
+    """
+    try:
+        from app.utils.database import get_db
+        from sqlalchemy import text
+
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=503, detail="数据库不可用")
+
+            # 质量分布
+            dist_query = text(f"""
+                SELECT
+                    quality_level,
+                    COUNT(DISTINCT sensor_id) as sensor_count
+                FROM (
+                    SELECT
+                        sensor_id,
+                        quality_level,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY sensor_id ORDER BY check_time DESC
+                        ) as rn
+                    FROM sc_data_quality_checks
+                    WHERE check_time >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+                ) t
+                WHERE rn = 1
+                GROUP BY quality_level
+            """)
+            dist_result = db.execute(dist_query)
+            quality_distribution = {}
+            for row in dist_result.fetchall():
+                quality_distribution[row[0]] = row[1]
+
+            # 平均评分趋势
+            trend_query = text(f"""
+                SELECT
+                    DATE(check_time) as date,
+                    AVG(overall_score) as avg_score,
+                    COUNT(DISTINCT sensor_id) as sensor_count
+                FROM sc_data_quality_checks
+                WHERE check_time >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+                GROUP BY DATE(check_time)
+                ORDER BY date ASC
+            """)
+            trend_result = db.execute(trend_query)
+            quality_trend = []
+            for row in trend_result.fetchall():
+                quality_trend.append({
+                    'date': str(row[0]),
+                    'average_score': float(row[1]) if row[1] else None,
+                    'sensor_count': row[2],
+                })
+
+            # 问题统计
+            problem_query = text(f"""
+                SELECT
+                    COUNT(DISTINCT sensor_id) as problem_sensor_count
+                FROM (
+                    SELECT
+                        sensor_id,
+                        overall_score,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY sensor_id ORDER BY check_time DESC
+                        ) as rn
+                    FROM sc_data_quality_checks
+                    WHERE check_time >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+                ) t
+                WHERE rn = 1 AND overall_score < 60
+            """)
+            problem_result = db.execute(problem_query).fetchone()
+            problem_sensor_count = problem_result[0] if problem_result else 0
+
+            # 异常统计
+            anomaly_query = text(f"""
+                SELECT
+                    classification,
+                    COUNT(*) as count
+                FROM sc_anomaly_data
+                WHERE create_time >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+                    AND classification IS NOT NULL
+                GROUP BY classification
+            """)
+            anomaly_result = db.execute(anomaly_query)
+            anomaly_distribution = {}
+            for row in anomaly_result.fetchall():
+                anomaly_distribution[row[0]] = row[1]
+
+            total_sensors_query = text(f"""
+                SELECT COUNT(DISTINCT sensor_id)
+                FROM sc_data_quality_checks
+                WHERE check_time >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+            """)
+            total_sensors_result = db.execute(total_sensors_query).fetchone()
+            total_sensors = total_sensors_result[0] if total_sensors_result else 0
+
+            # 计算平均评分
+            avg_query = text(f"""
+                SELECT AVG(t.overall_score)
+                FROM (
+                    SELECT
+                        sensor_id,
+                        overall_score,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY sensor_id ORDER BY check_time DESC
+                        ) as rn
+                    FROM sc_data_quality_checks
+                    WHERE check_time >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+                ) t
+                WHERE rn = 1
+            """)
+            avg_result = db.execute(avg_query).fetchone()
+            average_score = float(avg_result[0]) if avg_result[0] else 0.0
+
+            return {
+                'statistics_days': days,
+                'total_sensors': total_sensors,
+                'average_quality_score': average_score,
+                'quality_distribution': quality_distribution,
+                'problem_sensor_count': problem_sensor_count,
+                'anomaly_distribution': anomaly_distribution,
+                'quality_trend': quality_trend,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取质量总览失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+

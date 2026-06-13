@@ -264,3 +264,157 @@ work_order:
   # 默认处理人（未指派时）
   default_assignee_id: null
   default_assignee_name: null
+
+# ============================================================
+# 数据质量治理配置
+# ============================================================
+data_quality:
+  # 是否启用数据质量治理
+  enabled: true
+
+  # 质量规则引擎配置
+  rules_engine:
+    # 缺失率检测
+    missing_rate:
+      enabled: true
+      warning_threshold: 0.03      # 警告阈值（3%）
+      error_threshold: 0.05        # 错误阈值（5%）
+      critical_threshold: 0.10     # 严重阈值（10%）
+
+    # 重复数据检测
+    duplicate:
+      enabled: true
+      warning_threshold: 0.02      # 警告阈值（2%）
+      error_threshold: 0.05        # 错误阈值（5%）
+      critical_threshold: 0.10     # 严重阈值（10%）
+      check_consecutive_duplicates: true  # 检查连续重复值
+
+    # 时间倒挂检测
+    time_inversion:
+      enabled: true
+      allowed_deviation_ms: 1000   # 允许的时间偏差（毫秒）
+
+    # 越界检测
+    out_of_bounds:
+      enabled: true
+      method: "iqr"                # iqr 或 zscore 或 fixed
+      iqr_multiplier: 1.5          # IQR乘数
+      zscore_threshold: 3.0        # Z-score阈值
+      # fixed方法的上下限（可选）
+      lower_bound: null
+      upper_bound: null
+
+    # 漂移检测
+    drift:
+      enabled: true
+      reference_window_size: 100   # 参考窗口大小
+      test_window_size: 50         # 测试窗口大小
+      step_size: 25                # 步长
+      p_value_threshold: 0.05      # P值阈值
+      min_drift_threshold: 0.05    # 最小漂移阈值（5%）
+
+  # 质量评分配置
+  quality_scoring:
+    # 维度权重（总和应为1.0）
+    dimension_weights:
+      completeness: 0.30           # 完整性
+      consistency: 0.25            # 一致性
+      validity: 0.25               # 有效性
+      stability: 0.20              # 稳定性
+
+    # 质量等级阈值
+    level_thresholds:
+      excellent: 90                # >=90优秀
+      good: 75                     # >=75良好
+      fair: 60                     # >=60一般
+      poor: 40                     # >=40较差
+      # <40严重
+
+    # 训练数据准入阈值
+    training_eligibility:
+      min_overall_score: 60        # 最低综合评分
+      min_completeness: 70         # 最低完整性评分
+      max_missing_rate: 0.10       # 最大缺失率
+      exclude_critical_violations: true  # 排除严重违规数据
+
+    # 置信度调整配置
+    confidence_adjustment:
+      min_adjustment: 0.3          # 最小置信度调整系数
+      max_adjustment: 1.0          # 最大置信度调整系数
+      score_sensitivity: 0.01      # 每1分的调整幅度
+
+  # 数据过滤配置
+  filtering:
+    # 训练数据过滤
+    training:
+      strategy: "exclude"          # exclude 或 interpolate 或 mark
+      remove_violations: true      # 移除违规数据点
+      remove_out_of_bounds: true   # 移除越界数据
+      remove_duplicates: true      # 移除重复数据
+      min_sequence_length: 10      # 过滤后最小序列长度
+
+    # 预测数据过滤
+    prediction:
+      strategy: "downgrade"        # downgrade 或 exclude 或 interpolate
+      mark_violations: true        # 标记违规数据点
+      interpolate_missing: true    # 插值填充缺失
+      interpolation_method: "linear"  # 插值方法
+
+  # 异常分类配置
+  anomaly_classification:
+    # 分类器权重
+    classifier_weights:
+      quality_based: 0.50          # 基于质量规则的分类器
+      pattern_based: 0.30          # 基于模式的分类器
+      anomaly_type: 0.20           # 基于异常类型的分类器
+
+    # 分类置信度阈值
+    min_confidence: 0.60           # 最低分类置信度
+
+    # 采集异常判定阈值
+    collection_anomaly_thresholds:
+      high_missing_rate: 0.05      # 高缺失率阈值
+      high_duplicate_rate: 0.05    # 高重复率阈值
+      time_inversion_count: 2      # 时间倒挂次数阈值
+
+    # 真异常判定阈值
+    true_anomaly_thresholds:
+      sudden_change_threshold: 3.0  # 突变阈值（标准差倍数）
+      preload_drop_threshold: 0.15  # 预紧力下降阈值（15%）
+      min_duration_points: 5       # 异常持续最小点数
+
+  # 报告配置
+  reporting:
+    # 每日报告
+    daily_report:
+      enabled: true
+      generate_time: "02:00"       # 生成时间
+      save_to_db: true             # 保存到数据库
+      top_n_problems: 10           # 问题传感器排行数量
+      min_score_threshold: 60.0    # 问题传感器最低评分阈值
+
+    # 报告保留策略
+    retention:
+      daily_reports_days: 90       # 日报保留天数
+      check_history_days: 180      # 检查历史保留天数
+
+  # 定时任务
+  scheduler:
+    # 实时数据质量检查
+    realtime_check:
+      enabled: true
+      interval_seconds: 300        # 每5分钟检查一次
+
+    # 每日报告生成
+    daily_report:
+      enabled: true
+      cron: "0 2 * * *"            # 每天凌晨2点
+
+  # 训练/预测集成
+  integration:
+    # 训练时自动过滤低质量数据
+    auto_filter_training_data: true
+    # 预测时自动调整置信度
+    auto_adjust_prediction_confidence: true
+    # 记录质量日志
+    log_quality_metrics: true

@@ -483,6 +483,67 @@ class PredictionAudit(Base):
     )
 
 
+class DataQualityCheck(Base):
+    """
+    数据质量检查表模型
+
+    对应数据库表: sc_data_quality_checks
+    存储每次数据质量检查的结果。
+    """
+    __tablename__ = 'sc_data_quality_checks'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    sensor_id = Column(String(50), nullable=False, comment='传感器/螺栓ID')
+    total_points = Column(Integer, comment='总数据点数')
+    valid_points = Column(Integer, comment='有效数据点数')
+    overall_score = Column(Float, comment='综合质量评分')
+    completeness_score = Column(Float, comment='完整性评分')
+    consistency_score = Column(Float, comment='一致性评分')
+    validity_score = Column(Float, comment='有效性评分')
+    stability_score = Column(Float, comment='稳定性评分')
+    rule_scores = Column(Text, comment='各规则评分 JSON')
+    violations = Column(Text, comment='规则违反记录 JSON')
+    quality_level = Column(String(20), comment='质量等级 excellent/good/fair/poor/critical')
+    valid_for_training = Column(Boolean, default=True, comment='是否适合训练')
+    confidence_adjustment = Column(Float, default=1.0, comment='置信度调整系数')
+    check_time = Column(DateTime, default=datetime.now, comment='检查时间')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_dqc_sensor', 'sensor_id'),
+        Index('idx_dqc_time', 'check_time'),
+        Index('idx_dqc_score', 'overall_score'),
+        Index('idx_dqc_level', 'quality_level'),
+    )
+
+
+class QualityReport(Base):
+    """
+    质量报告表模型
+
+    对应数据库表: sc_quality_reports
+    存储每日数据质量报告。
+    """
+    __tablename__ = 'sc_quality_reports'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    report_date = Column(DateTime, nullable=False, comment='报告日期')
+    total_sensors = Column(Integer, comment='总传感器数')
+    average_score = Column(Float, comment='平均质量评分')
+    quality_distribution = Column(Text, comment='质量分布 JSON')
+    problem_sensors = Column(Text, comment='问题传感器排行 JSON')
+    recommendations = Column(Text, comment='修复建议 JSON')
+    anomaly_statistics = Column(Text, comment='异常统计 JSON')
+    quality_trend = Column(Text, comment='质量趋势 JSON')
+    summary = Column(Text, comment='报告摘要')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_qr_date', 'report_date', unique=True),
+        Index('idx_qr_create', 'create_time'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类

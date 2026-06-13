@@ -759,3 +759,195 @@ class ExplainabilityReportResponse(BaseModel):
     rule_hits: Optional[List[Dict[str, Any]]] = None
     strategy_adjustment: Optional[Dict[str, Any]] = None
 
+
+# ============================================================
+# 数据质量治理
+# ============================================================
+
+class RuleViolationSchema(BaseModel):
+    """规则违反详情"""
+    rule_type: str
+    rule_name: str
+    severity: str
+    description: str
+    violation_indices: List[int]
+    violation_values: Optional[List[float]] = None
+    threshold: Optional[float] = None
+    actual_value: Optional[float] = None
+
+
+class QualityCheckResultSchema(BaseModel):
+    """质量检查结果"""
+    sensor_id: str
+    total_points: int
+    valid_points: int
+    overall_score: float
+    rule_scores: Dict[str, float]
+    violations: List[RuleViolationSchema]
+    violation_count: int
+    check_time: datetime
+
+
+class QualityDimensionScoreSchema(BaseModel):
+    """维度评分"""
+    dimension: str
+    score: float
+    weight: float
+    contributing_rules: List[str]
+
+
+class SensorQualityScoreSchema(BaseModel):
+    """传感器质量评分"""
+    sensor_id: str
+    overall_score: float
+    overall_level: str
+    dimensions: Dict[str, QualityDimensionScoreSchema]
+    valid_for_training: bool
+    confidence_adjustment: float
+    rule_violations_count: Dict[str, int]
+    calculate_time: datetime
+
+
+class FilteredDataResultSchema(BaseModel):
+    """过滤结果"""
+    original_count: int
+    filtered_count: int
+    removed_indices: List[int]
+    removal_reasons: Dict[int, str]
+    filter_strategy: str
+    confidence_multiplier: float
+    adjusted_confidence: Optional[float] = None
+
+
+class AnomalyClassificationSchema(BaseModel):
+    """异常分类结果"""
+    anomaly_id: Optional[int] = None
+    sensor_id: str
+    anomaly_value: float
+    anomaly_type: str
+    classification: str
+    classification_confidence: float
+    collection_subtype: Optional[str] = None
+    true_anomaly_subtype: Optional[str] = None
+    evidence: Dict[str, Any]
+    original_time: Optional[datetime] = None
+
+
+class AnomalyLinkResultSchema(BaseModel):
+    """异常联动结果"""
+    sensor_id: str
+    total_anomalies: int
+    true_anomalies: int
+    collection_anomalies: int
+    uncertain_anomalies: int
+    mixed_anomalies: int
+    classified_anomalies: List[AnomalyClassificationSchema]
+
+
+class QualityEvaluationResponse(BaseModel):
+    """质量评估完整响应"""
+    sensor_id: str
+    quality_check: QualityCheckResultSchema
+    quality_score: SensorQualityScoreSchema
+    filter_result: FilteredDataResultSchema
+    anomaly_classification: Optional[AnomalyLinkResultSchema] = None
+    evaluate_time: datetime
+
+
+class ProblemSensorRankingSchema(BaseModel):
+    """问题传感器排行"""
+    rank: int
+    sensor_id: str
+    quality_score: float
+    quality_level: str
+    problem_types: List[str]
+    violation_count: int
+    anomaly_count: int
+    collection_anomaly_ratio: float
+    trend: str
+
+
+class RepairRecommendationSchema(BaseModel):
+    """修复建议"""
+    sensor_id: str
+    problem_type: str
+    description: str
+    recommendation: str
+    priority: str
+    estimated_effort: float
+    affected_metrics: List[str]
+    evidence: Dict[str, Any]
+
+
+class DailyQualityReportSchema(BaseModel):
+    """每日质量报告"""
+    report_date: datetime
+    total_sensors: int
+    average_quality_score: float
+    quality_distribution: Dict[str, int]
+    problem_sensors: List[ProblemSensorRankingSchema]
+    recommendations: List[RepairRecommendationSchema]
+    anomaly_statistics: Dict[str, Any]
+    quality_trend: List[Dict[str, Any]]
+    summary: str
+    generated_at: datetime
+
+
+class DataQualityCheckRequest(BaseModel):
+    """数据质量检查请求"""
+    sensor_id: str = Field(..., description="传感器/螺栓ID")
+    data: List[List[Any]] = Field(
+        ...,
+        description="时序数据，每个元素为[时间字符串, 数值]",
+        min_length=1
+    )
+    include_anomaly_classification: bool = Field(
+        True,
+        description="是否包含异常分类"
+    )
+
+
+class DataQualityCheckBatchRequest(BaseModel):
+    """批量数据质量检查请求"""
+    sensors_data: Dict[str, List[List[Any]]] = Field(
+        ...,
+        description="传感器数据字典 {sensor_id: [[时间, 数值], ...]}"
+    )
+
+
+class QualityReportRequest(BaseModel):
+    """生成质量报告请求"""
+    report_date: Optional[datetime] = Field(None, description="报告日期，默认今日")
+    sensor_ids: Optional[List[str]] = Field(None, description="传感器ID列表，默认全部")
+    save_to_db: bool = Field(True, description="是否保存到数据库")
+
+
+class DataQualityHistoryRequest(BaseModel):
+    """获取质量历史请求"""
+    sensor_id: str = Field(..., description="传感器ID")
+    start_time: Optional[datetime] = Field(None, description="开始时间")
+    end_time: Optional[datetime] = Field(None, description="结束时间")
+    limit: int = Field(100, ge=1, le=1000, description="返回数量限制")
+
+
+class ConfidenceAdjustmentRequest(BaseModel):
+    """置信度调整请求"""
+    sensor_id: str = Field(..., description="传感器ID")
+    original_confidence: float = Field(..., ge=0.0, le=1.0, description="原始置信度")
+    data: List[List[Any]] = Field(
+        ...,
+        description="时序数据",
+        min_length=1
+    )
+
+
+class ConfidenceAdjustmentResponse(BaseModel):
+    """置信度调整响应"""
+    sensor_id: str
+    original_confidence: float
+    adjusted_confidence: float
+    quality_score: float
+    quality_level: str
+    adjustment_factor: float
+    reasons: List[str]
+

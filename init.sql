@@ -339,5 +339,139 @@ INSERT INTO sc_alert_subscriptions (subscriber_type, subscriber_id, subscriber_n
 ('role', 'operator', '运维工程师', 2, '[2,3,4]', '["email","sms"]', '{"email":["ops@example.com"],"sms":["13800000000"]}'),
 ('role', 'manager', '部门经理', 3, '[3,4]', '["email"]', '{"email":["manager@example.com"]}');
 
+-- ============================================================
+-- 数据质量检查表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_data_quality_checks (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    sensor_id VARCHAR(50) NOT NULL COMMENT '传感器/螺栓ID',
+    total_points INT COMMENT '总数据点数',
+    valid_points INT COMMENT '有效数据点数',
+    overall_score FLOAT COMMENT '综合质量评分',
+    completeness_score FLOAT COMMENT '完整性评分',
+    consistency_score FLOAT COMMENT '一致性评分',
+    validity_score FLOAT COMMENT '有效性评分',
+    stability_score FLOAT COMMENT '稳定性评分',
+    rule_scores TEXT COMMENT '各规则评分 JSON',
+    violations TEXT COMMENT '规则违反记录 JSON',
+    quality_level VARCHAR(20) COMMENT '质量等级 excellent/good/fair/poor/critical',
+    valid_for_training TINYINT DEFAULT 1 COMMENT '是否适合训练',
+    confidence_adjustment FLOAT DEFAULT 1.0 COMMENT '置信度调整系数',
+    check_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '检查时间',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_dqc_sensor (sensor_id),
+    INDEX idx_dqc_time (check_time),
+    INDEX idx_dqc_score (overall_score),
+    INDEX idx_dqc_level (quality_level)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='数据质量检查表';
+
+-- ============================================================
+-- 质量报告表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_quality_reports (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    report_date DATETIME NOT NULL COMMENT '报告日期',
+    total_sensors INT COMMENT '总传感器数',
+    average_score FLOAT COMMENT '平均质量评分',
+    quality_distribution TEXT COMMENT '质量分布 JSON',
+    problem_sensors TEXT COMMENT '问题传感器排行 JSON',
+    recommendations TEXT COMMENT '修复建议 JSON',
+    anomaly_statistics TEXT COMMENT '异常统计 JSON',
+    quality_trend TEXT COMMENT '质量趋势 JSON',
+    summary TEXT COMMENT '报告摘要',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    UNIQUE KEY idx_qr_date (report_date),
+    INDEX idx_qr_create (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='质量报告表';
+
+-- ============================================================
+-- 扩展 sc_anomaly_data 表，添加异常分类字段
+-- ============================================================
+-- 检查并添加 classification 字段
+SET @dbname = DATABASE();
+SET @tablename = 'sc_anomaly_data';
+SET @columnname = 'classification';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(20) COMMENT ''异常分类: true_anomaly/collection_anomaly/uncertain/mixed''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 classification_confidence 字段
+SET @columnname = 'classification_confidence';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' FLOAT COMMENT ''分类置信度''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 collection_subtype 字段
+SET @columnname = 'collection_subtype';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(20) COMMENT ''采集异常子类型''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 true_anomaly_subtype 字段
+SET @columnname = 'true_anomaly_subtype';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(20) COMMENT ''真异常子类型''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 classification_evidence 字段
+SET @columnname = 'classification_evidence';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' TEXT COMMENT ''分类证据 JSON''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加分类索引
+SET @indexname = 'idx_anomaly_classification';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND index_name = @indexname) > 0,
+  'SELECT 1',
+  CONCAT('CREATE INDEX ', @indexname, ' ON ', @tablename, ' (classification)')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
 -- 显示创建的表
 SHOW TABLES;
