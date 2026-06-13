@@ -22,8 +22,9 @@ import os
 import time
 import hashlib
 import secrets
+import json
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, List
 from functools import wraps
 from collections import defaultdict
 from dataclasses import dataclass
@@ -344,4 +345,234 @@ def require_permission(permission: str) -> Callable:
         
         return wrapper
     
+    return decorator
+
+
+# ============================================================
+# 多租户认证与配额执行
+# ============================================================
+
+TENANT_API_KEY_HEADER = APIKeyHeader(name="X-Tenant-API-Key", auto_error=False)
+TENANT_TOKEN_HEADER = APIKeyHeader(name="X-Tenant-Token", auto_error=False)
+
+_tenant_tokens: Dict[str, Dict[str, Any]] = {}
+
+
+def generate_tenant_token(tenant_id: int, user_id: int, username: str, role: str) -> str:
+    token = secrets.token_hex(32)
+    _tenant_tokens[token] = {
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "username": username,
+        "role": role,
+        "created_at": time.time(),
+        "expires_at": time.time() + 86400,
+    }
+    return token
+
+
+def verify_tenant_token(token: str) -> Optional[Dict[str, Any]]:
+    info = _tenant_tokens.get(token)
+    if not info:
+        return None
+    if time.time() > info["expires_at"]:
+        _tenant_tokens.pop(token, None)
+        return None
+    return info
+
+
+def revoke_tenant_token(token: str) -> None:
+    _tenant_tokens.pop(token, None)
+
+
+async def get_tenant_context(
+    request: Request,
+    tenant_api_key: Optional[str] = Security(TENANT_API_KEY_HEADER),
+    tenant_token: Optional[str] = Security(TENANT_TOKEN_HEADER),
+) -> Dict[str, Any]:
+    """
+    解析租户上下文依赖
+
+    支持两种认证方式:
+    1. X-Tenant-API-Key: 租户 API Key 认证
+    2. X-Tenant-Token: 登录令牌认证
+
+    优先使用 API Key, 其次使用 Token。
+    无凭据时返回匿名上下文。
+    """
+    if tenant_api_key:
+        from app.services.tenant import TenantAPIKeyService
+        svc = TenantAPIKeyService()
+        key_info = svc.validate_api_key(tenant_api_key)
+        if key_info:
+            from app.services.tenant import QuotaService
+            QuotaService().increment_api_calls(key_info["tenant_id"])
+            return {
+                "tenant_id": key_info["tenant_id"],
+                "user_id": key_info.get("user_id"),
+                "role": "api_key",
+                "permissions": key_info.get("permissions", ["read"]),
+                "auth_method": "api_key",
+            }
+
+    if tenant_token:
+        token_info = verify_tenant_token(tenant_token)
+        if token_info:
+            return {
+                "tenant_id": token_info["tenant_id"],
+                "user_id": token_info["user_id"],
+                "username": token_info["username"],
+                "role": token_info["role"],
+                "permissions": _role_to_permissions(token_info["role"]),
+                "auth_method": "token",
+            }
+
+    return {
+        "tenant_id": None,
+        "user_id": None,
+        "role": "anonymous",
+        "permissions": [],
+        "auth_method": "none",
+    }
+
+
+def _role_to_permissions(role: str) -> List[str]:
+    mapping = {
+        "tenant_admin": ["read", "write", "admin", "tenant_admin"],
+        "admin": ["read", "write", "admin"],
+        "operator": ["read", "write"],
+        "viewer": ["read"],
+    }
+    return mapping.get(role, ["read"])
+
+
+def require_tenant_auth(func: Callable) -> Callable:
+    """
+    要求租户认证装饰器
+
+    Usage:
+        @router.post("/predict")
+        @require_tenant_auth
+        async def predict():
+            pass
+    """
+    @wraps(func)
+    async def wrapper(*args, request: Request = None, **kwargs):
+        api_key = None
+        token = None
+        if request:
+            api_key = request.headers.get("X-Tenant-API-Key")
+            token = request.headers.get("X-Tenant-Token")
+
+        if api_key:
+            from app.services.tenant import TenantAPIKeyService
+            svc = TenantAPIKeyService()
+            key_info = svc.validate_api_key(api_key)
+            if not key_info:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "Unauthorized", "message": "无效的租户API密钥"},
+                )
+            return await func(*args, **kwargs)
+
+        if token:
+            token_info = verify_tenant_token(token)
+            if not token_info:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "Unauthorized", "message": "无效或过期的租户令牌"},
+                )
+            return await func(*args, **kwargs)
+
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "Unauthorized", "message": "缺少租户认证凭据"},
+        )
+
+    return wrapper
+
+
+def require_tenant_role(*roles: str) -> Callable:
+    """
+    要求特定租户角色装饰器
+
+    Usage:
+        @router.post("/admin/config")
+        @require_tenant_role("tenant_admin", "admin")
+        async def admin_config():
+            pass
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, request: Request = None, **kwargs):
+            token = request.headers.get("X-Tenant-Token") if request else None
+            api_key_str = request.headers.get("X-Tenant-API-Key") if request else None
+
+            user_role = None
+            if token:
+                token_info = verify_tenant_token(token)
+                if token_info:
+                    user_role = token_info["role"]
+            elif api_key_str:
+                from app.services.tenant import TenantAPIKeyService
+                svc = TenantAPIKeyService()
+                key_info = svc.validate_api_key(api_key_str)
+                if key_info:
+                    user_role = "api_key"
+
+            if user_role not in roles and user_role != "tenant_admin":
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "Forbidden", "message": f"需要角色: {', '.join(roles)}"},
+                )
+            return await func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def check_tenant_quota(resource: str) -> Callable:
+    """
+    租户配额检查装饰器
+
+    Usage:
+        @router.post("/model/train")
+        @check_tenant_quota("model")
+        async def train():
+            pass
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, request: Request = None, **kwargs):
+            tenant_id = None
+            if request:
+                token = request.headers.get("X-Tenant-Token")
+                api_key_str = request.headers.get("X-Tenant-API-Key")
+                if token:
+                    token_info = verify_tenant_token(token)
+                    if token_info:
+                        tenant_id = token_info["tenant_id"]
+                elif api_key_str:
+                    from app.services.tenant import TenantAPIKeyService
+                    svc = TenantAPIKeyService()
+                    key_info = svc.validate_api_key(api_key_str)
+                    if key_info:
+                        tenant_id = key_info["tenant_id"]
+
+            if tenant_id:
+                from app.services.tenant import QuotaService
+                quota_svc = QuotaService()
+                if not quota_svc.check_quota(tenant_id, resource):
+                    raise HTTPException(
+                        status_code=429,
+                        detail={
+                            "error": "QuotaExceeded",
+                            "message": f"租户 {resource} 配额已用尽",
+                        },
+                    )
+            return await func(*args, **kwargs)
+
+        return wrapper
+
     return decorator

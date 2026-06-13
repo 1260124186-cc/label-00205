@@ -19,7 +19,7 @@ import pandas as pd
 import json
 import os
 import torch
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
@@ -67,6 +67,14 @@ from app.api.schemas import (
     EdgeModelExportResponse, EdgeDeviceRegisterRequest,
     EdgeDeviceRegisterResponse, EdgeDeviceHeartbeatRequest,
     EdgeDeviceHeartbeatResponse,
+    TenantCreateRequest, TenantUpdateRequest, TenantResponse, TenantListResponse,
+    OrgNodeCreateRequest, OrgNodeUpdateRequest, OrgNodeResponse, OrgTreeResponse,
+    QuotaUpdateRequest, QuotaResponse,
+    TenantUserCreateRequest, TenantUserUpdateRequest, TenantUserPasswordRequest,
+    TenantUserResponse, TenantUserListResponse,
+    TenantAPIKeyCreateRequest, TenantAPIKeyUpdateRequest,
+    TenantAPIKeyResponse, TenantAPIKeyCreateResponse,
+    TenantLoginRequest, TenantLoginResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -3184,3 +3192,785 @@ async def list_edge_devices():
 def _get_version_manager():
     from app.core.model_version import ModelVersionManager
     return ModelVersionManager()
+
+
+# ============================================================
+# 多租户与组织架构
+# ============================================================
+
+def _tenant_to_dict(t) -> Dict[str, Any]:
+    data = {
+        'id': t.id,
+        'tenant_code': t.tenant_code,
+        'tenant_name': t.tenant_name,
+        'contact_email': t.contact_email,
+        'contact_phone': t.contact_phone,
+        'status': t.status,
+        'expire_time': t.expire_time,
+        'create_time': t.create_time,
+        'update_time': t.update_time,
+    }
+    if t.settings:
+        try:
+            data['settings'] = json.loads(t.settings)
+        except Exception:
+            data['settings'] = None
+    else:
+        data['settings'] = None
+    return data
+
+
+def _org_node_to_dict(n) -> Dict[str, Any]:
+    extra = None
+    if n.extra_info:
+        try:
+            extra = json.loads(n.extra_info)
+        except Exception:
+            extra = None
+    data = {
+        'id': n.id,
+        'tenant_id': n.tenant_id,
+        'parent_id': n.parent_id,
+        'node_code': n.node_code,
+        'node_name': n.node_name,
+        'node_type': n.node_type,
+        'path': n.path,
+        'level': n.level,
+        'sort_order': n.sort_order,
+        'extra_info': extra,
+        'status': n.status,
+        'create_time': n.create_time,
+        'update_time': n.update_time,
+        'children': [],
+    }
+    return data
+
+
+def _quota_to_dict(q) -> Dict[str, Any]:
+    return {
+        'tenant_id': q.tenant_id,
+        'max_models': q.max_models,
+        'max_api_calls_per_day': q.max_api_calls_per_day,
+        'max_storage_mb': q.max_storage_mb,
+        'max_users': q.max_users,
+        'max_org_nodes': q.max_org_nodes,
+        'current_model_count': q.current_model_count,
+        'current_api_calls_today': q.current_api_calls_today,
+        'current_storage_mb': q.current_storage_mb,
+        'current_user_count': q.current_user_count,
+        'current_org_node_count': q.current_org_node_count,
+        'create_time': q.create_time,
+        'update_time': q.update_time,
+    }
+
+
+def _user_to_dict(u) -> Dict[str, Any]:
+    return {
+        'id': u.id,
+        'tenant_id': u.tenant_id,
+        'username': u.username,
+        'display_name': u.display_name,
+        'email': u.email,
+        'phone': u.phone,
+        'role': u.role,
+        'org_node_id': u.org_node_id,
+        'status': u.status,
+        'last_login_time': u.last_login_time,
+        'create_time': u.create_time,
+        'update_time': u.update_time,
+    }
+
+
+def _api_key_to_dict(k) -> Dict[str, Any]:
+    perms = None
+    if k.permissions:
+        try:
+            perms = json.loads(k.permissions)
+        except Exception:
+            perms = None
+    return {
+        'id': k.id,
+        'tenant_id': k.tenant_id,
+        'api_key': k.api_key,
+        'key_name': k.key_name,
+        'permissions': perms,
+        'rate_limit': k.rate_limit,
+        'user_id': k.user_id,
+        'expires_at': k.expires_at,
+        'last_used_at': k.last_used_at,
+        'status': k.status,
+        'create_time': k.create_time,
+        'update_time': k.update_time,
+    }
+
+
+# ---------- 租户登录 ----------
+
+@router.post(
+    "/tenant/login",
+    response_model=TenantLoginResponse,
+    tags=["多租户"],
+    summary="租户用户登录",
+)
+async def tenant_login(request: TenantLoginRequest):
+    """租户用户登录, 返回令牌"""
+    try:
+        from app.services.tenant import TenantUserService
+        from app.api.auth import generate_tenant_token
+        svc = TenantUserService()
+        result = svc.authenticate(request.tenant_code, request.username, request.password)
+        if not result:
+            raise HTTPException(status_code=401, detail="租户编码、用户名或密码错误")
+        token = generate_tenant_token(
+            tenant_id=result["tenant_id"],
+            user_id=result["user_id"],
+            username=result["username"],
+            role=result["role"],
+        )
+        return TenantLoginResponse(
+            token=token,
+            tenant_id=result["tenant_id"],
+            user_id=result["user_id"],
+            username=result["username"],
+            role=result["role"],
+            expires_at=datetime.now() + timedelta(hours=24),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"租户登录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 租户管理 ----------
+
+@router.post(
+    "/tenants",
+    response_model=TenantResponse,
+    tags=["多租户"],
+    summary="创建租户",
+)
+async def create_tenant(request: TenantCreateRequest):
+    """创建新租户, 自动创建默认配额和管理员账号"""
+    try:
+        from app.services.tenant import TenantService
+        svc = TenantService()
+        tenant = svc.create_tenant(
+            tenant_code=request.tenant_code,
+            tenant_name=request.tenant_name,
+            contact_email=request.contact_email,
+            contact_phone=request.contact_phone,
+            expire_time=request.expire_time,
+        )
+        if not tenant:
+            raise HTTPException(status_code=500, detail="创建租户失败")
+        return _tenant_to_dict(tenant)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建租户失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants",
+    response_model=TenantListResponse,
+    tags=["多租户"],
+    summary="查询租户列表",
+)
+async def list_tenants(
+    status: Optional[str] = Query(None, description="状态 active/suspended/deleted"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """查询租户列表"""
+    try:
+        from app.services.tenant import TenantService
+        svc = TenantService()
+        tenants = svc.list_tenants(status=status, limit=limit, offset=offset)
+        items = [_tenant_to_dict(t) for t in tenants]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询租户列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}",
+    response_model=TenantResponse,
+    tags=["多租户"],
+    summary="获取租户详情",
+)
+async def get_tenant(tenant_id: int):
+    """获取租户详情"""
+    try:
+        from app.services.tenant import TenantService
+        svc = TenantService()
+        tenant = svc.get_tenant(tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail="租户不存在")
+        return _tenant_to_dict(tenant)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取租户详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/tenants/{tenant_id}",
+    response_model=TenantResponse,
+    tags=["多租户"],
+    summary="更新租户",
+)
+async def update_tenant(tenant_id: int, request: TenantUpdateRequest):
+    """更新租户信息"""
+    try:
+        from app.services.tenant import TenantService
+        svc = TenantService()
+        data = request.model_dump(exclude_unset=True)
+        tenant = svc.update_tenant(tenant_id, **data)
+        if not tenant:
+            raise HTTPException(status_code=404, detail="租户不存在")
+        return _tenant_to_dict(tenant)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新租户失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/tenants/{tenant_id}",
+    tags=["多租户"],
+    summary="删除租户",
+)
+async def delete_tenant(tenant_id: int):
+    """软删除租户"""
+    try:
+        from app.services.tenant import TenantService
+        svc = TenantService()
+        ok = svc.delete_tenant(tenant_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="租户不存在")
+        return {"status": "success", "message": "租户已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除租户失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 组织架构 ----------
+
+@router.post(
+    "/tenants/{tenant_id}/org/nodes",
+    response_model=OrgNodeResponse,
+    tags=["组织架构"],
+    summary="创建组织节点",
+)
+async def create_org_node(tenant_id: int, request: OrgNodeCreateRequest):
+    """
+    创建组织节点
+
+    层级: 集团(group) → 工厂(factory) → 装置(unit) → 法兰面(flange) → 螺栓(bolt)
+    """
+    try:
+        from app.services.tenant import OrganizationService
+        svc = OrganizationService()
+        node = svc.create_node(
+            tenant_id=tenant_id,
+            node_name=request.node_name,
+            node_type=request.node_type,
+            parent_id=request.parent_id,
+            node_code=request.node_code,
+            sort_order=request.sort_order,
+            extra_info=request.extra_info,
+        )
+        if not node:
+            raise HTTPException(status_code=500, detail="创建组织节点失败")
+        return _org_node_to_dict(node)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建组织节点失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/org/nodes",
+    tags=["组织架构"],
+    summary="查询组织节点列表",
+)
+async def list_org_nodes(
+    tenant_id: int,
+    parent_id: Optional[int] = Query(None, description="父节点ID"),
+    node_type: Optional[str] = Query(None, description="节点类型"),
+    status: Optional[str] = Query(None, description="状态"),
+):
+    """查询组织节点列表"""
+    try:
+        from app.services.tenant import OrganizationService
+        svc = OrganizationService()
+        nodes = svc.list_nodes(
+            tenant_id=tenant_id,
+            parent_id=parent_id,
+            node_type=node_type,
+            status=status,
+        )
+        return [_org_node_to_dict(n) for n in nodes]
+    except Exception as e:
+        logger.error(f"查询组织节点失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/org/tree",
+    response_model=OrgTreeResponse,
+    tags=["组织架构"],
+    summary="获取组织架构树",
+)
+async def get_org_tree(tenant_id: int):
+    """获取租户的完整组织架构树"""
+    try:
+        from app.services.tenant import OrganizationService
+        svc = OrganizationService()
+        tree = svc.get_tree(tenant_id)
+        return {"tenant_id": tenant_id, "nodes": tree}
+    except Exception as e:
+        logger.error(f"获取组织架构树失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/org/nodes/{node_id}",
+    response_model=OrgNodeResponse,
+    tags=["组织架构"],
+    summary="获取组织节点详情",
+)
+async def get_org_node(tenant_id: int, node_id: int):
+    """获取组织节点详情"""
+    try:
+        from app.services.tenant import OrganizationService
+        svc = OrganizationService()
+        node = svc.get_node(tenant_id, node_id)
+        if not node:
+            raise HTTPException(status_code=404, detail="节点不存在")
+        return _org_node_to_dict(node)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取组织节点详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/tenants/{tenant_id}/org/nodes/{node_id}",
+    response_model=OrgNodeResponse,
+    tags=["组织架构"],
+    summary="更新组织节点",
+)
+async def update_org_node(tenant_id: int, node_id: int, request: OrgNodeUpdateRequest):
+    """更新组织节点"""
+    try:
+        from app.services.tenant import OrganizationService
+        svc = OrganizationService()
+        data = request.model_dump(exclude_unset=True)
+        node = svc.update_node(tenant_id, node_id, **data)
+        if not node:
+            raise HTTPException(status_code=404, detail="节点不存在")
+        return _org_node_to_dict(node)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新组织节点失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/tenants/{tenant_id}/org/nodes/{node_id}",
+    tags=["组织架构"],
+    summary="删除组织节点",
+)
+async def delete_org_node(tenant_id: int, node_id: int):
+    """删除组织节点(存在子节点时不可删除)"""
+    try:
+        from app.services.tenant import OrganizationService
+        svc = OrganizationService()
+        ok = svc.delete_node(tenant_id, node_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="节点不存在")
+        return {"status": "success", "message": "节点已删除"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除组织节点失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/org/nodes/{node_id}/ancestors",
+    tags=["组织架构"],
+    summary="获取祖先节点",
+)
+async def get_org_ancestors(tenant_id: int, node_id: int):
+    """获取指定节点的所有祖先节点(从集团到父节点)"""
+    try:
+        from app.services.tenant import OrganizationService
+        svc = OrganizationService()
+        ancestors = svc.get_ancestors(tenant_id, node_id)
+        return [_org_node_to_dict(a) for a in ancestors]
+    except Exception as e:
+        logger.error(f"获取祖先节点失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/org/nodes/{node_id}/descendants",
+    tags=["组织架构"],
+    summary="获取后代节点",
+)
+async def get_org_descendants(tenant_id: int, node_id: int):
+    """获取指定节点的所有后代节点"""
+    try:
+        from app.services.tenant import OrganizationService
+        svc = OrganizationService()
+        descendants = svc.get_descendants(tenant_id, node_id)
+        return [_org_node_to_dict(d) for d in descendants]
+    except Exception as e:
+        logger.error(f"获取后代节点失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 配额管理 ----------
+
+@router.get(
+    "/tenants/{tenant_id}/quota",
+    response_model=QuotaResponse,
+    tags=["配额管理"],
+    summary="获取租户配额",
+)
+async def get_tenant_quota(tenant_id: int):
+    """获取租户的配额和当前用量"""
+    try:
+        from app.services.tenant import QuotaService
+        svc = QuotaService()
+        quota = svc.get_quota(tenant_id)
+        if not quota:
+            raise HTTPException(status_code=404, detail="配额信息不存在")
+        return _quota_to_dict(quota)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取配额失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/tenants/{tenant_id}/quota",
+    response_model=QuotaResponse,
+    tags=["配额管理"],
+    summary="更新租户配额",
+)
+async def update_tenant_quota(tenant_id: int, request: QuotaUpdateRequest):
+    """更新租户配额上限"""
+    try:
+        from app.services.tenant import QuotaService
+        svc = QuotaService()
+        data = request.model_dump(exclude_unset=True)
+        quota = svc.update_quota(tenant_id, **data)
+        if not quota:
+            raise HTTPException(status_code=404, detail="配额信息不存在")
+        return _quota_to_dict(quota)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新配额失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 租户用户管理 ----------
+
+@router.post(
+    "/tenants/{tenant_id}/users",
+    response_model=TenantUserResponse,
+    tags=["租户用户"],
+    summary="创建租户用户",
+)
+async def create_tenant_user(tenant_id: int, request: TenantUserCreateRequest):
+    """租户管理员自助创建子账号"""
+    try:
+        from app.services.tenant import TenantUserService, QuotaService
+        quota_svc = QuotaService()
+        if not quota_svc.check_quota(tenant_id, "user"):
+            raise HTTPException(status_code=429, detail="用户数已达配额上限")
+        svc = TenantUserService()
+        user = svc.create_user(
+            tenant_id=tenant_id,
+            username=request.username,
+            password=request.password,
+            display_name=request.display_name,
+            email=request.email,
+            phone=request.phone,
+            role=request.role,
+            org_node_id=request.org_node_id,
+        )
+        if not user:
+            raise HTTPException(status_code=500, detail="创建用户失败")
+        return _user_to_dict(user)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建租户用户失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/users",
+    response_model=TenantUserListResponse,
+    tags=["租户用户"],
+    summary="查询租户用户列表",
+)
+async def list_tenant_users(
+    tenant_id: int,
+    role: Optional[str] = Query(None, description="角色"),
+    status: Optional[str] = Query(None, description="状态"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """查询租户下的用户列表"""
+    try:
+        from app.services.tenant import TenantUserService
+        svc = TenantUserService()
+        users = svc.list_users(
+            tenant_id=tenant_id, role=role, status=status,
+            limit=limit, offset=offset,
+        )
+        total = svc.count_users(tenant_id)
+        items = [_user_to_dict(u) for u in users]
+        return {"total": total, "items": items}
+    except Exception as e:
+        logger.error(f"查询租户用户失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/users/{user_id}",
+    response_model=TenantUserResponse,
+    tags=["租户用户"],
+    summary="获取租户用户详情",
+)
+async def get_tenant_user(tenant_id: int, user_id: int):
+    """获取租户用户详情"""
+    try:
+        from app.services.tenant import TenantUserService
+        svc = TenantUserService()
+        user = svc.get_user(tenant_id, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        return _user_to_dict(user)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取租户用户详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/tenants/{tenant_id}/users/{user_id}",
+    response_model=TenantUserResponse,
+    tags=["租户用户"],
+    summary="更新租户用户",
+)
+async def update_tenant_user(tenant_id: int, user_id: int, request: TenantUserUpdateRequest):
+    """更新租户用户信息(角色、状态等)"""
+    try:
+        from app.services.tenant import TenantUserService
+        svc = TenantUserService()
+        data = request.model_dump(exclude_unset=True)
+        user = svc.update_user(tenant_id, user_id, **data)
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        return _user_to_dict(user)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新租户用户失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/tenants/{tenant_id}/users/{user_id}/password",
+    tags=["租户用户"],
+    summary="修改租户用户密码",
+)
+async def change_tenant_user_password(
+    tenant_id: int, user_id: int, request: TenantUserPasswordRequest,
+):
+    """修改租户用户密码"""
+    try:
+        from app.services.tenant import TenantUserService
+        svc = TenantUserService()
+        ok = svc.change_password(tenant_id, user_id, request.new_password)
+        if not ok:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        return {"status": "success", "message": "密码已修改"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"修改密码失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/tenants/{tenant_id}/users/{user_id}",
+    tags=["租户用户"],
+    summary="禁用租户用户",
+)
+async def delete_tenant_user(tenant_id: int, user_id: int):
+    """禁用租户用户(软删除)"""
+    try:
+        from app.services.tenant import TenantUserService
+        svc = TenantUserService()
+        ok = svc.delete_user(tenant_id, user_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        return {"status": "success", "message": "用户已禁用"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"禁用用户失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 租户 API Key 管理 ----------
+
+@router.post(
+    "/tenants/{tenant_id}/api-keys",
+    response_model=TenantAPIKeyCreateResponse,
+    tags=["租户API Key"],
+    summary="创建租户API Key",
+)
+async def create_tenant_api_key(tenant_id: int, request: TenantAPIKeyCreateRequest):
+    """
+    创建租户 API Key
+
+    明文密钥仅在创建时返回一次, 之后无法再查看。
+    """
+    try:
+        from app.services.tenant import TenantAPIKeyService
+        svc = TenantAPIKeyService()
+        result = svc.create_api_key(
+            tenant_id=tenant_id,
+            key_name=request.key_name,
+            permissions=request.permissions,
+            rate_limit=request.rate_limit,
+            user_id=request.user_id,
+            expires_at=request.expires_at,
+        )
+        if not result:
+            raise HTTPException(status_code=500, detail="创建API Key失败")
+        resp = {k: v for k, v in result.items() if k != "api_key_plain"}
+        resp["api_key_plain"] = result["api_key_plain"]
+        return resp
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建API Key失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/api-keys",
+    tags=["租户API Key"],
+    summary="查询租户API Key列表",
+)
+async def list_tenant_api_keys(
+    tenant_id: int,
+    status: Optional[str] = Query(None, description="状态 active/revoked"),
+):
+    """查询租户下的API Key列表"""
+    try:
+        from app.services.tenant import TenantAPIKeyService
+        svc = TenantAPIKeyService()
+        keys = svc.list_api_keys(tenant_id=tenant_id, status=status)
+        return [_api_key_to_dict(k) for k in keys]
+    except Exception as e:
+        logger.error(f"查询API Key失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/tenants/{tenant_id}/api-keys/{key_id}",
+    response_model=TenantAPIKeyResponse,
+    tags=["租户API Key"],
+    summary="获取API Key详情",
+)
+async def get_tenant_api_key(tenant_id: int, key_id: int):
+    """获取API Key详情"""
+    try:
+        from app.services.tenant import TenantAPIKeyService
+        svc = TenantAPIKeyService()
+        key_obj = svc.get_api_key(tenant_id, key_id)
+        if not key_obj:
+            raise HTTPException(status_code=404, detail="API Key不存在")
+        return _api_key_to_dict(key_obj)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取API Key详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/tenants/{tenant_id}/api-keys/{key_id}",
+    response_model=TenantAPIKeyResponse,
+    tags=["租户API Key"],
+    summary="更新API Key",
+)
+async def update_tenant_api_key(
+    tenant_id: int, key_id: int, request: TenantAPIKeyUpdateRequest,
+):
+    """更新API Key(名称、权限、速率限制等)"""
+    try:
+        from app.services.tenant import TenantAPIKeyService
+        svc = TenantAPIKeyService()
+        data = request.model_dump(exclude_unset=True)
+        key_obj = svc.update_api_key(tenant_id, key_id, **data)
+        if not key_obj:
+            raise HTTPException(status_code=404, detail="API Key不存在")
+        return _api_key_to_dict(key_obj)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新API Key失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/tenants/{tenant_id}/api-keys/{key_id}",
+    tags=["租户API Key"],
+    summary="吊销API Key",
+)
+async def revoke_tenant_api_key(tenant_id: int, key_id: int):
+    """吊销API Key"""
+    try:
+        from app.services.tenant import TenantAPIKeyService
+        svc = TenantAPIKeyService()
+        ok = svc.revoke_api_key(tenant_id, key_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="API Key不存在")
+        return {"status": "success", "message": "API Key已吊销"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"吊销API Key失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

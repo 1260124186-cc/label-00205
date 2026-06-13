@@ -36,18 +36,18 @@ class ErrorResponse(BaseModel):
 class BoltPredictionRequest(BaseModel):
     """
     螺栓预测请求
-    
+
     Attributes:
         螺栓id: 螺栓唯一标识
         data: 预紧力时序数据 [[时间, 预紧力], ...]
     """
     螺栓id: str = Field(..., description="螺栓唯一标识", alias="bolt_id")
     data: List[List[Any]] = Field(
-        ..., 
+        ...,
         description="预紧力时序数据，每个元素为[时间字符串, 预紧力值]",
         min_length=1
     )
-    
+
     class Config:
         populate_by_name = True
         json_schema_extra = {
@@ -65,7 +65,7 @@ class BoltPredictionRequest(BaseModel):
 class BoltPredictionResponse(BaseModel):
     """
     螺栓预测响应
-    
+
     Attributes:
         bolt_id: 螺栓ID
         status: 预测状态
@@ -93,7 +93,7 @@ class BoltPredictionResponse(BaseModel):
 class FlangePredictionRequest(BaseModel):
     """
     法兰面预测请求
-    
+
     Attributes:
         法兰面id: 法兰面唯一标识
         data: 多螺栓预紧力时序数据
@@ -103,7 +103,7 @@ class FlangePredictionRequest(BaseModel):
         ...,
         description="多螺栓预紧力数据，三维数组[螺栓][时间点][时间,预紧力]"
     )
-    
+
     class Config:
         populate_by_name = True
         json_schema_extra = {
@@ -1033,3 +1033,213 @@ class EdgeDeviceHeartbeatResponse(BaseModel):
     force_sync: bool = False
     server_time: str
 
+
+# ============================================================
+# 多租户与组织架构
+# ============================================================
+
+class TenantCreateRequest(BaseModel):
+    tenant_code: str = Field(..., min_length=2, max_length=64, description="租户编码")
+    tenant_name: str = Field(..., min_length=1, max_length=200, description="租户名称")
+    contact_email: Optional[str] = Field(None, description="联系邮箱")
+    contact_phone: Optional[str] = Field(None, description="联系电话")
+    expire_time: Optional[datetime] = Field(None, description="到期时间")
+
+
+class TenantUpdateRequest(BaseModel):
+    tenant_name: Optional[str] = Field(None, max_length=200)
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    status: Optional[str] = Field(None, description="状态 active/suspended/deleted")
+    expire_time: Optional[datetime] = None
+    settings: Optional[Dict[str, Any]] = None
+
+
+class TenantResponse(BaseModel):
+    id: int
+    tenant_code: str
+    tenant_name: str
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    status: str
+    settings: Optional[Dict[str, Any]] = None
+    expire_time: Optional[datetime] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TenantListResponse(BaseModel):
+    total: int
+    items: List[TenantResponse]
+
+
+class OrgNodeCreateRequest(BaseModel):
+    tenant_id: int = Field(..., description="所属租户ID")
+    parent_id: Optional[int] = Field(None, description="父节点ID, 空表示根节点")
+    node_code: Optional[str] = Field(None, max_length=100, description="节点编码")
+    node_name: str = Field(..., min_length=1, max_length=200, description="节点名称")
+    node_type: str = Field(..., description="节点类型 group/factory/unit/flange/bolt")
+    sort_order: int = Field(0, description="排序序号")
+    extra_info: Optional[Dict[str, Any]] = Field(None, description="扩展信息")
+
+
+class OrgNodeUpdateRequest(BaseModel):
+    node_name: Optional[str] = Field(None, max_length=200)
+    node_code: Optional[str] = Field(None, max_length=100)
+    sort_order: Optional[int] = None
+    extra_info: Optional[Dict[str, Any]] = None
+    status: Optional[str] = Field(None, description="状态 active/inactive")
+
+
+class OrgNodeResponse(BaseModel):
+    id: int
+    tenant_id: int
+    parent_id: Optional[int] = None
+    node_code: Optional[str] = None
+    node_name: str
+    node_type: str
+    path: Optional[str] = None
+    level: int
+    sort_order: int
+    extra_info: Optional[Dict[str, Any]] = None
+    status: str
+    create_time: datetime
+    update_time: datetime
+    children: Optional[List["OrgNodeResponse"]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class OrgTreeResponse(BaseModel):
+    tenant_id: int
+    nodes: List[OrgNodeResponse]
+
+
+class QuotaUpdateRequest(BaseModel):
+    max_models: Optional[int] = Field(None, ge=0)
+    max_api_calls_per_day: Optional[int] = Field(None, ge=0)
+    max_storage_mb: Optional[int] = Field(None, ge=0)
+    max_users: Optional[int] = Field(None, ge=0)
+    max_org_nodes: Optional[int] = Field(None, ge=0)
+
+
+class QuotaResponse(BaseModel):
+    tenant_id: int
+    max_models: int
+    max_api_calls_per_day: int
+    max_storage_mb: int
+    max_users: int
+    max_org_nodes: int
+    current_model_count: int
+    current_api_calls_today: int
+    current_storage_mb: float
+    current_user_count: int
+    current_org_node_count: int
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TenantUserCreateRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=100, description="用户名")
+    password: str = Field(..., min_length=6, max_length=128, description="密码")
+    display_name: Optional[str] = Field(None, max_length=200, description="显示名称")
+    email: Optional[str] = Field(None, description="邮箱")
+    phone: Optional[str] = Field(None, description="手机号")
+    role: str = Field("viewer", description="角色 tenant_admin/admin/operator/viewer")
+    org_node_id: Optional[int] = Field(None, description="关联组织节点ID")
+
+
+class TenantUserUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(None, max_length=200)
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[str] = Field(None, description="角色 tenant_admin/admin/operator/viewer")
+    org_node_id: Optional[int] = None
+    status: Optional[str] = Field(None, description="状态 active/disabled")
+
+
+class TenantUserPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=6, max_length=128, description="新密码")
+
+
+class TenantUserResponse(BaseModel):
+    id: int
+    tenant_id: int
+    username: str
+    display_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    role: str
+    org_node_id: Optional[int] = None
+    status: str
+    last_login_time: Optional[datetime] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TenantUserListResponse(BaseModel):
+    total: int
+    items: List[TenantUserResponse]
+
+
+class TenantAPIKeyCreateRequest(BaseModel):
+    key_name: Optional[str] = Field(None, max_length=200, description="密钥名称")
+    permissions: Optional[List[str]] = Field(None, description="权限列表")
+    rate_limit: int = Field(1000, ge=1, description="速率限制 每分钟")
+    user_id: Optional[int] = Field(None, description="关联用户ID")
+    expires_at: Optional[datetime] = Field(None, description="过期时间")
+
+
+class TenantAPIKeyUpdateRequest(BaseModel):
+    key_name: Optional[str] = Field(None, max_length=200)
+    permissions: Optional[List[str]] = None
+    rate_limit: Optional[int] = Field(None, ge=1)
+    status: Optional[str] = Field(None, description="状态 active/revoked")
+    expires_at: Optional[datetime] = None
+
+
+class TenantAPIKeyResponse(BaseModel):
+    id: int
+    tenant_id: int
+    api_key: str
+    key_name: Optional[str] = None
+    permissions: Optional[List[str]] = None
+    rate_limit: int
+    user_id: Optional[int] = None
+    expires_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    status: str
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TenantAPIKeyCreateResponse(TenantAPIKeyResponse):
+    api_key_plain: Optional[str] = Field(None, description="明文密钥, 仅创建时返回一次")
+
+
+class TenantLoginRequest(BaseModel):
+    tenant_code: str = Field(..., description="租户编码")
+    username: str = Field(..., description="用户名")
+    password: str = Field(..., description="密码")
+
+
+class TenantLoginResponse(BaseModel):
+    token: str
+    tenant_id: int
+    user_id: int
+    username: str
+    role: str
+    expires_at: datetime

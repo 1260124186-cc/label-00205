@@ -475,3 +475,106 @@ DEALLOCATE PREPARE alterIfNotExists;
 
 -- 显示创建的表
 SHOW TABLES;
+
+-- ============================================================
+-- 多租户与组织架构
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS sc_tenants (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_code VARCHAR(64) UNIQUE NOT NULL COMMENT '租户编码',
+    tenant_name VARCHAR(200) NOT NULL COMMENT '租户名称',
+    contact_email VARCHAR(200) COMMENT '联系邮箱',
+    contact_phone VARCHAR(50) COMMENT '联系电话',
+    status VARCHAR(20) DEFAULT 'active' COMMENT '状态 active/suspended/deleted',
+    settings TEXT COMMENT '租户配置 JSON',
+    expire_time DATETIME COMMENT '到期时间',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_tenant_code (tenant_code),
+    INDEX idx_tenant_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='租户表';
+
+CREATE TABLE IF NOT EXISTS sc_org_nodes (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL COMMENT '所属租户ID',
+    parent_id BIGINT COMMENT '父节点ID',
+    node_code VARCHAR(100) COMMENT '节点编码',
+    node_name VARCHAR(200) NOT NULL COMMENT '节点名称',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型 group/factory/unit/flange/bolt',
+    path VARCHAR(500) COMMENT '层级路径 /id/id/...',
+    level INT DEFAULT 0 COMMENT '层级深度 0=集团 1=工厂 2=装置 3=法兰面 4=螺栓',
+    sort_order INT DEFAULT 0 COMMENT '排序序号',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+    status VARCHAR(20) DEFAULT 'active' COMMENT '状态 active/inactive',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_org_tenant (tenant_id),
+    INDEX idx_org_parent (parent_id),
+    INDEX idx_org_type (tenant_id, node_type),
+    INDEX idx_org_path (path)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='组织架构节点表';
+
+CREATE TABLE IF NOT EXISTS sc_tenant_quotas (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT UNIQUE NOT NULL COMMENT '租户ID',
+    max_models INT DEFAULT 10 COMMENT '最大模型数',
+    max_api_calls_per_day INT DEFAULT 10000 COMMENT '每日最大API调用次数',
+    max_storage_mb INT DEFAULT 5120 COMMENT '存储上限 MB',
+    max_users INT DEFAULT 50 COMMENT '最大用户数',
+    max_org_nodes INT DEFAULT 500 COMMENT '最大组织节点数',
+    current_model_count INT DEFAULT 0 COMMENT '当前模型数',
+    current_api_calls_today INT DEFAULT 0 COMMENT '今日API调用次数',
+    current_storage_mb DOUBLE DEFAULT 0.0 COMMENT '当前存储用量 MB',
+    current_user_count INT DEFAULT 0 COMMENT '当前用户数',
+    current_org_node_count INT DEFAULT 0 COMMENT '当前组织节点数',
+    api_call_reset_date VARCHAR(10) COMMENT 'API调用计数重置日期 YYYY-MM-DD',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_quota_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='租户配额表';
+
+CREATE TABLE IF NOT EXISTS sc_tenant_users (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL COMMENT '所属租户ID',
+    username VARCHAR(100) NOT NULL COMMENT '用户名',
+    password_hash VARCHAR(128) COMMENT '密码哈希',
+    display_name VARCHAR(200) COMMENT '显示名称',
+    email VARCHAR(200) COMMENT '邮箱',
+    phone VARCHAR(50) COMMENT '手机号',
+    role VARCHAR(30) DEFAULT 'viewer' COMMENT '角色 tenant_admin/admin/operator/viewer',
+    org_node_id BIGINT COMMENT '关联组织节点ID',
+    status VARCHAR(20) DEFAULT 'active' COMMENT '状态 active/disabled',
+    last_login_time DATETIME COMMENT '最后登录时间',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_user_tenant (tenant_id),
+    UNIQUE KEY idx_user_tenant_username (tenant_id, username),
+    INDEX idx_user_role (role)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='租户用户表';
+
+CREATE TABLE IF NOT EXISTS sc_tenant_api_keys (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL COMMENT '所属租户ID',
+    api_key VARCHAR(64) UNIQUE NOT NULL COMMENT 'API密钥(哈希)',
+    key_name VARCHAR(200) COMMENT '密钥名称',
+    permissions TEXT COMMENT '权限列表 JSON',
+    rate_limit INT DEFAULT 1000 COMMENT '速率限制 每分钟',
+    user_id BIGINT COMMENT '关联用户ID',
+    expires_at DATETIME COMMENT '过期时间',
+    last_used_at DATETIME COMMENT '最后使用时间',
+    status VARCHAR(20) DEFAULT 'active' COMMENT '状态 active/revoked',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_apikey_tenant (tenant_id),
+    INDEX idx_apikey_key (api_key),
+    INDEX idx_apikey_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='租户API Key表';
+
+-- 插入默认租户
+INSERT INTO sc_tenants (tenant_code, tenant_name, contact_email, status) VALUES
+('default', '默认租户', 'admin@example.com', 'active');
+
+-- 插入默认配额
+INSERT INTO sc_tenant_quotas (tenant_id, max_models, max_api_calls_per_day, max_storage_mb, max_users, max_org_nodes) VALUES
+(1, 10, 10000, 5120, 50, 500);

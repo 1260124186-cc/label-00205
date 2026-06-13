@@ -11,7 +11,7 @@
 
 使用示例:
     from app.utils.database import get_db, BoltData
-    
+
     with get_db() as db:
         data = db.query(BoltData).limit(100).all()
 """
@@ -34,10 +34,10 @@ Base = declarative_base()
 class BoltData(Base):
     """
     螺栓预紧力数据表模型
-    
+
     对应数据库表: sc_bolt_data
     存储采集的螺栓预紧力原始数据
-    
+
     Attributes:
         id: 主键，自增长
         sensor_id: 通道ID/螺栓ID
@@ -48,7 +48,7 @@ class BoltData(Base):
         create_time: 创建时间
     """
     __tablename__ = 'sc_bolt_data'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     sensor_id = Column(BigInteger, nullable=False, comment='通道ID/螺栓ID')
     collector_id = Column(BigInteger, comment='采集器ID')
@@ -56,19 +56,19 @@ class BoltData(Base):
     position = Column(String(200), comment='安装位置')
     ptf = Column(Float, comment='预紧力')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
-    
+
     # 索引
     __table_args__ = (
         Index('idx_sensor_time', 'sensor_id', 'create_time'),
     )
-    
+
     @property
     def flange_id(self) -> str:
         """
         获取法兰面ID
-        
+
         法兰面ID由采集器ID、分线器ID和安装位置拼接而成
-        
+
         Returns:
             str: 法兰面ID
         """
@@ -78,10 +78,10 @@ class BoltData(Base):
 class AbnormalPrediction(Base):
     """
     异常预测结果表模型
-    
+
     对应数据库表: sci_abnormal_prediction
     存储模型预测的异常结果
-    
+
     Attributes:
         id: 主键，自增长
         bolt_id: 螺栓编码
@@ -97,7 +97,7 @@ class AbnormalPrediction(Base):
         create_time: 创建时间
     """
     __tablename__ = 'sci_abnormal_prediction'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     bolt_id = Column(BigInteger, comment='螺栓编码')
     flm_id = Column(String(100), comment='法兰面组编码')
@@ -110,7 +110,7 @@ class AbnormalPrediction(Base):
     rec_measures = Column(String(1000), comment='推荐措施')
     recent_time = Column(DateTime, comment='状态时间')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
-    
+
     # 索引
     __table_args__ = (
         Index('idx_node_type', 'node_type'),
@@ -122,15 +122,15 @@ class AbnormalPrediction(Base):
 class MonthPrediction(Base):
     """
     月度预测结果表模型
-    
+
     对应数据库表: ci_month_prediction_details
     存储未来30天的预测结果
-    
+
     Attributes:
         与AbnormalPrediction相同
     """
     __tablename__ = 'ci_month_prediction_details'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     bolt_id = Column(BigInteger, comment='螺栓编码')
     flm_id = Column(String(100), comment='法兰面组编码')
@@ -151,10 +151,10 @@ class MonthPrediction(Base):
 class AlertRule(Base):
     """
     告警规则表模型
-    
+
     对应数据库表: sc_alert_rules
     定义告警触发条件：等级、节点、静默期、升级策略
-    
+
     Attributes:
         id: 主键
         rule_name: 规则名称
@@ -172,7 +172,7 @@ class AlertRule(Base):
         update_time: 更新时间
     """
     __tablename__ = 'sc_alert_rules'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     rule_name = Column(String(200), nullable=False, comment='规则名称')
     alert_level = Column(Integer, nullable=False, comment='告警级别 1-4')
@@ -187,7 +187,7 @@ class AlertRule(Base):
     description = Column(String(500), comment='规则描述')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
-    
+
     __table_args__ = (
         Index('idx_alert_level', 'alert_level'),
         Index('idx_enabled', 'enabled'),
@@ -197,10 +197,10 @@ class AlertRule(Base):
 class AlertEvent(Base):
     """
     告警事件表模型
-    
+
     对应数据库表: sc_alert_events
     存储实际产生的告警事件
-    
+
     Attributes:
         id: 主键
         alert_no: 告警编号
@@ -229,7 +229,7 @@ class AlertEvent(Base):
         update_time: 更新时间
     """
     __tablename__ = 'sc_alert_events'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     alert_no = Column(String(50), unique=True, comment='告警编号')
     rule_id = Column(BigInteger, comment='关联规则ID')
@@ -255,7 +255,7 @@ class AlertEvent(Base):
     silence_until = Column(DateTime, comment='静默截止时间')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
-    
+
     __table_args__ = (
         Index('idx_status', 'status'),
         Index('idx_level', 'alert_level'),
@@ -267,10 +267,10 @@ class AlertEvent(Base):
 class AlertSubscription(Base):
     """
     告警订阅管理表模型
-    
+
     对应数据库表: sc_alert_subscriptions
     按角色/装置订阅不同级别的告警
-    
+
     Attributes:
         id: 主键
         subscriber_type: 订阅者类型 (role/user/device)
@@ -287,7 +287,7 @@ class AlertSubscription(Base):
         update_time: 更新时间
     """
     __tablename__ = 'sc_alert_subscriptions'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     subscriber_type = Column(String(20), nullable=False, comment='订阅者类型 role/user/device')
     subscriber_id = Column(String(100), nullable=False, comment='订阅者ID')
@@ -301,7 +301,7 @@ class AlertSubscription(Base):
     enabled = Column(Boolean, default=True, comment='是否启用')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
-    
+
     __table_args__ = (
         Index('idx_subscriber', 'subscriber_type', 'subscriber_id'),
         Index('idx_enabled', 'enabled'),
@@ -311,10 +311,10 @@ class AlertSubscription(Base):
 class NotificationChannel(Base):
     """
     通知渠道配置表模型
-    
+
     对应数据库表: sc_notification_channels
     配置各类通知渠道的参数
-    
+
     Attributes:
         id: 主键
         channel_type: 渠道类型 (email/sms/webhook/dingtalk/wechat)
@@ -326,7 +326,7 @@ class NotificationChannel(Base):
         update_time: 更新时间
     """
     __tablename__ = 'sc_notification_channels'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     channel_type = Column(String(50), nullable=False, comment='渠道类型')
     channel_name = Column(String(200), comment='渠道名称')
@@ -335,7 +335,7 @@ class NotificationChannel(Base):
     is_default = Column(Boolean, default=False, comment='是否默认渠道')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
-    
+
     __table_args__ = (
         Index('idx_channel_type', 'channel_type'),
     )
@@ -344,10 +344,10 @@ class NotificationChannel(Base):
 class NotificationLog(Base):
     """
     通知发送日志表模型
-    
+
     对应数据库表: sc_notification_logs
     记录每次通知发送结果
-    
+
     Attributes:
         id: 主键
         alert_id: 关联告警ID
@@ -363,7 +363,7 @@ class NotificationLog(Base):
         send_time: 发送时间
     """
     __tablename__ = 'sc_notification_logs'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     alert_id = Column(BigInteger, comment='关联告警ID')
     channel_type = Column(String(50), comment='通知渠道')
@@ -376,7 +376,7 @@ class NotificationLog(Base):
     error_message = Column(Text, comment='错误信息')
     retry_count = Column(Integer, default=0, comment='重试次数')
     send_time = Column(DateTime, default=datetime.now, comment='发送时间')
-    
+
     __table_args__ = (
         Index('idx_alert_id', 'alert_id'),
         Index('idx_status', 'status'),
@@ -386,10 +386,10 @@ class NotificationLog(Base):
 class WorkOrder(Base):
     """
     工单表模型
-    
+
     对应数据库表: sc_work_orders
     与告警联动，紧急预警自动建单
-    
+
     Attributes:
         id: 主键
         order_no: 工单编号
@@ -415,7 +415,7 @@ class WorkOrder(Base):
         update_time: 更新时间
     """
     __tablename__ = 'sc_work_orders'
-    
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     order_no = Column(String(50), unique=True, comment='工单编号')
     alert_id = Column(BigInteger, comment='关联告警ID')
@@ -438,7 +438,7 @@ class WorkOrder(Base):
     extra_info = Column(Text, comment='扩展信息 JSON')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
-    
+
     __table_args__ = (
         Index('idx_status', 'status'),
         Index('idx_priority', 'priority'),
@@ -544,22 +544,138 @@ class QualityReport(Base):
     )
 
 
+class Tenant(Base):
+    __tablename__ = 'sc_tenants'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_code = Column(String(64), unique=True, nullable=False, comment='租户编码')
+    tenant_name = Column(String(200), nullable=False, comment='租户名称')
+    contact_email = Column(String(200), comment='联系邮箱')
+    contact_phone = Column(String(50), comment='联系电话')
+    status = Column(String(20), default='active', comment='状态 active/suspended/deleted')
+    settings = Column(Text, comment='租户配置 JSON')
+    expire_time = Column(DateTime, comment='到期时间')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_tenant_code', 'tenant_code'),
+        Index('idx_tenant_status', 'status'),
+    )
+
+
+class OrganizationNode(Base):
+    __tablename__ = 'sc_org_nodes'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='所属租户ID')
+    parent_id = Column(BigInteger, comment='父节点ID')
+    node_code = Column(String(100), comment='节点编码')
+    node_name = Column(String(200), nullable=False, comment='节点名称')
+    node_type = Column(String(20), nullable=False, comment='节点类型 group/factory/unit/flange/bolt')
+    path = Column(String(500), comment='层级路径 /id/id/... 用于快速查询祖先')
+    level = Column(Integer, default=0, comment='层级深度 0=集团 1=工厂 2=装置 3=法兰面 4=螺栓')
+    sort_order = Column(Integer, default=0, comment='排序序号')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    status = Column(String(20), default='active', comment='状态 active/inactive')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_org_tenant', 'tenant_id'),
+        Index('idx_org_parent', 'parent_id'),
+        Index('idx_org_type', 'tenant_id', 'node_type'),
+        Index('idx_org_path', 'path'),
+    )
+
+
+class TenantQuota(Base):
+    __tablename__ = 'sc_tenant_quotas'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, unique=True, nullable=False, comment='租户ID')
+    max_models = Column(Integer, default=10, comment='最大模型数')
+    max_api_calls_per_day = Column(Integer, default=10000, comment='每日最大API调用次数')
+    max_storage_mb = Column(Integer, default=5120, comment='存储上限 MB')
+    max_users = Column(Integer, default=50, comment='最大用户数')
+    max_org_nodes = Column(Integer, default=500, comment='最大组织节点数')
+    current_model_count = Column(Integer, default=0, comment='当前模型数')
+    current_api_calls_today = Column(Integer, default=0, comment='今日API调用次数')
+    current_storage_mb = Column(Float, default=0.0, comment='当前存储用量 MB')
+    current_user_count = Column(Integer, default=0, comment='当前用户数')
+    current_org_node_count = Column(Integer, default=0, comment='当前组织节点数')
+    api_call_reset_date = Column(String(10), comment='API调用计数重置日期 YYYY-MM-DD')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_quota_tenant', 'tenant_id'),
+    )
+
+
+class TenantUser(Base):
+    __tablename__ = 'sc_tenant_users'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='所属租户ID')
+    username = Column(String(100), nullable=False, comment='用户名')
+    password_hash = Column(String(128), comment='密码哈希')
+    display_name = Column(String(200), comment='显示名称')
+    email = Column(String(200), comment='邮箱')
+    phone = Column(String(50), comment='手机号')
+    role = Column(String(30), default='viewer', comment='角色 tenant_admin/admin/operator/viewer')
+    org_node_id = Column(BigInteger, comment='关联组织节点ID')
+    status = Column(String(20), default='active', comment='状态 active/disabled')
+    last_login_time = Column(DateTime, comment='最后登录时间')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_user_tenant', 'tenant_id'),
+        Index('idx_user_tenant_username', 'tenant_id', 'username', unique=True),
+        Index('idx_user_role', 'role'),
+    )
+
+
+class TenantAPIKey(Base):
+    __tablename__ = 'sc_tenant_api_keys'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='所属租户ID')
+    api_key = Column(String(64), unique=True, nullable=False, comment='API密钥')
+    key_name = Column(String(200), comment='密钥名称')
+    permissions = Column(Text, comment='权限列表 JSON ["read","write","admin"]')
+    rate_limit = Column(Integer, default=1000, comment='速率限制 每分钟')
+    user_id = Column(BigInteger, comment='关联用户ID')
+    expires_at = Column(DateTime, comment='过期时间')
+    last_used_at = Column(DateTime, comment='最后使用时间')
+    status = Column(String(20), default='active', comment='状态 active/revoked')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_apikey_tenant', 'tenant_id'),
+        Index('idx_apikey_key', 'api_key'),
+        Index('idx_apikey_status', 'status'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类
-    
+
     单例模式实现，管理数据库连接池和会话。
     支持延迟初始化，数据库不可用时不会阻止应用启动。
-    
+
     Attributes:
         _instance: 单例实例
         _engine: SQLAlchemy引擎
         _session_factory: 会话工厂
         _is_connected: 数据库是否已连接
     """
-    
+
     _instance: Optional['DatabaseManager'] = None
-    
+
     def __new__(cls) -> 'DatabaseManager':
         if cls._instance is None:
             cls._instance = super().__new__(cls)
@@ -568,26 +684,26 @@ class DatabaseManager:
             cls._instance._engine = None
             cls._instance._session_factory = None
         return cls._instance
-    
+
     def __init__(self):
         if getattr(self, '_initialized', False):
             return
         self._initialized = True
         # 延迟初始化，不在导入时连接数据库
-        
+
     def _init_engine(self) -> bool:
         """
         初始化数据库引擎
-        
+
         Returns:
             bool: 是否连接成功
         """
         if self._is_connected:
             return True
-            
+
         try:
             db_config = config.get('database', {})
-            
+
             # 构建连接URL，添加超时设置
             url = (
                 f"mysql+pymysql://{db_config.get('user', 'root')}:"
@@ -597,7 +713,7 @@ class DatabaseManager:
                 f"{db_config.get('database', 'bolt_preload')}?"
                 f"charset={db_config.get('charset', 'utf8mb4')}"
             )
-            
+
             self._engine = create_engine(
                 url,
                 pool_size=db_config.get('pool_size', 5),
@@ -608,52 +724,52 @@ class DatabaseManager:
                 connect_args={'connect_timeout': 5},
                 echo=False
             )
-            
+
             # 测试连接
             with self._engine.connect() as conn:
                 conn.execute("SELECT 1")
-            
+
             self._session_factory = sessionmaker(bind=self._engine)
             self._is_connected = True
             logger.info("数据库连接初始化成功")
             return True
-            
+
         except Exception as e:
             logger.warning(f"数据库连接失败（服务将继续运行）: {e}")
             self._is_connected = False
             return False
-        
+
     def get_session(self) -> Optional[Session]:
         """
         获取数据库会话
-        
+
         Returns:
             Session: SQLAlchemy会话对象，如果数据库不可用返回None
         """
         if not self._is_connected:
             self._init_engine()
-        
+
         if self._session_factory is None:
             return None
         return self._session_factory()
-    
+
     def is_connected(self) -> bool:
         """检查数据库是否已连接"""
         return self._is_connected
-    
+
     def create_tables(self) -> None:
         """
         创建所有数据表
         """
         if not self._is_connected:
             self._init_engine()
-        
+
         if self._engine is not None:
             Base.metadata.create_all(self._engine)
             logger.info("数据表创建成功")
         else:
             logger.warning("数据库未连接，跳过表创建")
-        
+
     def close(self) -> None:
         """
         关闭数据库连接
@@ -672,13 +788,13 @@ db_manager = DatabaseManager()
 def get_db() -> Generator[Optional[Session], None, None]:
     """
     获取数据库会话的上下文管理器
-    
+
     自动处理会话的提交和回滚。
     如果数据库不可用，yield None。
-    
+
     Yields:
         Session: 数据库会话，如果不可用则为None
-        
+
     Example:
         with get_db() as db:
             if db is not None:
@@ -688,7 +804,7 @@ def get_db() -> Generator[Optional[Session], None, None]:
     if session is None:
         yield None
         return
-        
+
     try:
         yield session
         session.commit()
@@ -703,11 +819,11 @@ def get_db() -> Generator[Optional[Session], None, None]:
 def get_bolt_recent_data(sensor_id: int, limit: int = 100) -> List[BoltData]:
     """
     获取螺栓最近的预紧力数据
-    
+
     Args:
         sensor_id: 螺栓/传感器ID
         limit: 获取记录数量，默认100
-        
+
     Returns:
         List[BoltData]: 预紧力数据列表
     """
@@ -722,26 +838,26 @@ def get_bolt_recent_data(sensor_id: int, limit: int = 100) -> List[BoltData]:
 def get_flange_recent_data(flange_id: str, limit_per_bolt: int = 200) -> List[BoltData]:
     """
     获取法兰面所有螺栓最近的预紧力数据
-    
+
     Args:
         flange_id: 法兰面ID (格式: collector_id-splitter_num-position)
         limit_per_bolt: 每个螺栓获取的记录数量，默认200
-        
+
     Returns:
         List[BoltData]: 预紧力数据列表
     """
     parts = flange_id.split('-')
     if len(parts) < 3:
         raise ValueError(f"无效的法兰面ID格式: {flange_id}")
-    
+
     collector_id = int(parts[0])
     splitter_num = int(parts[1])
     position = '-'.join(parts[2:])
-    
+
     with get_db() as db:
         # 使用子查询获取每个螺栓的最近数据
         from sqlalchemy import text
-        
+
         query = text("""
             SELECT id, sensor_id, collector_id, splitter_num, position, ptf, create_time
             FROM (
@@ -751,8 +867,8 @@ def get_flange_recent_data(flange_id: str, limit_per_bolt: int = 200) -> List[Bo
                 FROM (
                     SELECT id, sensor_id, collector_id, splitter_num, position, ptf, create_time
                     FROM sc_bolt_data
-                    WHERE collector_id = :collector_id 
-                        AND splitter_num = :splitter_num 
+                    WHERE collector_id = :collector_id
+                        AND splitter_num = :splitter_num
                         AND position = :position
                     ORDER BY sensor_id, create_time DESC
                 ) sorted,
@@ -761,12 +877,12 @@ def get_flange_recent_data(flange_id: str, limit_per_bolt: int = 200) -> List[Bo
             WHERE rn <= :limit_per_bolt
             ORDER BY sensor_id, create_time DESC
         """)
-        
+
         result = db.execute(query, {
             'collector_id': collector_id,
             'splitter_num': splitter_num,
             'position': position,
             'limit_per_bolt': limit_per_bolt
         })
-        
+
         return result.fetchall()
