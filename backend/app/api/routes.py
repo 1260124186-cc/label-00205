@@ -17,7 +17,10 @@ API路由定义
 import numpy as np
 import pandas as pd
 import json
+import os
+import torch
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from loguru import logger
@@ -58,6 +61,12 @@ from app.api.schemas import (
     ConfidenceAdjustmentRequest, ConfidenceAdjustmentResponse,
     QualityEvaluationResponse, DailyQualityReportSchema,
     SensorQualityScoreSchema,
+    EdgeModelLatestRequest, EdgeModelLatestResponse,
+    EdgeModelDownloadResponse, EdgePredictionUploadRequest,
+    EdgePredictionUploadResponse, EdgeModelExportRequest,
+    EdgeModelExportResponse, EdgeDeviceRegisterRequest,
+    EdgeDeviceRegisterResponse, EdgeDeviceHeartbeatRequest,
+    EdgeDeviceHeartbeatResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -96,10 +105,10 @@ def get_federated_server():
     global federated_server
     if federated_server is None:
         from app.federated import FederatedServer, ServerConfig, AggregationStrategy
-        
+
         # 从配置获取参数
         fed_config = config.get('federated', {})
-        
+
         server_config = ServerConfig(
             aggregation_strategy=AggregationStrategy(
                 fed_config.get('aggregation_strategy', 'weighted_avg')
@@ -110,7 +119,7 @@ def get_federated_server():
             enable_two_level_arch=fed_config.get('enable_two_level_arch', True),
             save_path=fed_config.get('save_path', './trained_models/federated')
         )
-        
+
         federated_server = FederatedServer(server_config)
     return federated_server
 
@@ -118,14 +127,14 @@ def get_federated_server():
 def get_federated_client(client_id: str):
     """获取或创建联邦学习客户端实例"""
     global federated_clients
-    
+
     if client_id not in federated_clients:
         from app.federated import FederatedClient, ClientConfig, UpdateType
-        
+
         # 从配置获取参数
         fed_config = config.get('federated', {})
         client_config_dict = fed_config.get('client_config', {})
-        
+
         client_config = ClientConfig(
             factory_id=client_id,
             update_type=UpdateType(client_config_dict.get('update_type', 'difference')),
@@ -133,9 +142,9 @@ def get_federated_client(client_id: str):
             enable_two_level_arch=client_config_dict.get('enable_two_level_arch', True),
             privacy_config=client_config_dict.get('privacy_config')
         )
-        
+
         federated_clients[client_id] = FederatedClient(client_id, client_config)
-    
+
     return federated_clients[client_id]
 
 
@@ -145,7 +154,7 @@ def get_federated_client(client_id: str):
 async def health_check():
     """
     健康检查接口
-    
+
     返回服务状态和版本信息。
     """
     return HealthResponse(
@@ -166,9 +175,9 @@ async def health_check():
 async def predict_bolt(request: BoltPredictionRequest):
     """
     预测单个螺栓的状态
-    
+
     基于最近100条预紧力数据，预测螺栓当前状态。
-    
+
     状态类别:
     - 0: 正常
     - 1: 关注级预警
@@ -178,29 +187,29 @@ async def predict_bolt(request: BoltPredictionRequest):
     """
     try:
         service = get_prediction_service()
-        
+
         # 获取螺栓ID（支持中文字段名）
         bolt_id = getattr(request, '螺栓id', None) or request.bolt_id
-        
+
         # 解析输入数据
         timestamps = []
         values = []
-        
+
         for item in request.data:
             if len(item) >= 2:
                 timestamps.append(item[0])
                 values.append(float(item[1]))
-        
+
         if len(values) == 0:
             raise HTTPException(status_code=400, detail="数据为空")
-        
+
         # 执行预测
         result = service.predict_bolt(
             bolt_id=bolt_id,
             data=np.array(values),
             timestamps=timestamps
         )
-        
+
         return BoltPredictionResponse(
             bolt_id=bolt_id,
             status=result['status'],
@@ -212,7 +221,7 @@ async def predict_bolt(request: BoltPredictionRequest):
             recommendations=result['recommendations'],
             prediction_time=datetime.now()
         )
-        
+
     except Exception as e:
         logger.error(f"螺栓预测失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -229,18 +238,18 @@ async def predict_bolt(request: BoltPredictionRequest):
 async def predict_flange(request: FlangePredictionRequest):
     """
     预测法兰面的整体状态
-    
+
     基于法兰面上所有螺栓的预紧力数据，预测法兰面状态。
     """
     try:
         service = get_prediction_service()
-        
+
         # 获取法兰面ID
         flange_id = getattr(request, '法兰面id', None) or request.flange_id
-        
+
         # 解析多螺栓数据
         multi_bolt_data = []
-        
+
         for bolt_data in request.data:
             values = []
             for item in bolt_data:
@@ -248,16 +257,16 @@ async def predict_flange(request: FlangePredictionRequest):
                     values.append(float(item[1]))
             if values:
                 multi_bolt_data.append(np.array(values))
-        
+
         if len(multi_bolt_data) == 0:
             raise HTTPException(status_code=400, detail="数据为空")
-        
+
         # 执行预测
         result = service.predict_flange(
             flange_id=flange_id,
             multi_bolt_data=multi_bolt_data
         )
-        
+
         return FlangePredictionResponse(
             flange_id=flange_id,
             status=result['status'],
@@ -271,7 +280,7 @@ async def predict_flange(request: FlangePredictionRequest):
             recommendations=result['recommendations'],
             prediction_time=datetime.now()
         )
-        
+
     except Exception as e:
         logger.error(f"法兰面预测失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -288,28 +297,28 @@ async def predict_flange(request: FlangePredictionRequest):
 async def assess_risk(request: RiskAssessmentRequest):
     """
     评估节点（螺栓或法兰面）的风险
-    
+
     返回风险评分(1-10)和风险等级(低/中/高)。
     """
     try:
         service = get_prediction_service()
-        
+
         # 解析数据
         values = []
         for item in request.data:
             if len(item) >= 2:
                 values.append(float(item[1]))
-        
+
         if len(values) == 0:
             raise HTTPException(status_code=400, detail="数据为空")
-        
+
         # 执行评估
         result = service.assess_risk(
             node_id=request.node_id,
             node_type=request.node_type,
             data=np.array(values)
         )
-        
+
         return RiskAssessmentResponse(
             node_id=request.node_id,
             node_type=request.node_type,
@@ -320,7 +329,7 @@ async def assess_risk(request: RiskAssessmentRequest):
             recommendations=result['recommendations'],
             confidence=result['confidence']
         )
-        
+
     except Exception as e:
         logger.error(f"风险评估失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -337,18 +346,18 @@ async def assess_risk(request: RiskAssessmentRequest):
 async def forecast_monthly(request: MonthlyForecastRequest):
     """
     预测未来30天的状态趋势
-    
+
     使用Prophet时间序列模型进行趋势预测。
     """
     try:
         service = get_prediction_service()
-        
+
         result = service.forecast_monthly(
             node_id=request.node_id,
             node_type=request.node_type,
             days=request.forecast_days
         )
-        
+
         return MonthlyForecastResponse(
             node_id=request.node_id,
             node_type=request.node_type,
@@ -361,7 +370,7 @@ async def forecast_monthly(request: MonthlyForecastRequest):
             forecast_dates=result['forecast_dates'],
             forecast_values=result['forecast_values'].tolist() if hasattr(result['forecast_values'], 'tolist') else result['forecast_values']
         )
-        
+
     except Exception as e:
         logger.error(f"月度预测失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -381,13 +390,13 @@ async def train_model(
 ):
     """
     训练或重新训练模型
-    
+
     可以选择训练特定节点的模型或所有模型。
     训练任务在后台执行。
     """
     try:
         service = get_training_service()
-        
+
         # 在后台执行训练
         background_tasks.add_task(
             service.train_model,
@@ -395,7 +404,7 @@ async def train_model(
             node_id=request.node_id,
             force_retrain=request.force_retrain
         )
-        
+
         return TrainingResponse(
             model_type=request.model_type,
             node_id=request.node_id,
@@ -404,7 +413,7 @@ async def train_model(
             training_time=0,
             metrics=None
         )
-        
+
     except Exception as e:
         logger.error(f"启动训练失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -419,14 +428,14 @@ async def train_model(
 async def get_model_info(model_type: str, node_id: str):
     """
     获取指定模型的信息
-    
+
     包括训练状态、最后训练时间、验证准确率等。
     """
     try:
         service = get_training_service()
-        
+
         info = service.get_model_info(model_type, node_id)
-        
+
         return ModelInfoResponse(
             model_type=model_type,
             node_id=node_id,
@@ -435,7 +444,7 @@ async def get_model_info(model_type: str, node_id: str):
             training_samples=info.get('training_samples'),
             validation_accuracy=info.get('validation_accuracy')
         )
-        
+
     except Exception as e:
         logger.error(f"获取模型信息失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -452,16 +461,16 @@ async def get_model_info(model_type: str, node_id: str):
 async def config_strategy(request: StrategyConfigRequest):
     """
     配置预警策略
-    
+
     策略1: 应报尽报，可能误报
     策略2: 精准报警，可能漏报
     """
     try:
         # 更新配置（这里简化处理，实际应该持久化）
         strategy_config = config.get('warning_strategy', {})
-        
+
         strategy_type = request.strategy_type
-        
+
         if strategy_type == 1:
             confidence_threshold = request.confidence_threshold or 0.7
             false_positive_threshold = request.false_positive_threshold or 0.05
@@ -470,7 +479,7 @@ async def config_strategy(request: StrategyConfigRequest):
             confidence_threshold = request.confidence_threshold or 0.95
             false_positive_threshold = None
             false_negative_threshold = request.false_negative_threshold or 0.10
-        
+
         return StrategyConfigResponse(
             strategy_type=strategy_type,
             confidence_threshold=confidence_threshold,
@@ -478,7 +487,7 @@ async def config_strategy(request: StrategyConfigRequest):
             false_negative_threshold=false_negative_threshold,
             updated_at=datetime.now()
         )
-        
+
     except Exception as e:
         logger.error(f"策略配置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -497,24 +506,24 @@ async def batch_predict(
 ):
     """
     从数据库读取数据并批量预测
-    
+
     自动读取所有需要预测的节点数据并执行预测。
     """
     try:
         service = get_prediction_service()
-        
+
         # 在后台执行批量预测
         background_tasks.add_task(
             service.batch_predict_from_db,
             node_type=node_type
         )
-        
+
         return {
             "status": "started",
             "message": f"批量{node_type}预测任务已启动",
             "timestamp": datetime.now()
         }
-        
+
     except Exception as e:
         logger.error(f"批量预测启动失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -531,27 +540,27 @@ async def batch_predict(
 async def register_federated_client(request: FederatedClientRegisterRequest):
     """
     注册联邦学习客户端（厂区）
-    
+
     各厂区在参与联邦学习前需要先注册。
     """
     try:
         server = get_federated_server()
-        
+
         client_info = {
             'factory_name': request.factory_name,
             'location': request.location,
             **(request.client_info or {})
         }
-        
+
         server.register_client(request.client_id, client_info)
-        
+
         return FederatedClientRegisterResponse(
             client_id=request.client_id,
             status="success",
             message=f"客户端 {request.client_id} 注册成功",
             registered_at=datetime.now()
         )
-        
+
     except Exception as e:
         logger.error(f"客户端注册失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -568,9 +577,9 @@ async def get_federated_server_status():
     try:
         server = get_federated_server()
         status = server.get_server_status()
-        
+
         return FederatedServerStatusResponse(**status)
-        
+
     except Exception as e:
         logger.error(f"获取服务器状态失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -585,18 +594,18 @@ async def get_federated_server_status():
 async def start_federated_round(request: FederatedRoundStartRequest):
     """
     开始新的联邦学习轮次
-    
+
     由中心服务器启动，指定要训练的模型和参与的客户端。
     """
     try:
         server = get_federated_server()
-        
+
         round_info = server.start_round(
             model_type=request.model_type,
             node_id=request.node_id,
             expected_clients=request.expected_clients
         )
-        
+
         return FederatedRoundStartResponse(
             round_id=round_info.round_id,
             model_type=round_info.model_type,
@@ -605,7 +614,7 @@ async def start_federated_round(request: FederatedRoundStartRequest):
             expected_clients=round_info.expected_clients,
             started_at=datetime.fromtimestamp(round_info.start_time)
         )
-        
+
     except Exception as e:
         logger.error(f"开始联邦学习轮次失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -621,12 +630,12 @@ async def get_federated_round_status():
     try:
         server = get_federated_server()
         status = server.get_current_round_status()
-        
+
         if status is None:
             return {"status": "no_active_round", "message": "没有进行中的轮次"}
-        
+
         return status
-        
+
     except Exception as e:
         logger.error(f"获取轮次状态失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -641,19 +650,19 @@ async def get_federated_round_status():
 async def aggregate_federated_updates(request: FederatedRoundAggregateRequest):
     """
     聚合各客户端的模型更新，生成新的全局模型
-    
+
     在收集到足够的客户端更新后调用此接口。
     """
     try:
         server = get_federated_server()
-        
+
         aggregated = server.aggregate_updates()
-        
+
         if aggregated is None:
             raise HTTPException(status_code=400, detail="聚合条件不满足或聚合失败")
-        
+
         current_round = server.round_manager.round_history[-1]
-        
+
         return FederatedRoundAggregateResponse(
             round_id=current_round.round_id,
             model_type=request.model_type,
@@ -667,7 +676,7 @@ async def aggregate_federated_updates(request: FederatedRoundAggregateRequest):
             metrics=current_round.metrics,
             aggregated_at=datetime.now()
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -688,13 +697,13 @@ async def get_federated_model_history(model_type: str, node_id: str):
     try:
         server = get_federated_server()
         history = server.get_model_history(model_type, node_id)
-        
+
         return FederatedModelHistoryResponse(
             model_type=model_type,
             node_id=node_id,
             history=history
         )
-        
+
     except Exception as e:
         logger.error(f"获取模型历史失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -711,23 +720,23 @@ async def get_federated_model_history(model_type: str, node_id: str):
 async def download_global_model(request: FederatedGlobalModelRequest):
     """
     客户端下载全局模型
-    
+
     各厂区在本地训练前下载最新的全局模型。
     """
     try:
         server = get_federated_server()
-        
+
         model_data = server.get_global_model_for_client(
             client_id=request.client_id,
             model_type=request.model_type,
             node_id=request.node_id
         )
-        
+
         # 获取最新版本号
         latest_version = server.model_manager.get_latest_version(
             request.model_type, request.node_id
         )
-        
+
         return FederatedGlobalModelResponse(
             model_type=model_data['model_type'],
             node_id=model_data['node_id'],
@@ -738,7 +747,7 @@ async def download_global_model(request: FederatedGlobalModelRequest):
             enable_two_level_arch=model_data['enable_two_level_arch'],
             metrics=latest_version.metrics if latest_version else None
         )
-        
+
     except Exception as e:
         logger.error(f"下载全局模型失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -753,12 +762,12 @@ async def download_global_model(request: FederatedGlobalModelRequest):
 async def upload_model_update(request: FederatedUpdateUploadRequest):
     """
     客户端上传本地训练后的模型更新
-    
+
     可以上传完整权重、梯度或权重差异。
     """
     try:
         server = get_federated_server()
-        
+
         update_data = {
             'client_id': request.client_id,
             'model_type': request.model_type,
@@ -770,12 +779,12 @@ async def upload_model_update(request: FederatedUpdateUploadRequest):
             'encrypted': request.encrypted,
             'encrypted_update': request.encrypted_update
         }
-        
+
         success = server.receive_client_update(update_data)
-        
+
         if not success:
             raise HTTPException(status_code=400, detail="无法接收更新，请检查轮次状态")
-        
+
         return FederatedUpdateUploadResponse(
             client_id=request.client_id,
             round_id=request.round_id,
@@ -783,7 +792,7 @@ async def upload_model_update(request: FederatedUpdateUploadRequest):
             message="模型更新已成功接收",
             received_at=datetime.now()
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -802,9 +811,9 @@ async def distribute_global_model(model_type: str, node_id: str):
     """
     try:
         server = get_federated_server()
-        
+
         model_data = server.distribute_model(model_type, node_id)
-        
+
         return {
             "status": "success",
             "message": f"模型已准备好分发，version={model_data['version']}",
@@ -817,7 +826,7 @@ async def distribute_global_model(model_type: str, node_id: str):
             "enable_two_level_arch": model_data['enable_two_level_arch'],
             "distributed_at": datetime.now()
         }
-        
+
     except Exception as e:
         logger.error(f"分发模型失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -836,11 +845,11 @@ async def get_federated_client_status(client_id: str):
     try:
         client = get_federated_client(client_id)
         status = client.get_status()
-        
+
         last_update = None
         if status.get('last_update_time'):
             last_update = datetime.fromtimestamp(status['last_update_time'])
-        
+
         return FederatedClientStatusResponse(
             client_id=client_id,
             factory_id=status['factory_id'],
@@ -855,7 +864,7 @@ async def get_federated_client_status(client_id: str):
             two_level_arch_enabled=status.get('two_level_arch_enabled', True),
             last_update_time=last_update
         )
-        
+
     except Exception as e:
         logger.error(f"获取客户端状态失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -873,12 +882,12 @@ async def local_train_federated(
 ):
     """
     在客户端执行本地训练
-    
+
     支持全量训练和本地微调（两层架构的第二层）。
     """
     try:
         client = get_federated_client(request.client_id)
-        
+
         # 准备数据
         train_data = None
         train_labels = None
@@ -886,11 +895,11 @@ async def local_train_federated(
             train_data = np.array(request.train_data)
         if request.train_labels:
             train_labels = np.array(request.train_labels)
-        
+
         # 如果有自定义的本地训练轮数
         if request.local_epochs:
             client.config.local_epochs = request.local_epochs
-        
+
         # 执行训练
         if request.fine_tune:
             # 本地微调（第二层）
@@ -908,7 +917,7 @@ async def local_train_federated(
                 train_data=train_data,
                 train_labels=train_labels
             )
-        
+
         return FederatedLocalTrainResponse(
             client_id=request.client_id,
             model_type=request.model_type,
@@ -919,7 +928,7 @@ async def local_train_federated(
             training_time=result.training_time,
             metrics=result.metrics
         )
-        
+
     except Exception as e:
         logger.error(f"本地训练失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -936,12 +945,12 @@ async def get_client_model_update(client_id: str, apply_privacy: bool = True):
     """
     try:
         client = get_federated_client(client_id)
-        
+
         update = client.get_model_update(apply_privacy=apply_privacy)
-        
+
         # 转换为可序列化格式
         weights_np = {k: v.cpu().numpy().tolist() for k, v in update.weights.items()}
-        
+
         response = {
             "client_id": update.client_id,
             "round_id": update.round_id,
@@ -952,14 +961,14 @@ async def get_client_model_update(client_id: str, apply_privacy: bool = True):
             "update_type": client.config.update_type.value,
             "privacy_applied": apply_privacy and client.privacy_engine is not None
         }
-        
+
         if update.encrypted_update:
             import base64
             response["encrypted"] = True
             response["encrypted_update"] = base64.b64encode(update.encrypted_update).decode()
-        
+
         return response
-        
+
     except Exception as e:
         logger.error(f"获取模型更新失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -978,14 +987,14 @@ async def configure_privacy(
 ):
     """
     配置客户端的隐私保护参数
-    
+
     支持差分隐私、安全聚合等机制。
     """
     try:
         client = get_federated_client(client_id)
-        
+
         from app.federated.privacy import create_privacy_engine
-        
+
         privacy_config_dict = {
             'mechanism': privacy_config.mechanism,
             'epsilon': privacy_config.epsilon,
@@ -995,10 +1004,10 @@ async def configure_privacy(
             'num_parties': privacy_config.num_parties,
             'secret_share_threshold': privacy_config.secret_share_threshold
         }
-        
+
         client.privacy_engine = create_privacy_engine(privacy_config_dict)
         client.config.privacy_config = privacy_config_dict
-        
+
         return {
             "status": "success",
             "message": f"隐私配置已更新，机制: {privacy_config.mechanism}",
@@ -1006,7 +1015,7 @@ async def configure_privacy(
             "privacy_mechanism": privacy_config.mechanism,
             "configured_at": datetime.now()
         }
-        
+
     except Exception as e:
         logger.error(f"配置隐私参数失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1020,14 +1029,14 @@ async def configure_privacy(
 async def configure_aggregator(aggregator_config: FederatedAggregatorConfig):
     """
     配置服务器端的聚合器参数
-    
+
     支持FedAvg、加权平均、中位数、修剪均值等聚合策略。
     """
     try:
         server = get_federated_server()
-        
+
         from app.federated.aggregator import create_aggregator, AggregationStrategy
-        
+
         agg_config_dict = {
             'trim_ratio': aggregator_config.trim_ratio,
             'mu': aggregator_config.mu,
@@ -1035,23 +1044,23 @@ async def configure_aggregator(aggregator_config: FederatedAggregatorConfig):
             'min_clients_ratio': aggregator_config.min_clients_per_round / max(1, len(server.registered_clients)),
             'enable_outlier_detection': aggregator_config.enable_outlier_detection
         }
-        
+
         server.aggregator = create_aggregator(
             strategy=AggregationStrategy(aggregator_config.strategy),
             config=agg_config_dict
         )
-        
+
         server.config.aggregation_strategy = AggregationStrategy(aggregator_config.strategy)
         server.config.aggregation_config = agg_config_dict
         server.config.min_clients_per_round = aggregator_config.min_clients_per_round
-        
+
         return {
             "status": "success",
             "message": f"聚合器配置已更新，策略: {aggregator_config.strategy}",
             "strategy": aggregator_config.strategy,
             "configured_at": datetime.now()
         }
-        
+
     except Exception as e:
         logger.error(f"配置聚合器失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2875,3 +2884,303 @@ async def get_data_quality_summary(
         logger.error(f"获取质量总览失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ==================== 边缘计算 SDK ====================
+
+_edge_devices: Dict[str, Dict[str, Any]] = {}
+
+
+@router.post(
+    "/edge/device/register",
+    response_model=EdgeDeviceRegisterResponse,
+    tags=["边缘计算"],
+    summary="注册边缘设备"
+)
+async def register_edge_device(request: EdgeDeviceRegisterRequest):
+    try:
+        device_info = {
+            'device_id': request.device_id,
+            'device_name': request.device_name,
+            'device_type': request.device_type,
+            'location': request.location,
+            'capabilities': request.capabilities,
+            'registered_at': datetime.now().isoformat(),
+            'last_heartbeat': None,
+            'model_version': None,
+        }
+        _edge_devices[request.device_id] = device_info
+        logger.info(f"边缘设备注册: {request.device_id}")
+        return EdgeDeviceRegisterResponse(
+            device_id=request.device_id,
+            status="success",
+            message=f"设备 {request.device_id} 注册成功",
+            registered_at=datetime.now().isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"边缘设备注册失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/edge/device/heartbeat",
+    response_model=EdgeDeviceHeartbeatResponse,
+    tags=["边缘计算"],
+    summary="边缘设备心跳"
+)
+async def edge_device_heartbeat(request: EdgeDeviceHeartbeatRequest):
+    try:
+        if request.device_id in _edge_devices:
+            _edge_devices[request.device_id]['last_heartbeat'] = datetime.now().isoformat()
+            _edge_devices[request.device_id]['model_version'] = request.model_version
+            _edge_devices[request.device_id]['cache_size'] = request.cache_size
+            _edge_devices[request.device_id]['unsynced_count'] = request.unsynced_count
+
+        version_manager = _get_version_manager()
+        latest_version = None
+        force_sync = False
+        for model_id, versions in version_manager._versions.items():
+            for v in reversed(versions):
+                if v.is_active:
+                    latest_version = v.version
+                    break
+            if latest_version:
+                break
+
+        if latest_version and request.model_version and latest_version != request.model_version:
+            force_sync = True
+
+        return EdgeDeviceHeartbeatResponse(
+            device_id=request.device_id,
+            latest_model_version=latest_version,
+            force_sync=force_sync,
+            server_time=datetime.now().isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"边缘设备心跳失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/edge/model/latest",
+    response_model=EdgeModelLatestResponse,
+    tags=["边缘计算"],
+    summary="获取最新模型版本信息"
+)
+async def get_edge_model_latest(request: EdgeModelLatestRequest):
+    try:
+        version_manager = _get_version_manager()
+        model_id = request.node_id or request.model_type
+        active_version = version_manager.get_version(model_id)
+
+        if active_version is None:
+            raise HTTPException(status_code=404, detail="未找到模型版本")
+
+        download_url = f"/edge/model/download/{active_version.version}"
+        if request.model_type:
+            download_url += f"?model_type={request.model_type}"
+        if request.node_id:
+            download_url += f"&node_id={request.node_id}"
+
+        return EdgeModelLatestResponse(
+            version=active_version.version,
+            model_type=request.model_type,
+            node_id=request.node_id,
+            download_url=download_url,
+            file_hash=active_version.file_hash,
+            file_size=0,
+            created_at=active_version.created_at,
+            metrics=active_version.metrics,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取最新模型版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/edge/model/download/{version}",
+    tags=["边缘计算"],
+    summary="下载模型包"
+)
+async def download_edge_model(
+    version: str,
+    model_type: str = Query("bolt"),
+    node_id: Optional[str] = Query(None),
+    format: str = Query("onnx"),
+):
+    try:
+        version_manager = _get_version_manager()
+        model_id = node_id or model_type
+        model_version = version_manager.get_version(model_id, version)
+
+        if model_version is None:
+            raise HTTPException(status_code=404, detail="模型版本不存在")
+
+        if not os.path.exists(model_version.file_path):
+            raise HTTPException(status_code=404, detail="模型文件不存在")
+
+        from edge_sdk.model_exporter import ModelExporter, ExportFormat
+        from edge_sdk.model_package import PackageBundler, PackageSigner
+        import tempfile
+
+        export_format = ExportFormat.ONNX if format == "onnx" else ExportFormat.TORCHSCRIPT
+        model_file_path = model_version.file_path
+        export_dir = tempfile.mkdtemp(prefix="edge_export_")
+
+        try:
+            from app.models.bolt_lstm import BoltLSTMModel
+            model = BoltLSTMModel(bolt_id=model_id)
+            model.load(model_file_path)
+
+            sample_input = torch.randn(1, 100, 2)
+
+            exporter = ModelExporter()
+            export_result = exporter.export(
+                model=model.model,
+                model_type=model_type,
+                export_format=export_format,
+                output_dir=export_dir,
+                preprocessing_params={},
+                sample_input=sample_input,
+            )
+
+            signer = PackageSigner()
+            bundler = PackageBundler()
+            package = bundler.create_package(
+                model_path=export_result.model_path,
+                manifest_path=export_result.manifest_path,
+                preprocessing_path=export_result.preprocessing_path,
+                output_dir=export_dir,
+                model_type=model_type,
+                version=version,
+                signer=signer,
+            )
+
+            package_dir = Path(export_dir) / package.package_id
+            if not package_dir.exists():
+                for d in Path(export_dir).iterdir():
+                    if d.is_dir():
+                        package_dir = d
+                        break
+
+            import shutil
+            zip_path = shutil.make_archive(
+                str(Path(export_dir) / f"model_{version}"),
+                'zip',
+                root_dir=str(package_dir),
+            )
+
+            from fastapi.responses import FileResponse
+            return FileResponse(
+                path=zip_path,
+                media_type='application/zip',
+                filename=f"model_{model_type}_{version}.zip",
+                background=BackgroundTasks(),
+            )
+        except Exception as export_err:
+            logger.error(f"模型导出失败: {export_err}")
+            from fastapi.responses import FileResponse
+            return FileResponse(
+                path=model_file_path,
+                media_type='application/octet-stream',
+                filename=os.path.basename(model_file_path),
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"下载模型包失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/edge/model/export",
+    response_model=EdgeModelExportResponse,
+    tags=["边缘计算"],
+    summary="导出边缘模型包"
+)
+async def export_edge_model(
+    request: EdgeModelExportRequest,
+    background_tasks: BackgroundTasks,
+):
+    try:
+        version_manager = _get_version_manager()
+        model_id = request.node_id or request.model_type
+        model_version = version_manager.get_version(model_id, request.version)
+
+        if model_version is None:
+            raise HTTPException(status_code=404, detail="模型版本不存在")
+
+        return EdgeModelExportResponse(
+            model_type=request.model_type,
+            node_id=request.node_id,
+            version=model_version.version,
+            export_format=request.export_format,
+            package_url=f"/edge/model/download/{model_version.version}?model_type={request.model_type}&format={request.export_format}",
+            file_hash=model_version.file_hash,
+            file_size=0,
+            includes_preprocessing=True,
+            includes_signature=True,
+            exported_at=datetime.now().isoformat(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"导出边缘模型包失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/edge/predictions/upload",
+    response_model=EdgePredictionUploadResponse,
+    tags=["边缘计算"],
+    summary="批量上报边缘预测结果"
+)
+async def upload_edge_predictions(request: EdgePredictionUploadRequest):
+    try:
+        received_count = len(request.predictions)
+        logger.info(f"接收边缘预测结果: device={request.device_id}, count={received_count}")
+
+        for pred in request.predictions:
+            logger.debug(f"边缘预测: {pred.get('node_id', 'unknown')} - class={pred.get('predicted_class')}")
+
+        return EdgePredictionUploadResponse(
+            device_id=request.device_id,
+            received_count=received_count,
+            status="success",
+            message=f"成功接收 {received_count} 条预测结果",
+        )
+    except Exception as e:
+        logger.error(f"批量上报边缘预测结果失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/edge/device/status",
+    tags=["边缘计算"],
+    summary="获取所有边缘设备状态"
+)
+async def list_edge_devices():
+    try:
+        devices = []
+        for device_id, info in _edge_devices.items():
+            devices.append({
+                'device_id': device_id,
+                'device_name': info.get('device_name'),
+                'device_type': info.get('device_type'),
+                'location': info.get('location'),
+                'registered_at': info.get('registered_at'),
+                'last_heartbeat': info.get('last_heartbeat'),
+                'model_version': info.get('model_version'),
+                'cache_size': info.get('cache_size', 0),
+                'unsynced_count': info.get('unsynced_count', 0),
+            })
+        return {'total': len(devices), 'devices': devices}
+    except Exception as e:
+        logger.error(f"获取边缘设备状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _get_version_manager():
+    from app.core.model_version import ModelVersionManager
+    return ModelVersionManager()

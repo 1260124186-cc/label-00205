@@ -951,3 +951,85 @@ class ConfidenceAdjustmentResponse(BaseModel):
     adjustment_factor: float
     reasons: List[str]
 
+
+# ==================== 边缘计算 SDK ====================
+
+class EdgeModelLatestRequest(BaseModel):
+    model_type: str = Field(..., description="模型类型 bolt/flange")
+    node_id: Optional[str] = Field(None, description="节点ID")
+    edge_device_id: Optional[str] = Field(None, description="边缘设备ID")
+
+class EdgeModelLatestResponse(BaseModel):
+    version: str
+    model_type: str
+    node_id: Optional[str] = None
+    download_url: str
+    file_hash: str
+    file_size: int
+    created_at: str
+    metrics: Optional[Dict[str, float]] = None
+
+class EdgeModelDownloadResponse(BaseModel):
+    version: str
+    model_type: str
+    node_id: Optional[str] = None
+    model_format: str
+    download_url: str
+    file_hash: str
+    file_size: int
+    preprocessing_included: bool = True
+    signature_included: bool = True
+
+class EdgePredictionUploadRequest(BaseModel):
+    device_id: str = Field(..., description="边缘设备ID")
+    predictions: List[Dict[str, Any]] = Field(..., description="预测结果列表")
+
+class EdgePredictionUploadResponse(BaseModel):
+    device_id: str
+    received_count: int
+    status: str
+    message: str
+
+class EdgeModelExportRequest(BaseModel):
+    model_type: str = Field(..., description="模型类型 bolt/flange")
+    node_id: Optional[str] = Field(None, description="节点ID")
+    export_format: str = Field("onnx", description="导出格式 onnx/torchscript")
+    version: Optional[str] = Field(None, description="指定版本，None则使用最新")
+
+class EdgeModelExportResponse(BaseModel):
+    model_type: str
+    node_id: Optional[str] = None
+    version: str
+    export_format: str
+    package_url: str
+    file_hash: str
+    file_size: int
+    includes_preprocessing: bool = True
+    includes_signature: bool = True
+    exported_at: str
+
+class EdgeDeviceRegisterRequest(BaseModel):
+    device_id: str = Field(..., description="边缘设备ID")
+    device_name: Optional[str] = Field(None, description="设备名称")
+    device_type: Optional[str] = Field(None, description="设备类型")
+    location: Optional[str] = Field(None, description="设备位置")
+    capabilities: Optional[Dict[str, Any]] = Field(None, description="设备能力")
+
+class EdgeDeviceRegisterResponse(BaseModel):
+    device_id: str
+    status: str
+    message: str
+    registered_at: str
+
+class EdgeDeviceHeartbeatRequest(BaseModel):
+    device_id: str
+    model_version: Optional[str] = None
+    cache_size: int = 0
+    unsynced_count: int = 0
+
+class EdgeDeviceHeartbeatResponse(BaseModel):
+    device_id: str
+    latest_model_version: Optional[str] = None
+    force_sync: bool = False
+    server_time: str
+
