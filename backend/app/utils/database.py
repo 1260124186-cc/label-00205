@@ -445,6 +445,269 @@ class WorkOrder(Base):
         Index('idx_alert_id', 'alert_id'),
         Index('idx_assignee', 'assignee_id'),
         Index('idx_create_time', 'create_time'),
+        Index('idx_node', 'node_type', 'node_id'),
+        Index('idx_due_time', 'due_time'),
+    )
+
+
+class WorkOrderDisposalRecord(Base):
+    """
+    工单处置记录表模型
+
+    对应数据库表: sc_work_order_disposals
+    存储现场人员上传的处置记录。
+
+    Attributes:
+        id: 主键
+        work_order_id: 关联工单ID
+        disposal_type: 处置类型 (torque_adjustment/replacement/inspection/other)
+        disposal_content: 处置内容描述
+        disposal_time: 处置时间
+        operator_id: 操作人ID
+        operator_name: 操作人姓名
+        before_value: 处置前值（如预紧力）
+        after_value: 处置后值
+        materials_used: 使用材料 JSON
+        photos: 现场照片URL列表 JSON
+        notes: 备注
+        extra_info: 扩展信息 JSON
+        create_time: 创建时间
+    """
+    __tablename__ = 'sc_work_order_disposals'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    work_order_id = Column(BigInteger, nullable=False, comment='关联工单ID')
+    disposal_type = Column(String(50), comment='处置类型')
+    disposal_content = Column(Text, comment='处置内容描述')
+    disposal_time = Column(DateTime, comment='处置时间')
+    operator_id = Column(String(50), comment='操作人ID')
+    operator_name = Column(String(100), comment='操作人姓名')
+    before_value = Column(Float, comment='处置前值')
+    after_value = Column(Float, comment='处置后值')
+    materials_used = Column(Text, comment='使用材料 JSON')
+    photos = Column(Text, comment='现场照片 URL 列表 JSON')
+    notes = Column(Text, comment='备注')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_disposal_wo', 'work_order_id'),
+        Index('idx_disposal_time', 'disposal_time'),
+        Index('idx_disposal_operator', 'operator_id'),
+    )
+
+
+class WorkOrderRetestRecord(Base):
+    """
+    工单复测数据表模型
+
+    对应数据库表: sc_work_order_retests
+    存储复测数据及复测结果。
+
+    Attributes:
+        id: 主键
+        work_order_id: 关联工单ID
+        retest_time: 复测时间
+        retester_id: 复测人ID
+        retester_name: 复测人姓名
+        retest_result: 复测结果 (pass/fail/pending)
+        measured_value: 复测测量值（如预紧力）
+        data_points: 复测数据点 JSON (时序数据)
+        before_risk_score: 复测前风险评分
+        after_risk_score: 复测后风险评分
+        status_after_retest: 复测后状态 (normal/warning/critical)
+        confidence: 复测置信度
+        retest_notes: 复测备注
+        photos: 复测照片 URL 列表 JSON
+        extra_info: 扩展信息 JSON
+        create_time: 创建时间
+    """
+    __tablename__ = 'sc_work_order_retests'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    work_order_id = Column(BigInteger, nullable=False, comment='关联工单ID')
+    retest_time = Column(DateTime, comment='复测时间')
+    retester_id = Column(String(50), comment='复测人ID')
+    retester_name = Column(String(100), comment='复测人姓名')
+    retest_result = Column(String(20), comment='复测结果 pass/fail/pending')
+    measured_value = Column(Float, comment='复测测量值')
+    data_points = Column(Text, comment='复测数据点 JSON')
+    before_risk_score = Column(Float, comment='复测前风险评分')
+    after_risk_score = Column(Float, comment='复测后风险评分')
+    status_after_retest = Column(String(20), comment='复测后状态')
+    confidence = Column(Float, comment='复测置信度')
+    retest_notes = Column(Text, comment='复测备注')
+    photos = Column(Text, comment='复测照片 URL 列表 JSON')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_retest_wo', 'work_order_id'),
+        Index('idx_retest_time', 'retest_time'),
+        Index('idx_retest_result', 'retest_result'),
+    )
+
+
+class WorkOrderPredictionCompare(Base):
+    """
+    工单复测前后预测对比表模型
+
+    对应数据库表: sc_work_order_pred_compares
+    存储复测后重新预测的结果，并与原预测对比。
+
+    Attributes:
+        id: 主键
+        work_order_id: 关联工单ID
+        retest_id: 关联复测记录ID
+        original_prediction_id: 原始预测记录ID
+        retest_prediction_id: 复测后预测记录ID
+        original_status: 原始状态
+        retest_status: 复测后状态
+        original_risk_score: 原始风险评分
+        retest_risk_score: 复测后风险评分
+        original_confidence: 原始置信度
+        retest_confidence: 复测后置信度
+        risk_change: 风险变化 (improved/stable/worsened)
+        risk_delta: 风险评分变化值
+        status_match: 状态是否一致
+        is_false_positive: 是否为误报（原预警正常/改进后正常）
+        is_recurring: 是否为重复故障
+        comparison_detail: 对比详情 JSON
+        create_time: 创建时间
+    """
+    __tablename__ = 'sc_work_order_pred_compares'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    work_order_id = Column(BigInteger, nullable=False, comment='关联工单ID')
+    retest_id = Column(BigInteger, comment='关联复测记录ID')
+    original_prediction_id = Column(BigInteger, comment='原始预测记录ID')
+    retest_prediction_id = Column(BigInteger, comment='复测后预测记录ID')
+    original_status = Column(String(20), comment='原始状态')
+    retest_status = Column(String(20), comment='复测后状态')
+    original_risk_score = Column(Float, comment='原始风险评分')
+    retest_risk_score = Column(Float, comment='复测后风险评分')
+    original_confidence = Column(Float, comment='原始置信度')
+    retest_confidence = Column(Float, comment='复测后置信度')
+    risk_change = Column(String(20), comment='风险变化 improved/stable/worsened')
+    risk_delta = Column(Float, comment='风险评分变化值')
+    status_match = Column(Boolean, comment='状态是否一致')
+    is_false_positive = Column(Boolean, default=False, comment='是否误报')
+    is_recurring = Column(Boolean, default=False, comment='是否重复故障')
+    comparison_detail = Column(Text, comment='对比详情 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_compare_wo', 'work_order_id'),
+        Index('idx_compare_retest', 'retest_id'),
+        Index('idx_compare_false_positive', 'is_false_positive'),
+        Index('idx_compare_recurring', 'is_recurring'),
+        Index('idx_compare_time', 'create_time'),
+    )
+
+
+class CmmsIntegrationConfig(Base):
+    """
+    CMMS/EAM 集成配置表模型
+
+    对应数据库表: sc_cmms_configs
+    存储第三方 CMMS/EAM 系统的集成配置。
+
+    Attributes:
+        id: 主键
+        system_name: 系统名称
+        system_type: 系统类型 (maximo/sap_eam/infor/eam/other)
+        base_url: 系统基础URL
+        auth_type: 认证类型 (basic/api_key/oauth2/token)
+        auth_config: 认证配置 JSON
+        work_order_sync: 是否同步工单
+        work_order_webhook_url: 工单Webhook URL
+        work_order_push_url: 工单推送URL
+        status_mapping: 状态映射 JSON
+        priority_mapping: 优先级映射 JSON
+        field_mapping: 字段映射 JSON
+        enabled: 是否启用
+        sync_direction: 同步方向 (push/pull/bidirectional)
+        last_sync_time: 最后同步时间
+        sync_interval: 同步间隔（分钟）
+        tenant_id: 租户ID
+        extra_info: 扩展信息 JSON
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_cmms_configs'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    system_name = Column(String(200), nullable=False, comment='系统名称')
+    system_type = Column(String(50), comment='系统类型')
+    base_url = Column(String(500), comment='系统基础URL')
+    auth_type = Column(String(30), comment='认证类型')
+    auth_config = Column(Text, comment='认证配置 JSON')
+    work_order_sync = Column(Boolean, default=False, comment='是否同步工单')
+    work_order_webhook_url = Column(String(500), comment='工单Webhook URL')
+    work_order_push_url = Column(String(500), comment='工单推送URL')
+    status_mapping = Column(Text, comment='状态映射 JSON')
+    priority_mapping = Column(Text, comment='优先级映射 JSON')
+    field_mapping = Column(Text, comment='字段映射 JSON')
+    enabled = Column(Boolean, default=True, comment='是否启用')
+    sync_direction = Column(String(20), default='push', comment='同步方向')
+    last_sync_time = Column(DateTime, comment='最后同步时间')
+    sync_interval = Column(Integer, default=60, comment='同步间隔分钟')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_cmms_enabled', 'enabled'),
+        Index('idx_cmms_tenant', 'tenant_id'),
+        Index('idx_cmms_type', 'system_type'),
+    )
+
+
+class CmmsSyncLog(Base):
+    """
+    CMMS/EAM 同步日志表模型
+
+    对应数据库表: sc_cmms_sync_logs
+    存储与 CMMS 系统同步的日志记录。
+
+    Attributes:
+        id: 主键
+        config_id: 关联配置ID
+        sync_type: 同步类型 (work_order_create/work_order_update/status_update/pull)
+        sync_direction: 同步方向 (push/pull)
+        work_order_id: 关联工单ID
+        external_id: 外部系统ID
+        status: 同步状态 (success/failed/pending)
+        request_data: 请求数据 JSON
+        response_data: 响应数据 JSON
+        error_message: 错误信息
+        retry_count: 重试次数
+        sync_time: 同步时间
+        create_time: 创建时间
+    """
+    __tablename__ = 'sc_cmms_sync_logs'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    config_id = Column(BigInteger, comment='关联配置ID')
+    sync_type = Column(String(50), comment='同步类型')
+    sync_direction = Column(String(20), comment='同步方向 push/pull')
+    work_order_id = Column(BigInteger, comment='关联工单ID')
+    external_id = Column(String(100), comment='外部系统ID')
+    status = Column(String(20), default='pending', comment='同步状态')
+    request_data = Column(Text, comment='请求数据 JSON')
+    response_data = Column(Text, comment='响应数据 JSON')
+    error_message = Column(Text, comment='错误信息')
+    retry_count = Column(Integer, default=0, comment='重试次数')
+    sync_time = Column(DateTime, comment='同步时间')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_cmms_log_config', 'config_id'),
+        Index('idx_cmms_log_wo', 'work_order_id'),
+        Index('idx_cmms_log_status', 'status'),
+        Index('idx_cmms_log_time', 'sync_time'),
+        Index('idx_cmms_log_external', 'external_id'),
     )
 
 

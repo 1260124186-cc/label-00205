@@ -52,6 +52,18 @@ from app.api.schemas import (
     WorkOrderCreate, WorkOrderUpdate, WorkOrderResponse,
     WorkOrderAssignRequest, WorkOrderResolveRequest,
     WorkOrderStatusUpdateRequest, WorkOrderListResponse,
+    DisposalRecordCreate, DisposalRecordUpdate, DisposalRecordResponse,
+    DisposalRecordListResponse,
+    RetestRecordCreate, RetestRecordUpdate, RetestRecordResponse,
+    RetestRecordListResponse,
+    PredictionCompareResponse, PredictionCompareListResponse,
+    WorkOrderStatsRequest, WorkOrderStatsResponse,
+    MttrTrendResponse,
+    CmmsConfigCreate, CmmsConfigUpdate, CmmsConfigResponse,
+    CmmsConfigListResponse,
+    CmmsSyncRequest, CmmsSyncResponse,
+    CmmsSyncLogResponse, CmmsSyncLogListResponse,
+    CmmsWebhookResponse,
     AlertUpgradeTriggerResponse,
     AuditRecordResponse, AuditListResponse,
     AuditRetentionUpdateRequest, AuditCleanupResponse,
@@ -1926,6 +1938,790 @@ async def resolve_work_order(work_order_id: int, request: WorkOrderResolveReques
     except Exception as e:
         logger.error(f"解决工单失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 工单处置记录 ====================
+
+@router.get(
+    "/work-orders/{work_order_id}/disposals",
+    response_model=DisposalRecordListResponse,
+    tags=["工单管理"],
+    summary="查询工单处置记录列表"
+)
+async def list_work_order_disposals(
+    work_order_id: int,
+    disposal_type: Optional[str] = Query(None, description="处置类型"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """查询工单处置记录列表"""
+    try:
+        from app.services.alert.disposal_service import DisposalService
+        service = DisposalService()
+        records, total = service.list_disposal_records(
+            work_order_id=work_order_id,
+            disposal_type=disposal_type,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            'total': total,
+            'items': [_disposal_to_dict(r) for r in records],
+        }
+    except Exception as e:
+        logger.error(f"查询处置记录列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/work-orders/disposals",
+    response_model=DisposalRecordResponse,
+    tags=["工单管理"],
+    summary="创建处置记录"
+)
+async def create_disposal_record(request: DisposalRecordCreate):
+    """创建工单处置记录"""
+    try:
+        from app.services.alert.disposal_service import DisposalService
+        service = DisposalService()
+        record = service.create_disposal_record(
+            work_order_id=request.work_order_id,
+            disposal_type=request.disposal_type,
+            disposal_content=request.disposal_content,
+            disposal_time=request.disposal_time,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+            before_value=request.before_value,
+            after_value=request.after_value,
+            materials_used=request.materials_used,
+            photos=request.photos,
+            notes=request.notes,
+            extra_info=request.extra_info,
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="工单不存在或创建失败")
+        return _disposal_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建处置记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/work-orders/disposals/{record_id}",
+    response_model=DisposalRecordResponse,
+    tags=["工单管理"],
+    summary="获取处置记录详情"
+)
+async def get_disposal_record(record_id: int):
+    """获取处置记录详情"""
+    try:
+        from app.services.alert.disposal_service import DisposalService
+        service = DisposalService()
+        record = service.get_disposal_record(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="处置记录不存在")
+        return _disposal_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取处置记录详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/work-orders/disposals/{record_id}",
+    response_model=DisposalRecordResponse,
+    tags=["工单管理"],
+    summary="更新处置记录"
+)
+async def update_disposal_record(record_id: int, request: DisposalRecordUpdate):
+    """更新处置记录"""
+    try:
+        from app.services.alert.disposal_service import DisposalService
+        service = DisposalService()
+        update_data = request.model_dump(exclude_unset=True)
+        record = service.update_disposal_record(record_id, **update_data)
+        if not record:
+            raise HTTPException(status_code=404, detail="处置记录不存在")
+        return _disposal_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新处置记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/work-orders/disposals/{record_id}",
+    tags=["工单管理"],
+    summary="删除处置记录"
+)
+async def delete_disposal_record(record_id: int):
+    """删除处置记录"""
+    try:
+        from app.services.alert.disposal_service import DisposalService
+        service = DisposalService()
+        success = service.delete_disposal_record(record_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="处置记录不存在")
+        return {'success': True, 'message': '删除成功'}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除处置记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 工单复测数据 ====================
+
+@router.get(
+    "/work-orders/{work_order_id}/retests",
+    response_model=RetestRecordListResponse,
+    tags=["工单管理"],
+    summary="查询工单复测记录列表"
+)
+async def list_work_order_retests(
+    work_order_id: int,
+    retest_result: Optional[str] = Query(None, description="复测结果 pass/fail/pending"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """查询工单复测记录列表"""
+    try:
+        from app.services.alert.retest_service import RetestService
+        service = RetestService()
+        records, total = service.list_retest_records(
+            work_order_id=work_order_id,
+            retest_result=retest_result,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            'total': total,
+            'items': [_retest_to_dict(r) for r in records],
+        }
+    except Exception as e:
+        logger.error(f"查询复测记录列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/work-orders/retests",
+    response_model=RetestRecordResponse,
+    tags=["工单管理"],
+    summary="创建复测记录"
+)
+async def create_retest_record(request: RetestRecordCreate):
+    """创建工单复测记录，支持自动再预测"""
+    try:
+        from app.services.alert.retest_service import RetestService
+        service = RetestService()
+        record = service.create_retest_record(
+            work_order_id=request.work_order_id,
+            retest_time=request.retest_time,
+            retester_id=request.retester_id,
+            retester_name=request.retester_name,
+            retest_result=request.retest_result,
+            measured_value=request.measured_value,
+            data_points=request.data_points,
+            before_risk_score=request.before_risk_score,
+            after_risk_score=request.after_risk_score,
+            status_after_retest=request.status_after_retest,
+            confidence=request.confidence,
+            retest_notes=request.retest_notes,
+            photos=request.photos,
+            extra_info=request.extra_info,
+            auto_repredict=request.auto_repredict,
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="工单不存在或创建失败")
+        return _retest_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建复测记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/work-orders/retests/{record_id}",
+    response_model=RetestRecordResponse,
+    tags=["工单管理"],
+    summary="获取复测记录详情"
+)
+async def get_retest_record(record_id: int):
+    """获取复测记录详情"""
+    try:
+        from app.services.alert.retest_service import RetestService
+        service = RetestService()
+        record = service.get_retest_record(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="复测记录不存在")
+        return _retest_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取复测记录详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/work-orders/retests/{record_id}",
+    response_model=RetestRecordResponse,
+    tags=["工单管理"],
+    summary="更新复测记录"
+)
+async def update_retest_record(record_id: int, request: RetestRecordUpdate):
+    """更新复测记录"""
+    try:
+        from app.services.alert.retest_service import RetestService
+        service = RetestService()
+        update_data = request.model_dump(exclude_unset=True)
+        record = service.update_retest_record(record_id, **update_data)
+        if not record:
+            raise HTTPException(status_code=404, detail="复测记录不存在")
+        return _retest_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新复测记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/work-orders/retests/{record_id}/repredict",
+    response_model=PredictionCompareResponse,
+    tags=["工单管理"],
+    summary="触发复测后再预测"
+)
+async def trigger_retest_repredict(record_id: int):
+    """手动触发复测后再预测及对比"""
+    try:
+        from app.services.alert.retest_service import RetestService
+        service = RetestService()
+        compare = service.repredict_and_compare(record_id)
+        if not compare:
+            raise HTTPException(status_code=404, detail="复测记录不存在或再预测失败")
+        return _prediction_compare_to_dict(compare)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"触发复测再预测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/work-orders/{work_order_id}/prediction-compares",
+    response_model=PredictionCompareListResponse,
+    tags=["工单管理"],
+    summary="查询工单预测对比列表"
+)
+async def list_work_order_prediction_compares(
+    work_order_id: int,
+    is_false_positive: Optional[bool] = Query(None, description="是否误报"),
+    is_recurring: Optional[bool] = Query(None, description="是否重复故障"),
+    risk_change: Optional[str] = Query(None, description="风险变化 improved/stable/worsened"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """查询工单预测对比列表"""
+    try:
+        from app.services.alert.retest_service import RetestService
+        service = RetestService()
+        records, total = service.list_prediction_compares(
+            work_order_id=work_order_id,
+            is_false_positive=is_false_positive,
+            is_recurring=is_recurring,
+            risk_change=risk_change,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            'total': total,
+            'items': [_prediction_compare_to_dict(r) for r in records],
+        }
+    except Exception as e:
+        logger.error(f"查询预测对比列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/work-orders/prediction-compares/{compare_id}",
+    response_model=PredictionCompareResponse,
+    tags=["工单管理"],
+    summary="获取预测对比详情"
+)
+async def get_prediction_compare(compare_id: int):
+    """获取预测对比详情"""
+    try:
+        from app.services.alert.retest_service import RetestService
+        service = RetestService()
+        record = service.get_prediction_compare(compare_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="预测对比不存在")
+        return _prediction_compare_to_dict(record)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取预测对比详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 工单统计指标 ====================
+
+@router.get(
+    "/work-orders/stats/summary",
+    response_model=WorkOrderStatsResponse,
+    tags=["工单统计"],
+    summary="工单统计指标概览"
+)
+async def get_work_order_stats(
+    start_time: Optional[datetime] = Query(None, description="统计开始时间"),
+    end_time: Optional[datetime] = Query(None, description="统计结束时间"),
+    node_type: Optional[str] = Query(None, description="节点类型 bolt/flange"),
+    priority: Optional[str] = Query(None, description="优先级"),
+):
+    """获取工单统计指标：MTTR、误报率、重复故障率等"""
+    try:
+        from app.services.alert.work_order_stats_service import WorkOrderStatsService
+        service = WorkOrderStatsService()
+        stats = service.calculate_stats(
+            start_time=start_time,
+            end_time=end_time,
+            node_type=node_type,
+            priority=priority,
+        )
+        return stats
+    except Exception as e:
+        logger.error(f"获取工单统计失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/work-orders/stats/mttr-trend",
+    response_model=MttrTrendResponse,
+    tags=["工单统计"],
+    summary="MTTR趋势"
+)
+async def get_mttr_trend(
+    days: int = Query(30, ge=1, le=365, description="统计天数"),
+    node_type: Optional[str] = Query(None, description="节点类型 bolt/flange"),
+    priority: Optional[str] = Query(None, description="优先级"),
+):
+    """获取 MTTR 趋势数据"""
+    try:
+        from app.services.alert.work_order_stats_service import WorkOrderStatsService
+        service = WorkOrderStatsService()
+        trend_data = service.get_mttr_trend(
+            days=days,
+            node_type=node_type,
+            priority=priority,
+        )
+        return trend_data
+    except Exception as e:
+        logger.error(f"获取MTTR趋势失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== CMMS/EAM 集成 ====================
+
+@router.get(
+    "/cmms/configs",
+    response_model=CmmsConfigListResponse,
+    tags=["CMMS集成"],
+    summary="查询CMMS配置列表"
+)
+async def list_cmms_configs(
+    enabled: Optional[bool] = Query(None, description="是否启用"),
+    system_type: Optional[str] = Query(None, description="系统类型"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """查询 CMMS/EAM 集成配置列表"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        configs, total = service.list_configs(
+            enabled=enabled,
+            system_type=system_type,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            'total': total,
+            'items': [_cmms_config_to_dict(c) for c in configs],
+        }
+    except Exception as e:
+        logger.error(f"查询CMMS配置列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/cmms/configs",
+    response_model=CmmsConfigResponse,
+    tags=["CMMS集成"],
+    summary="创建CMMS配置"
+)
+async def create_cmms_config(request: CmmsConfigCreate):
+    """创建 CMMS/EAM 集成配置"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        config = service.create_config(
+            system_name=request.system_name,
+            system_type=request.system_type,
+            base_url=request.base_url,
+            auth_type=request.auth_type,
+            auth_config=request.auth_config,
+            work_order_sync=request.work_order_sync,
+            work_order_webhook_url=request.work_order_webhook_url,
+            work_order_push_url=request.work_order_push_url,
+            status_mapping=request.status_mapping,
+            priority_mapping=request.priority_mapping,
+            field_mapping=request.field_mapping,
+            enabled=request.enabled,
+            sync_direction=request.sync_direction,
+            sync_interval=request.sync_interval,
+            tenant_id=request.tenant_id,
+            extra_info=request.extra_info,
+        )
+        if not config:
+            raise HTTPException(status_code=500, detail="创建CMMS配置失败")
+        return _cmms_config_to_dict(config)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建CMMS配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/cmms/configs/{config_id}",
+    response_model=CmmsConfigResponse,
+    tags=["CMMS集成"],
+    summary="获取CMMS配置详情"
+)
+async def get_cmms_config(config_id: int):
+    """获取 CMMS 配置详情"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        config = service.get_config(config_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="CMMS配置不存在")
+        return _cmms_config_to_dict(config)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取CMMS配置详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/cmms/configs/{config_id}",
+    response_model=CmmsConfigResponse,
+    tags=["CMMS集成"],
+    summary="更新CMMS配置"
+)
+async def update_cmms_config(config_id: int, request: CmmsConfigUpdate):
+    """更新 CMMS 配置"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        update_data = request.model_dump(exclude_unset=True)
+        config = service.update_config(config_id, **update_data)
+        if not config:
+            raise HTTPException(status_code=404, detail="CMMS配置不存在")
+        return _cmms_config_to_dict(config)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新CMMS配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/cmms/configs/{config_id}",
+    tags=["CMMS集成"],
+    summary="删除CMMS配置"
+)
+async def delete_cmms_config(config_id: int):
+    """删除 CMMS 配置"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        success = service.delete_config(config_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="CMMS配置不存在")
+        return {'success': True, 'message': '删除成功'}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除CMMS配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/cmms/sync/work-order",
+    response_model=CmmsSyncResponse,
+    tags=["CMMS集成"],
+    summary="同步工单到CMMS"
+)
+async def sync_work_order_to_cmms(request: CmmsSyncRequest):
+    """手动同步工单到 CMMS/EAM 系统"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        success, log_id, external_id, error = service.sync_work_order(
+            work_order_id=request.work_order_id,
+            config_id=request.config_id,
+            sync_type=request.sync_type,
+        )
+        return {
+            'success': success,
+            'sync_log_id': log_id,
+            'external_id': external_id,
+            'message': error or ('同步成功' if success else '同步失败'),
+        }
+    except Exception as e:
+        logger.error(f"同步工单到CMMS失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/cmms/webhook/{config_id}",
+    response_model=CmmsWebhookResponse,
+    tags=["CMMS集成"],
+    summary="CMMS Webhook回调"
+)
+async def cmms_webhook_callback(
+    config_id: int,
+    request: Dict[str, Any],
+    x_signature: Optional[str] = Query(None, alias="X-Signature", description="Webhook签名"),
+):
+    """接收 CMMS 系统的 Webhook 回调"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        success, processed_count, message = service.handle_webhook(
+            config_id=config_id,
+            payload=request,
+            signature=x_signature,
+        )
+        return {
+            'success': success,
+            'message': message,
+            'processed_count': processed_count,
+        }
+    except Exception as e:
+        logger.error(f"处理CMMS Webhook失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/cmms/sync-logs",
+    response_model=CmmsSyncLogListResponse,
+    tags=["CMMS集成"],
+    summary="查询CMMS同步日志"
+)
+async def list_cmms_sync_logs(
+    config_id: Optional[int] = Query(None, description="CMMS配置ID"),
+    work_order_id: Optional[int] = Query(None, description="工单ID"),
+    status: Optional[str] = Query(None, description="同步状态 success/failed/pending"),
+    sync_direction: Optional[str] = Query(None, description="同步方向 push/pull"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """查询 CMMS 同步日志"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        logs, total = service.list_sync_logs(
+            config_id=config_id,
+            work_order_id=work_order_id,
+            status=status,
+            sync_direction=sync_direction,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            'total': total,
+            'items': [_cmms_sync_log_to_dict(l) for l in logs],
+        }
+    except Exception as e:
+        logger.error(f"查询CMMS同步日志失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/cmms/sync-logs/{log_id}/retry",
+    response_model=CmmsSyncResponse,
+    tags=["CMMS集成"],
+    summary="重试CMMS同步"
+)
+async def retry_cmms_sync(log_id: int):
+    """重试失败的 CMMS 同步"""
+    try:
+        from app.services.alert.cmms_service import CmmsService
+        service = CmmsService()
+        success, external_id, error = service.retry_sync(log_id)
+        return {
+            'success': success,
+            'external_id': external_id,
+            'message': error or ('重试成功' if success else '重试失败'),
+        }
+    except Exception as e:
+        logger.error(f"重试CMMS同步失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 辅助函数: 工单闭环 ====================
+
+def _disposal_to_dict(record) -> Dict[str, Any]:
+    """将处置记录ORM对象转为响应字典"""
+    data = {
+        'id': record.id,
+        'work_order_id': record.work_order_id,
+        'disposal_type': record.disposal_type,
+        'disposal_content': record.disposal_content,
+        'disposal_time': record.disposal_time,
+        'operator_id': record.operator_id,
+        'operator_name': record.operator_name,
+        'before_value': record.before_value,
+        'after_value': record.after_value,
+        'notes': record.notes,
+        'create_time': record.create_time,
+    }
+    for field, attr in [
+        ('materials_used', record.materials_used),
+        ('photos', record.photos),
+        ('extra_info', record.extra_info),
+    ]:
+        if attr:
+            try:
+                data[field] = json.loads(attr)
+            except (json.JSONDecodeError, TypeError):
+                data[field] = attr
+        else:
+            data[field] = None
+    return data
+
+
+def _retest_to_dict(record) -> Dict[str, Any]:
+    """将复测记录ORM对象转为响应字典"""
+    data = {
+        'id': record.id,
+        'work_order_id': record.work_order_id,
+        'retest_time': record.retest_time,
+        'retester_id': record.retester_id,
+        'retester_name': record.retester_name,
+        'retest_result': record.retest_result,
+        'measured_value': record.measured_value,
+        'before_risk_score': record.before_risk_score,
+        'after_risk_score': record.after_risk_score,
+        'status_after_retest': record.status_after_retest,
+        'confidence': record.confidence,
+        'retest_notes': record.retest_notes,
+        'create_time': record.create_time,
+    }
+    for field, attr in [
+        ('data_points', record.data_points),
+        ('photos', record.photos),
+        ('extra_info', record.extra_info),
+    ]:
+        if attr:
+            try:
+                data[field] = json.loads(attr)
+            except (json.JSONDecodeError, TypeError):
+                data[field] = attr
+        else:
+            data[field] = None
+    return data
+
+
+def _prediction_compare_to_dict(record) -> Dict[str, Any]:
+    """将预测对比ORM对象转为响应字典"""
+    data = {
+        'id': record.id,
+        'work_order_id': record.work_order_id,
+        'retest_id': record.retest_id,
+        'original_prediction_id': record.original_prediction_id,
+        'retest_prediction_id': record.retest_prediction_id,
+        'original_status': record.original_status,
+        'retest_status': record.retest_status,
+        'original_risk_score': record.original_risk_score,
+        'retest_risk_score': record.retest_risk_score,
+        'original_confidence': record.original_confidence,
+        'retest_confidence': record.retest_confidence,
+        'risk_change': record.risk_change,
+        'risk_delta': record.risk_delta,
+        'status_match': record.status_match,
+        'is_false_positive': record.is_false_positive,
+        'is_recurring': record.is_recurring,
+        'create_time': record.create_time,
+    }
+    if record.comparison_detail:
+        try:
+            data['comparison_detail'] = json.loads(record.comparison_detail)
+        except (json.JSONDecodeError, TypeError):
+            data['comparison_detail'] = record.comparison_detail
+    else:
+        data['comparison_detail'] = None
+    return data
+
+
+def _cmms_config_to_dict(config) -> Dict[str, Any]:
+    """将CMMS配置ORM对象转为响应字典"""
+    data = {
+        'id': config.id,
+        'system_name': config.system_name,
+        'system_type': config.system_type,
+        'base_url': config.base_url,
+        'auth_type': config.auth_type,
+        'work_order_sync': config.work_order_sync,
+        'work_order_webhook_url': config.work_order_webhook_url,
+        'work_order_push_url': config.work_order_push_url,
+        'enabled': config.enabled,
+        'sync_direction': config.sync_direction,
+        'last_sync_time': config.last_sync_time,
+        'sync_interval': config.sync_interval,
+        'tenant_id': config.tenant_id,
+        'create_time': config.create_time,
+        'update_time': config.update_time,
+    }
+    for field, attr in [
+        ('status_mapping', config.status_mapping),
+        ('priority_mapping', config.priority_mapping),
+        ('field_mapping', config.field_mapping),
+        ('extra_info', config.extra_info),
+    ]:
+        if attr:
+            try:
+                data[field] = json.loads(attr)
+            except (json.JSONDecodeError, TypeError):
+                data[field] = attr
+        else:
+            data[field] = None
+    return data
+
+
+def _cmms_sync_log_to_dict(log) -> Dict[str, Any]:
+    """将CMMS同步日志ORM对象转为响应字典"""
+    return {
+        'id': log.id,
+        'config_id': log.config_id,
+        'sync_type': log.sync_type,
+        'sync_direction': log.sync_direction,
+        'work_order_id': log.work_order_id,
+        'external_id': log.external_id,
+        'status': log.status,
+        'error_message': log.error_message,
+        'retry_count': log.retry_count,
+        'sync_time': log.sync_time,
+        'create_time': log.create_time,
+    }
 
 
 # ==================== 辅助函数: 审计 ====================

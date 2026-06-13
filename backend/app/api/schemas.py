@@ -689,6 +689,327 @@ class WorkOrderListResponse(BaseModel):
     items: List[WorkOrderResponse]
 
 
+# ==================== 工单处置记录 ====================
+
+class DisposalRecordCreate(BaseModel):
+    """创建处置记录请求"""
+    work_order_id: int = Field(..., description="关联工单ID")
+    disposal_type: str = Field(..., description="处置类型 torque_adjustment/replacement/inspection/other")
+    disposal_content: str = Field(..., description="处置内容描述")
+    disposal_time: Optional[datetime] = Field(None, description="处置时间")
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+    before_value: Optional[float] = Field(None, description="处置前值")
+    after_value: Optional[float] = Field(None, description="处置后值")
+    materials_used: Optional[List[Dict[str, Any]]] = Field(None, description="使用材料列表")
+    photos: Optional[List[str]] = Field(None, description="现场照片URL列表")
+    notes: Optional[str] = Field(None, description="备注")
+    extra_info: Optional[Dict[str, Any]] = Field(None, description="扩展信息")
+
+
+class DisposalRecordUpdate(BaseModel):
+    """更新处置记录请求"""
+    disposal_type: Optional[str] = None
+    disposal_content: Optional[str] = None
+    disposal_time: Optional[datetime] = None
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    before_value: Optional[float] = None
+    after_value: Optional[float] = None
+    materials_used: Optional[List[Dict[str, Any]]] = None
+    photos: Optional[List[str]] = None
+    notes: Optional[str] = None
+    extra_info: Optional[Dict[str, Any]] = None
+
+
+class DisposalRecordResponse(BaseModel):
+    """处置记录响应"""
+    id: int
+    work_order_id: int
+    disposal_type: Optional[str] = None
+    disposal_content: Optional[str] = None
+    disposal_time: Optional[datetime] = None
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    before_value: Optional[float] = None
+    after_value: Optional[float] = None
+    materials_used: Optional[List[Dict[str, Any]]] = None
+    photos: Optional[List[str]] = None
+    notes: Optional[str] = None
+    extra_info: Optional[Dict[str, Any]] = None
+    create_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DisposalRecordListResponse(BaseModel):
+    """处置记录列表响应"""
+    total: int
+    items: List[DisposalRecordResponse]
+
+
+# ==================== 工单复测数据 ====================
+
+class RetestRecordCreate(BaseModel):
+    """创建复测记录请求"""
+    work_order_id: int = Field(..., description="关联工单ID")
+    retest_time: Optional[datetime] = Field(None, description="复测时间")
+    retester_id: Optional[str] = Field(None, description="复测人ID")
+    retester_name: Optional[str] = Field(None, description="复测人姓名")
+    retest_result: str = Field("pending", description="复测结果 pass/fail/pending")
+    measured_value: Optional[float] = Field(None, description="复测测量值")
+    data_points: Optional[List[List[Any]]] = Field(None, description="复测数据点 时序数据")
+    before_risk_score: Optional[float] = Field(None, description="复测前风险评分")
+    after_risk_score: Optional[float] = Field(None, description="复测后风险评分")
+    status_after_retest: Optional[str] = Field(None, description="复测后状态 normal/warning/critical")
+    confidence: Optional[float] = Field(None, description="复测置信度")
+    retest_notes: Optional[str] = Field(None, description="复测备注")
+    photos: Optional[List[str]] = Field(None, description="复测照片URL列表")
+    extra_info: Optional[Dict[str, Any]] = Field(None, description="扩展信息")
+    auto_repredict: Optional[bool] = Field(True, description="是否自动再预测")
+
+
+class RetestRecordUpdate(BaseModel):
+    """更新复测记录请求"""
+    retest_time: Optional[datetime] = None
+    retester_id: Optional[str] = None
+    retester_name: Optional[str] = None
+    retest_result: Optional[str] = None
+    measured_value: Optional[float] = None
+    data_points: Optional[List[List[Any]]] = None
+    before_risk_score: Optional[float] = None
+    after_risk_score: Optional[float] = None
+    status_after_retest: Optional[str] = None
+    confidence: Optional[float] = None
+    retest_notes: Optional[str] = None
+    photos: Optional[List[str]] = None
+    extra_info: Optional[Dict[str, Any]] = None
+
+
+class RetestRecordResponse(BaseModel):
+    """复测记录响应"""
+    id: int
+    work_order_id: int
+    retest_time: Optional[datetime] = None
+    retester_id: Optional[str] = None
+    retester_name: Optional[str] = None
+    retest_result: Optional[str] = None
+    measured_value: Optional[float] = None
+    data_points: Optional[List[List[Any]]] = None
+    before_risk_score: Optional[float] = None
+    after_risk_score: Optional[float] = None
+    status_after_retest: Optional[str] = None
+    confidence: Optional[float] = None
+    retest_notes: Optional[str] = None
+    photos: Optional[List[str]] = None
+    extra_info: Optional[Dict[str, Any]] = None
+    create_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class RetestRecordListResponse(BaseModel):
+    """复测记录列表响应"""
+    total: int
+    items: List[RetestRecordResponse]
+
+
+# ==================== 预测对比 ====================
+
+class PredictionCompareResponse(BaseModel):
+    """预测对比响应"""
+    id: int
+    work_order_id: int
+    retest_id: Optional[int] = None
+    original_prediction_id: Optional[int] = None
+    retest_prediction_id: Optional[int] = None
+    original_status: Optional[str] = None
+    retest_status: Optional[str] = None
+    original_risk_score: Optional[float] = None
+    retest_risk_score: Optional[float] = None
+    original_confidence: Optional[float] = None
+    retest_confidence: Optional[float] = None
+    risk_change: Optional[str] = None
+    risk_delta: Optional[float] = None
+    status_match: Optional[bool] = None
+    is_false_positive: Optional[bool] = None
+    is_recurring: Optional[bool] = None
+    comparison_detail: Optional[Dict[str, Any]] = None
+    create_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PredictionCompareListResponse(BaseModel):
+    """预测对比列表响应"""
+    total: int
+    items: List[PredictionCompareResponse]
+
+
+# ==================== 统计指标 ====================
+
+class WorkOrderStatsRequest(BaseModel):
+    """工单统计请求"""
+    start_time: Optional[datetime] = Field(None, description="统计开始时间")
+    end_time: Optional[datetime] = Field(None, description="统计结束时间")
+    node_type: Optional[str] = Field(None, description="节点类型 bolt/flange")
+    priority: Optional[str] = Field(None, description="优先级")
+
+
+class WorkOrderStatsResponse(BaseModel):
+    """工单统计响应"""
+    total_work_orders: int = Field(0, description="总工单数")
+    closed_work_orders: int = Field(0, description="已关闭工单数")
+    open_work_orders: int = Field(0, description="待处理工单数")
+    in_progress_work_orders: int = Field(0, description="处理中工单数")
+    mttr_hours: Optional[float] = Field(None, description="平均修复时间 MTTR 小时")
+    mttr_minutes: Optional[float] = Field(None, description="平均修复时间 MTTR 分钟")
+    false_positive_rate: Optional[float] = Field(None, description="误报率 0-1")
+    false_positive_count: int = Field(0, description="误报数量")
+    recurrence_rate: Optional[float] = Field(None, description="重复故障率 0-1")
+    recurrence_count: int = Field(0, description="重复故障数量")
+    avg_resolve_hours: Optional[float] = Field(None, description="平均解决时间 小时")
+    on_time_completion_rate: Optional[float] = Field(None, description="按时完成率 0-1")
+    priority_distribution: Optional[Dict[str, int]] = Field(None, description="优先级分布")
+    status_distribution: Optional[Dict[str, int]] = Field(None, description="状态分布")
+    time_range: Optional[Dict[str, Any]] = Field(None, description="统计时间范围")
+
+
+class MttrTrendPoint(BaseModel):
+    """MTTR趋势点"""
+    date: str
+    mttr_hours: Optional[float] = None
+    work_order_count: int = 0
+
+
+class MttrTrendResponse(BaseModel):
+    """MTTR趋势响应"""
+    trend: List[MttrTrendPoint]
+    overall_mttr_hours: Optional[float] = None
+
+
+# ==================== CMMS/EAM 集成 ====================
+
+class CmmsConfigCreate(BaseModel):
+    """创建CMMS配置请求"""
+    system_name: str = Field(..., description="系统名称")
+    system_type: Optional[str] = Field(None, description="系统类型 maximo/sap_eam/infor/eam/other")
+    base_url: Optional[str] = Field(None, description="系统基础URL")
+    auth_type: Optional[str] = Field(None, description="认证类型 basic/api_key/oauth2/token")
+    auth_config: Optional[Dict[str, Any]] = Field(None, description="认证配置")
+    work_order_sync: Optional[bool] = Field(False, description="是否同步工单")
+    work_order_webhook_url: Optional[str] = Field(None, description="工单Webhook URL")
+    work_order_push_url: Optional[str] = Field(None, description="工单推送URL")
+    status_mapping: Optional[Dict[str, str]] = Field(None, description="状态映射")
+    priority_mapping: Optional[Dict[str, str]] = Field(None, description="优先级映射")
+    field_mapping: Optional[Dict[str, Any]] = Field(None, description="字段映射")
+    enabled: Optional[bool] = Field(True, description="是否启用")
+    sync_direction: Optional[str] = Field("push", description="同步方向 push/pull/bidirectional")
+    sync_interval: Optional[int] = Field(60, description="同步间隔 分钟")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+    extra_info: Optional[Dict[str, Any]] = Field(None, description="扩展信息")
+
+
+class CmmsConfigUpdate(BaseModel):
+    """更新CMMS配置请求"""
+    system_name: Optional[str] = None
+    system_type: Optional[str] = None
+    base_url: Optional[str] = None
+    auth_type: Optional[str] = None
+    auth_config: Optional[Dict[str, Any]] = None
+    work_order_sync: Optional[bool] = None
+    work_order_webhook_url: Optional[str] = None
+    work_order_push_url: Optional[str] = None
+    status_mapping: Optional[Dict[str, str]] = None
+    priority_mapping: Optional[Dict[str, str]] = None
+    field_mapping: Optional[Dict[str, Any]] = None
+    enabled: Optional[bool] = None
+    sync_direction: Optional[str] = None
+    sync_interval: Optional[int] = None
+    extra_info: Optional[Dict[str, Any]] = None
+
+
+class CmmsConfigResponse(BaseModel):
+    """CMMS配置响应"""
+    id: int
+    system_name: str
+    system_type: Optional[str] = None
+    base_url: Optional[str] = None
+    auth_type: Optional[str] = None
+    work_order_sync: Optional[bool] = None
+    work_order_webhook_url: Optional[str] = None
+    work_order_push_url: Optional[str] = None
+    status_mapping: Optional[Dict[str, str]] = None
+    priority_mapping: Optional[Dict[str, str]] = None
+    field_mapping: Optional[Dict[str, Any]] = None
+    enabled: Optional[bool] = None
+    sync_direction: Optional[str] = None
+    last_sync_time: Optional[datetime] = None
+    sync_interval: Optional[int] = None
+    tenant_id: Optional[int] = None
+    extra_info: Optional[Dict[str, Any]] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CmmsConfigListResponse(BaseModel):
+    """CMMS配置列表响应"""
+    total: int
+    items: List[CmmsConfigResponse]
+
+
+class CmmsSyncRequest(BaseModel):
+    """CMMS同步请求"""
+    config_id: int = Field(..., description="CMMS配置ID")
+    sync_type: str = Field("work_order_create", description="同步类型")
+    work_order_id: Optional[int] = Field(None, description="工单ID")
+
+
+class CmmsSyncResponse(BaseModel):
+    """CMMS同步响应"""
+    success: bool
+    sync_log_id: Optional[int] = None
+    external_id: Optional[str] = None
+    message: Optional[str] = None
+
+
+class CmmsSyncLogResponse(BaseModel):
+    """CMMS同步日志响应"""
+    id: int
+    config_id: Optional[int] = None
+    sync_type: Optional[str] = None
+    sync_direction: Optional[str] = None
+    work_order_id: Optional[int] = None
+    external_id: Optional[str] = None
+    status: Optional[str] = None
+    error_message: Optional[str] = None
+    retry_count: Optional[int] = None
+    sync_time: Optional[datetime] = None
+    create_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CmmsSyncLogListResponse(BaseModel):
+    """CMMS同步日志列表响应"""
+    total: int
+    items: List[CmmsSyncLogResponse]
+
+
+class CmmsWebhookResponse(BaseModel):
+    """CMMS Webhook响应"""
+    success: bool
+    message: str
+    processed_count: Optional[int] = 0
+
+
 # ---------- 告警调度 ----------
 
 class AlertUpgradeTriggerResponse(BaseModel):
