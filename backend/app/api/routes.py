@@ -75,6 +75,12 @@ from app.api.schemas import (
     TenantAPIKeyCreateRequest, TenantAPIKeyUpdateRequest,
     TenantAPIKeyResponse, TenantAPIKeyCreateResponse,
     TenantLoginRequest, TenantLoginResponse,
+    KnowledgeCaseCreateRequest, KnowledgeCaseUpdateRequest,
+    KnowledgeCaseResponse, KnowledgeCaseListResponse,
+    CaseReviewRequest, CaseReviewResponse,
+    CaseVersionResponse, CaseVersionCompareResponse,
+    CaseSimilaritySearchRequest, CaseSimilaritySearchResponse,
+    CaseRecommendationResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -3973,4 +3979,590 @@ async def revoke_tenant_api_key(tenant_id: int, key_id: int):
         raise
     except Exception as e:
         logger.error(f"吊销API Key失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 辅助函数: 知识库案例 ====================
+
+def _case_to_dict(case) -> Dict[str, Any]:
+    """将案例 ORM 对象转为响应字典"""
+    data = {
+        'id': case.id,
+        'case_no': case.case_no,
+        'case_title': case.case_title,
+        'node_type': case.node_type,
+        'node_id': case.node_id,
+        'fault_type': case.fault_type,
+        'fault_level': case.fault_level,
+        'diagnosis': case.diagnosis,
+        'root_cause': case.root_cause,
+        'effectiveness_score': case.effectiveness_score,
+        'status': case.status,
+        'version': case.version,
+        'tenant_id': case.tenant_id,
+        'creator_id': case.creator_id,
+        'creator_name': case.creator_name,
+        'reviewer_id': case.reviewer_id,
+        'reviewer_name': case.reviewer_name,
+        'review_time': case.review_time,
+        'review_comment': case.review_comment,
+        'source_alert_id': case.source_alert_id,
+        'source_prediction_id': case.source_prediction_id,
+        'create_time': case.create_time,
+        'update_time': case.update_time,
+    }
+
+    for field, attr in [
+        ('working_condition', case.working_condition),
+        ('sensor_features', case.sensor_features),
+        ('treatment_plan', case.treatment_plan),
+        ('effect_evaluation', case.effect_evaluation),
+    ]:
+        if attr:
+            try:
+                data[field] = json.loads(attr)
+            except Exception:
+                data[field] = None
+        else:
+            data[field] = None
+
+    if case.tags:
+        try:
+            data['tags'] = json.loads(case.tags)
+        except Exception:
+            data['tags'] = []
+    else:
+        data['tags'] = []
+
+    return data
+
+
+def _version_to_dict(version) -> Dict[str, Any]:
+    """将版本记录 ORM 对象转为响应字典"""
+    data = {
+        'id': version.id,
+        'case_id': version.case_id,
+        'version': version.version,
+        'case_title': version.case_title,
+        'diagnosis': version.diagnosis,
+        'effectiveness_score': version.effectiveness_score,
+        'change_summary': version.change_summary,
+        'operator_id': version.operator_id,
+        'operator_name': version.operator_name,
+        'create_time': version.create_time,
+    }
+
+    for field, attr in [
+        ('treatment_plan', version.treatment_plan),
+        ('effect_evaluation', version.effect_evaluation),
+    ]:
+        if attr:
+            try:
+                data[field] = json.loads(attr)
+            except Exception:
+                data[field] = None
+        else:
+            data[field] = None
+
+    return data
+
+
+# ==================== 知识库案例管理 ====================
+
+@router.post(
+    "/knowledge/cases",
+    tags=["知识库CBR"],
+    summary="创建案例"
+)
+async def create_knowledge_case(request: KnowledgeCaseCreateRequest):
+    """创建新的知识库案例"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        # 处理嵌套模型
+        working_condition = None
+        if request.working_condition:
+            working_condition = request.working_condition.model_dump()
+
+        treatment_plan = None
+        if request.treatment_plan:
+            treatment_plan = request.treatment_plan.model_dump()
+
+        effect_evaluation = None
+        if request.effect_evaluation:
+            effect_evaluation = request.effect_evaluation.model_dump()
+
+        sensor_data = request.sensor_data
+        sensor_features = request.sensor_features
+
+        case = service.create_case(
+            case_title=request.case_title,
+            node_type=request.node_type,
+            node_id=request.node_id,
+            fault_type=request.fault_type,
+            fault_level=request.fault_level,
+            working_condition=working_condition,
+            sensor_data=sensor_data,
+            sensor_features=sensor_features,
+            diagnosis=request.diagnosis,
+            root_cause=request.root_cause,
+            treatment_plan=treatment_plan,
+            effect_evaluation=effect_evaluation,
+            source_alert_id=request.source_alert_id,
+            source_prediction_id=request.source_prediction_id,
+            tags=request.tags,
+            creator_id=request.creator_id,
+            creator_name=request.creator_name,
+            tenant_id=request.tenant_id,
+            submit_for_review=request.submit_for_review,
+        )
+
+        if not case:
+            raise HTTPException(status_code=500, detail="创建案例失败")
+
+        return _case_to_dict(case)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建案例失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/knowledge/cases",
+    response_model=KnowledgeCaseListResponse,
+    tags=["知识库CBR"],
+    summary="查询案例列表"
+)
+async def list_knowledge_cases(
+    status: Optional[str] = Query(None, description="状态 draft/pending_review/approved/rejected"),
+    node_type: Optional[str] = Query(None, description="节点类型 bolt/flange"),
+    fault_type: Optional[str] = Query(None, description="故障类型"),
+    fault_level: Optional[int] = Query(None, ge=1, le=4, description="故障级别 1-4"),
+    tenant_id: Optional[int] = Query(None, description="租户ID"),
+    keyword: Optional[str] = Query(None, description="关键词搜索"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """查询知识库案例列表"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        total, cases = service.list_cases(
+            status=status,
+            node_type=node_type,
+            fault_type=fault_type,
+            fault_level=fault_level,
+            tenant_id=tenant_id,
+            keyword=keyword,
+            limit=limit,
+            offset=offset,
+        )
+
+        items = [_case_to_dict(c) for c in cases]
+        return {"total": total, "items": items}
+    except Exception as e:
+        logger.error(f"查询案例列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/knowledge/cases/{case_id}",
+    tags=["知识库CBR"],
+    summary="获取案例详情"
+)
+async def get_knowledge_case(case_id: int):
+    """获取单条案例详情"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        case = service.get_case(case_id)
+        if not case:
+            raise HTTPException(status_code=404, detail="案例不存在")
+
+        return _case_to_dict(case)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取案例详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/knowledge/cases/{case_id}",
+    tags=["知识库CBR"],
+    summary="更新案例"
+)
+async def update_knowledge_case(case_id: int, request: KnowledgeCaseUpdateRequest):
+    """更新案例（自动创建新版本）"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        # 处理嵌套模型
+        working_condition = None
+        if request.working_condition:
+            working_condition = request.working_condition.model_dump()
+
+        treatment_plan = None
+        if request.treatment_plan:
+            treatment_plan = request.treatment_plan.model_dump()
+
+        effect_evaluation = None
+        if request.effect_evaluation:
+            effect_evaluation = request.effect_evaluation.model_dump()
+
+        case = service.update_case(
+            case_id=case_id,
+            case_title=request.case_title,
+            fault_type=request.fault_type,
+            fault_level=request.fault_level,
+            working_condition=working_condition,
+            sensor_data=request.sensor_data,
+            sensor_features=request.sensor_features,
+            diagnosis=request.diagnosis,
+            root_cause=request.root_cause,
+            treatment_plan=treatment_plan,
+            effect_evaluation=effect_evaluation,
+            tags=request.tags,
+            change_summary=request.change_summary,
+            submit_for_review=request.submit_for_review,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+        )
+
+        if not case:
+            raise HTTPException(status_code=404, detail="案例不存在")
+
+        return _case_to_dict(case)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新案例失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/knowledge/cases/{case_id}",
+    tags=["知识库CBR"],
+    summary="删除案例"
+)
+async def delete_knowledge_case(case_id: int):
+    """删除案例及其版本和审核记录"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        ok = service.delete_case(case_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="案例不存在")
+
+        return {"status": "success", "message": "案例已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除案例失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 案例审核 ====================
+
+@router.post(
+    "/knowledge/cases/{case_id}/submit-review",
+    tags=["知识库CBR"],
+    summary="提交审核"
+)
+async def submit_case_for_review(
+    case_id: int,
+    operator_id: Optional[str] = Query(None, description="操作人ID"),
+    operator_name: Optional[str] = Query(None, description="操作人姓名"),
+):
+    """将案例提交审核"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        case = service.submit_for_review(case_id, operator_id, operator_name)
+        if not case:
+            raise HTTPException(status_code=404, detail="案例不存在")
+
+        return _case_to_dict(case)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"提交审核失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/knowledge/cases/{case_id}/review",
+    tags=["知识库CBR"],
+    summary="审核案例"
+)
+async def review_knowledge_case(case_id: int, request: CaseReviewRequest):
+    """审核案例（通过/驳回/需修改）"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        case = service.review_case(
+            case_id=case_id,
+            review_result=request.review_result,
+            review_comment=request.review_comment,
+            reviewer_id=request.reviewer_id,
+            reviewer_name=request.reviewer_name,
+            review_level=request.review_level,
+        )
+
+        if not case:
+            raise HTTPException(status_code=404, detail="案例不存在")
+
+        return _case_to_dict(case)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"审核案例失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/knowledge/cases/{case_id}/reviews",
+    tags=["知识库CBR"],
+    summary="获取审核记录"
+)
+async def list_case_reviews(case_id: int):
+    """获取案例的审核历史记录"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        reviews = service.list_reviews(case_id)
+        return reviews
+    except Exception as e:
+        logger.error(f"获取审核记录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 版本管理 ====================
+
+@router.get(
+    "/knowledge/cases/{case_id}/versions",
+    tags=["知识库CBR"],
+    summary="获取版本历史"
+)
+async def list_case_versions(case_id: int):
+    """获取案例的版本历史"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        versions = service.get_case_versions(case_id)
+        return [_version_to_dict(v) for v in versions]
+    except Exception as e:
+        logger.error(f"获取版本历史失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/knowledge/cases/{case_id}/versions/{version}",
+    tags=["知识库CBR"],
+    summary="获取指定版本"
+)
+async def get_case_version(case_id: int, version: int):
+    """获取案例的指定版本详情"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        v = service.get_case_version(case_id, version)
+        if not v:
+            raise HTTPException(status_code=404, detail="版本不存在")
+
+        return _version_to_dict(v)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取版本详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/knowledge/cases/{case_id}/versions/compare",
+    tags=["知识库CBR"],
+    summary="对比版本差异"
+)
+async def compare_case_versions(
+    case_id: int,
+    version_from: int = Query(..., description="起始版本"),
+    version_to: int = Query(..., description="目标版本"),
+):
+    """对比两个版本之间的差异"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        result = service.compare_versions(case_id, version_from, version_to)
+        return result
+    except Exception as e:
+        logger.error(f"版本对比失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/knowledge/cases/{case_id}/versions/{version}/revert",
+    tags=["知识库CBR"],
+    summary="回退到指定版本"
+)
+async def revert_case_to_version(
+    case_id: int,
+    version: int,
+    operator_id: Optional[str] = Query(None, description="操作人ID"),
+    operator_name: Optional[str] = Query(None, description="操作人姓名"),
+):
+    """回退案例到指定版本（会创建新版本）"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        case = service.revert_to_version(case_id, version, operator_id, operator_name)
+        if not case:
+            raise HTTPException(status_code=404, detail="案例或版本不存在")
+
+        return _case_to_dict(case)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"版本回退失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 相似度检索 ====================
+
+@router.post(
+    "/knowledge/cases/search/similar",
+    tags=["知识库CBR"],
+    summary="检索相似案例 (Top-K)"
+)
+async def search_similar_cases(request: CaseSimilaritySearchRequest):
+    """
+    基于特征向量检索 Top-K 相似案例
+
+    相似度基于:
+    - 58维传感器特征向量（余弦相似度）
+    - 故障类型匹配
+    - 节点类型匹配
+    """
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        results = service.search_similar_cases(
+            node_type=request.node_type,
+            node_id=request.node_id,
+            fault_type=request.fault_type,
+            fault_level=request.fault_level,
+            sensor_data=request.sensor_data,
+            sensor_features=request.sensor_features,
+            feature_vector=request.feature_vector,
+            tags=request.tags,
+            top_k=request.top_k,
+            min_similarity=request.min_similarity,
+            only_approved=request.only_approved,
+            tenant_id=request.tenant_id,
+        )
+
+        formatted_results = []
+        for r in results:
+            case_dict = _case_to_dict(r.case)
+            case_dict['similarity_score'] = r.similarity_score
+            formatted_results.append({
+                'case': case_dict,
+                'similarity_score': r.similarity_score,
+                'matching_features': r.matching_features,
+            })
+
+        return {
+            'total': len(results),
+            'results': formatted_results,
+        }
+    except Exception as e:
+        logger.error(f"相似案例检索失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 推荐措施与 RAG ====================
+
+@router.post(
+    "/knowledge/cases/recommend",
+    tags=["知识库CBR"],
+    summary="获取案例推荐 (推荐措施 + RAG上下文)"
+)
+async def get_case_recommendations(request: CaseSimilaritySearchRequest):
+    """
+    获取案例推荐，包含聚合推荐措施和 RAG 上下文
+
+    返回:
+    - Top-K 相似案例
+    - 聚合推荐措施列表
+    - RAG 上下文字符串（可直接传给LLM）
+    - 置信度分数
+    """
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        result = service.get_case_recommendations(
+            node_type=request.node_type,
+            node_id=request.node_id,
+            fault_type=request.fault_type,
+            fault_level=request.fault_level,
+            sensor_data=request.sensor_data,
+            sensor_features=request.sensor_features,
+            feature_vector=request.feature_vector,
+            tags=request.tags,
+            top_k=request.top_k,
+            min_similarity=request.min_similarity,
+            only_approved=request.only_approved,
+            tenant_id=request.tenant_id,
+        )
+
+        cases_dict = [_case_to_dict(c) for c in result['cases']]
+        for i, c in enumerate(cases_dict):
+            c['similarity_score'] = result['cases'][i].similarity_score if hasattr(result['cases'][i], 'similarity_score') else None
+
+        return {
+            'top_k': result['top_k'],
+            'total_matched': result['total_matched'],
+            'cases': cases_dict,
+            'aggregated_recommendations': result['aggregated_recommendations'],
+            'rag_context': result['rag_context'],
+            'confidence_score': result['confidence_score'],
+        }
+    except Exception as e:
+        logger.error(f"获取案例推荐失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 统计信息 ====================
+
+@router.get(
+    "/knowledge/statistics",
+    tags=["知识库CBR"],
+    summary="获取知识库统计"
+)
+async def get_knowledge_statistics(tenant_id: Optional[int] = Query(None, description="租户ID")):
+    """获取知识库统计信息"""
+    try:
+        from app.services.knowledge import KnowledgeService
+        service = KnowledgeService()
+
+        stats = service.get_statistics(tenant_id=tenant_id)
+        return stats
+    except Exception as e:
+        logger.error(f"获取统计信息失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

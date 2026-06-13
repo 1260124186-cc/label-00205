@@ -660,6 +660,168 @@ class TenantAPIKey(Base):
     )
 
 
+class KnowledgeCase(Base):
+    """
+    知识库案例表模型（CBR - 基于案例的推理）
+
+    对应数据库表: sc_knowledge_cases
+    结构化存储历史故障案例：工况、传感器特征、诊断结论、处置方案、效果评估。
+
+    Attributes:
+        id: 主键
+        case_no: 案例编号
+        case_title: 案例标题
+        node_type: 节点类型 bolt/flange
+        node_id: 节点ID
+        fault_type: 故障类型
+        fault_level: 故障级别 1-4
+        working_condition: 工况描述 JSON
+        sensor_features: 传感器特征向量 JSON (58维特征)
+        feature_vector: 归一化特征向量 (用于相似度计算，存储为逗号分隔字符串)
+        diagnosis: 诊断结论
+        root_cause: 根本原因分析
+        treatment_plan: 处置方案 JSON
+        effect_evaluation: 效果评估 JSON
+        effectiveness_score: 效果评分 0-100
+        status: 状态 draft/pending_review/approved/rejected
+        version: 当前版本号
+        tenant_id: 所属租户ID
+        creator_id: 创建人ID
+        creator_name: 创建人姓名
+        reviewer_id: 审核人ID
+        reviewer_name: 审核人姓名
+        review_time: 审核时间
+        review_comment: 审核意见
+        source_alert_id: 来源告警ID
+        source_prediction_id: 来源预测记录ID
+        tags: 标签 JSON
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_knowledge_cases'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    case_no = Column(String(50), unique=True, nullable=False, comment='案例编号')
+    case_title = Column(String(500), nullable=False, comment='案例标题')
+    node_type = Column(String(20), comment='节点类型 bolt/flange')
+    node_id = Column(String(100), comment='节点ID')
+    fault_type = Column(String(100), comment='故障类型')
+    fault_level = Column(Integer, comment='故障级别 1-4')
+    working_condition = Column(Text, comment='工况描述 JSON')
+    sensor_features = Column(Text, comment='传感器特征 JSON (58维特征名+值)')
+    feature_vector = Column(Text, comment='归一化特征向量 (逗号分隔字符串)')
+    diagnosis = Column(Text, comment='诊断结论')
+    root_cause = Column(Text, comment='根本原因分析')
+    treatment_plan = Column(Text, comment='处置方案 JSON')
+    effect_evaluation = Column(Text, comment='效果评估 JSON')
+    effectiveness_score = Column(Float, comment='效果评分 0-100')
+    status = Column(String(20), default='draft', comment='状态 draft/pending_review/approved/rejected')
+    version = Column(Integer, default=1, comment='当前版本号')
+    tenant_id = Column(BigInteger, comment='所属租户ID')
+    creator_id = Column(String(50), comment='创建人ID')
+    creator_name = Column(String(100), comment='创建人姓名')
+    reviewer_id = Column(String(50), comment='审核人ID')
+    reviewer_name = Column(String(100), comment='审核人姓名')
+    review_time = Column(DateTime, comment='审核时间')
+    review_comment = Column(Text, comment='审核意见')
+    source_alert_id = Column(BigInteger, comment='来源告警ID')
+    source_prediction_id = Column(BigInteger, comment='来源预测记录ID')
+    tags = Column(Text, comment='标签 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_case_status', 'status'),
+        Index('idx_case_node', 'node_type', 'node_id'),
+        Index('idx_case_fault', 'fault_type', 'fault_level'),
+        Index('idx_case_tenant', 'tenant_id'),
+        Index('idx_case_time', 'create_time'),
+        Index('idx_case_effectiveness', 'effectiveness_score'),
+    )
+
+
+class KnowledgeCaseVersion(Base):
+    """
+    知识库案例版本历史表
+
+    对应数据库表: sc_knowledge_case_versions
+    记录案例的每个版本，支持版本回溯和对比。
+
+    Attributes:
+        id: 主键
+        case_id: 关联案例ID
+        version: 版本号
+        case_title: 案例标题（该版本）
+        diagnosis: 诊断结论（该版本）
+        treatment_plan: 处置方案（该版本）
+        effect_evaluation: 效果评估（该版本）
+        effectiveness_score: 效果评分（该版本）
+        feature_vector: 特征向量（该版本）
+        change_summary: 变更说明
+        operator_id: 操作人ID
+        operator_name: 操作人姓名
+        create_time: 创建时间
+    """
+    __tablename__ = 'sc_knowledge_case_versions'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    case_id = Column(BigInteger, nullable=False, comment='关联案例ID')
+    version = Column(Integer, nullable=False, comment='版本号')
+    case_title = Column(String(500), comment='案例标题')
+    diagnosis = Column(Text, comment='诊断结论')
+    root_cause = Column(Text, comment='根本原因分析')
+    treatment_plan = Column(Text, comment='处置方案 JSON')
+    effect_evaluation = Column(Text, comment='效果评估 JSON')
+    effectiveness_score = Column(Float, comment='效果评分')
+    feature_vector = Column(Text, comment='特征向量')
+    change_summary = Column(String(500), comment='变更说明')
+    operator_id = Column(String(50), comment='操作人ID')
+    operator_name = Column(String(100), comment='操作人姓名')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_version_case', 'case_id', 'version'),
+        Index('idx_version_time', 'create_time'),
+    )
+
+
+class KnowledgeCaseReview(Base):
+    """
+    知识库案例审核记录表
+
+    对应数据库表: sc_knowledge_case_reviews
+    记录案例的审核流程，支持多级审核。
+
+    Attributes:
+        id: 主键
+        case_id: 关联案例ID
+        version: 对应版本号
+        review_level: 审核级别 1-3
+        reviewer_id: 审核人ID
+        reviewer_name: 审核人姓名
+        review_result: 审核结果 approved/rejected/revision_required
+        review_comment: 审核意见
+        create_time: 审核时间
+    """
+    __tablename__ = 'sc_knowledge_case_reviews'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    case_id = Column(BigInteger, nullable=False, comment='关联案例ID')
+    version = Column(Integer, comment='对应版本号')
+    review_level = Column(Integer, default=1, comment='审核级别 1-3')
+    reviewer_id = Column(String(50), comment='审核人ID')
+    reviewer_name = Column(String(100), comment='审核人姓名')
+    review_result = Column(String(30), comment='审核结果 approved/rejected/revision_required')
+    review_comment = Column(Text, comment='审核意见')
+    create_time = Column(DateTime, default=datetime.now, comment='审核时间')
+
+    __table_args__ = (
+        Index('idx_review_case', 'case_id'),
+        Index('idx_review_result', 'review_result'),
+        Index('idx_review_time', 'create_time'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类

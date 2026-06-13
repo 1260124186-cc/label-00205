@@ -1243,3 +1243,247 @@ class TenantLoginResponse(BaseModel):
     username: str
     role: str
     expires_at: datetime
+
+
+# ============================================================
+# 知识库与案例推理 (CBR)
+# ============================================================
+
+# ---------- 工况信息 ----------
+
+class WorkingConditionSchema(BaseModel):
+    """工况信息"""
+    temperature: Optional[float] = Field(None, description='环境温度')
+    pressure: Optional[float] = Field(None, description='系统压力')
+    humidity: Optional[float] = Field(None, description='环境湿度')
+    vibration: Optional[float] = Field(None, description='振动水平')
+    load_condition: Optional[str] = Field(None, description='负载状况 light/medium/heavy/overload')
+    operating_hours: Optional[float] = Field(None, description='运行时长（小时）')
+    maintenance_cycle: Optional[str] = Field(None, description='维护周期')
+    last_maintenance_date: Optional[datetime] = Field(None, description='上次维护日期')
+    equipment_age: Optional[float] = Field(None, description='设备使用年限')
+    extra: Optional[Dict[str, Any]] = Field(None, description='其他工况参数')
+
+
+# ---------- 处置方案 ----------
+
+class TreatmentStepSchema(BaseModel):
+    """处置步骤"""
+    step_order: int = Field(..., description='步骤序号')
+    action: str = Field(..., description='处置动作')
+    description: Optional[str] = Field(None, description='详细描述')
+    tools: Optional[List[str]] = Field(None, description='所需工具')
+    duration_minutes: Optional[int] = Field(None, description='预计耗时（分钟）')
+    safety_notes: Optional[str] = Field(None, description='安全注意事项')
+
+
+class TreatmentPlanSchema(BaseModel):
+    """处置方案"""
+    plan_name: Optional[str] = Field(None, description='方案名称')
+    steps: List[TreatmentStepSchema] = Field(default_factory=list, description='处置步骤列表')
+    materials: Optional[List[str]] = Field(None, description='所需材料')
+    estimated_cost: Optional[float] = Field(None, description='预估成本')
+    difficulty_level: Optional[str] = Field(None, description='难度等级 easy/medium/hard')
+    personnel_required: Optional[str] = Field(None, description='所需人员')
+
+
+# ---------- 效果评估 ----------
+
+class EffectEvaluationSchema(BaseModel):
+    """效果评估"""
+    overall_rating: Optional[str] = Field(None, description='整体评价 excellent/good/fair/poor')
+    effectiveness_score: Optional[float] = Field(None, ge=0, le=100, description='效果评分 0-100')
+    fault_resolved: Optional[bool] = Field(None, description='故障是否解决')
+    recurrence_within_days: Optional[int] = Field(None, description='多少天内复发')
+    actual_cost: Optional[float] = Field(None, description='实际成本')
+    actual_duration_minutes: Optional[int] = Field(None, description='实际耗时（分钟）')
+    side_effects: Optional[str] = Field(None, description='副作用/不良影响')
+    improvement_metrics: Optional[Dict[str, Any]] = Field(None, description='改进指标')
+    notes: Optional[str] = Field(None, description='备注')
+
+
+# ---------- 案例录入 ----------
+
+class KnowledgeCaseCreateRequest(BaseModel):
+    """创建案例请求"""
+    case_title: str = Field(..., description='案例标题', min_length=1, max_length=500)
+    node_type: Optional[str] = Field(None, description='节点类型 bolt/flange')
+    node_id: Optional[str] = Field(None, description='节点ID')
+    fault_type: Optional[str] = Field(None, description='故障类型')
+    fault_level: Optional[int] = Field(None, ge=1, le=4, description='故障级别 1-4')
+    working_condition: Optional[WorkingConditionSchema] = Field(None, description='工况信息')
+    sensor_data: Optional[List[List[Any]]] = Field(None, description='传感器时序数据 [[时间, 数值], ...]')
+    sensor_features: Optional[Dict[str, float]] = Field(None, description='传感器特征 (58维特征名值对)')
+    diagnosis: Optional[str] = Field(None, description='诊断结论')
+    root_cause: Optional[str] = Field(None, description='根本原因分析')
+    treatment_plan: Optional[TreatmentPlanSchema] = Field(None, description='处置方案')
+    effect_evaluation: Optional[EffectEvaluationSchema] = Field(None, description='效果评估')
+    source_alert_id: Optional[int] = Field(None, description='来源告警ID')
+    source_prediction_id: Optional[int] = Field(None, description='来源预测记录ID')
+    tags: Optional[List[str]] = Field(None, description='标签列表')
+    creator_id: Optional[str] = Field(None, description='创建人ID')
+    creator_name: Optional[str] = Field(None, description='创建人姓名')
+    tenant_id: Optional[int] = Field(None, description='租户ID')
+    submit_for_review: bool = Field(False, description='是否提交审核')
+
+
+class KnowledgeCaseUpdateRequest(BaseModel):
+    """更新案例请求"""
+    case_title: Optional[str] = Field(None, description='案例标题')
+    fault_type: Optional[str] = Field(None, description='故障类型')
+    fault_level: Optional[int] = Field(None, ge=1, le=4, description='故障级别 1-4')
+    working_condition: Optional[WorkingConditionSchema] = Field(None, description='工况信息')
+    sensor_data: Optional[List[List[Any]]] = Field(None, description='传感器时序数据')
+    sensor_features: Optional[Dict[str, float]] = Field(None, description='传感器特征')
+    diagnosis: Optional[str] = Field(None, description='诊断结论')
+    root_cause: Optional[str] = Field(None, description='根本原因分析')
+    treatment_plan: Optional[TreatmentPlanSchema] = Field(None, description='处置方案')
+    effect_evaluation: Optional[EffectEvaluationSchema] = Field(None, description='效果评估')
+    tags: Optional[List[str]] = Field(None, description='标签列表')
+    change_summary: Optional[str] = Field(None, description='变更说明')
+    submit_for_review: bool = Field(False, description='是否提交审核')
+    operator_id: Optional[str] = Field(None, description='操作人ID')
+    operator_name: Optional[str] = Field(None, description='操作人姓名')
+
+
+# ---------- 案例响应 ----------
+
+class KnowledgeCaseResponse(BaseModel):
+    """案例响应"""
+    id: int
+    case_no: str
+    case_title: str
+    node_type: Optional[str] = None
+    node_id: Optional[str] = None
+    fault_type: Optional[str] = None
+    fault_level: Optional[int] = None
+    working_condition: Optional[Dict[str, Any]] = None
+    sensor_features: Optional[Dict[str, Any]] = None
+    diagnosis: Optional[str] = None
+    root_cause: Optional[str] = None
+    treatment_plan: Optional[Dict[str, Any]] = None
+    effect_evaluation: Optional[Dict[str, Any]] = None
+    effectiveness_score: Optional[float] = None
+    status: str
+    version: int
+    tenant_id: Optional[int] = None
+    creator_id: Optional[str] = None
+    creator_name: Optional[str] = None
+    reviewer_id: Optional[str] = None
+    reviewer_name: Optional[str] = None
+    review_time: Optional[datetime] = None
+    review_comment: Optional[str] = None
+    source_alert_id: Optional[int] = None
+    source_prediction_id: Optional[int] = None
+    tags: Optional[List[str]] = None
+    similarity_score: Optional[float] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class KnowledgeCaseListResponse(BaseModel):
+    """案例列表响应"""
+    total: int
+    items: List[KnowledgeCaseResponse]
+
+
+# ---------- 审核 ----------
+
+class CaseReviewRequest(BaseModel):
+    """案例审核请求"""
+    review_result: str = Field(..., description='审核结果 approved/rejected/revision_required')
+    review_comment: Optional[str] = Field(None, description='审核意见')
+    reviewer_id: Optional[str] = Field(None, description='审核人ID')
+    reviewer_name: Optional[str] = Field(None, description='审核人姓名')
+    review_level: int = Field(1, ge=1, le=3, description='审核级别 1-3')
+
+
+class CaseReviewResponse(BaseModel):
+    """审核记录响应"""
+    id: int
+    case_id: int
+    version: int
+    review_level: int
+    reviewer_id: Optional[str] = None
+    reviewer_name: Optional[str] = None
+    review_result: str
+    review_comment: Optional[str] = None
+    create_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ---------- 版本管理 ----------
+
+class CaseVersionResponse(BaseModel):
+    """案例版本响应"""
+    id: int
+    case_id: int
+    version: int
+    case_title: Optional[str] = None
+    diagnosis: Optional[str] = None
+    treatment_plan: Optional[Dict[str, Any]] = None
+    effect_evaluation: Optional[Dict[str, Any]] = None
+    effectiveness_score: Optional[float] = None
+    change_summary: Optional[str] = None
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    create_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CaseVersionCompareResponse(BaseModel):
+    """版本对比响应"""
+    case_id: int
+    version_from: int
+    version_to: int
+    changes: Dict[str, Any]
+
+
+# ---------- 相似度检索 ----------
+
+class CaseSimilaritySearchRequest(BaseModel):
+    """案例相似度检索请求"""
+    node_type: Optional[str] = Field(None, description='节点类型 bolt/flange')
+    node_id: Optional[str] = Field(None, description='节点ID')
+    fault_type: Optional[str] = Field(None, description='故障类型')
+    fault_level: Optional[int] = Field(None, ge=1, le=4, description='故障级别')
+    sensor_data: Optional[List[List[Any]]] = Field(None, description='传感器时序数据')
+    sensor_features: Optional[Dict[str, float]] = Field(None, description='传感器特征')
+    feature_vector: Optional[List[float]] = Field(None, description='特征向量')
+    tags: Optional[List[str]] = Field(None, description='标签过滤')
+    top_k: int = Field(5, ge=1, le=50, description='返回Top-K相似案例')
+    min_similarity: float = Field(0.0, ge=0, le=1, description='最低相似度阈值')
+    only_approved: bool = Field(True, description='只返回已审核通过的案例')
+    tenant_id: Optional[int] = Field(None, description='租户ID过滤')
+
+
+class CaseSimilarityResult(BaseModel):
+    """相似度检索结果"""
+    case: KnowledgeCaseResponse
+    similarity_score: float
+    matching_features: List[str]
+
+
+class CaseSimilaritySearchResponse(BaseModel):
+    """相似度检索响应"""
+    total: int
+    results: List[CaseSimilarityResult]
+
+
+# ---------- 推荐措施与RAG ----------
+
+class CaseRecommendationResponse(BaseModel):
+    """案例推荐响应（用于推荐措施和RAG上下文）"""
+    top_k: int
+    total_matched: int
+    cases: List[KnowledgeCaseResponse]
+    aggregated_recommendations: List[str]
+    rag_context: str
+    confidence_score: float

@@ -238,6 +238,73 @@ class PredictionOrchestrator:
         # 推荐措施（优先用模型建议，兜底使用风险评估建议）
         recommendations = model.get_recommendation(final_status_code, confidence)
 
+        # Step 5.5: CBR 知识库检索（相似案例与推荐措施增强）
+        similar_cases = []
+        rag_context = ''
+        cbr_enabled = config.get('cbr.enabled', True)
+        cbr_in_prediction = config.get('cbr.integration.in_prediction', True)
+
+        if cbr_enabled and cbr_in_prediction and final_status_code > 0:
+            try:
+                from app.services.knowledge import KnowledgeService
+                from app.services.feature_engineering import FeatureEngineer
+
+                cbr_service = KnowledgeService()
+                fe = FeatureEngineer()
+
+                # 提取特征用于相似度检索
+                try:
+                    feature_set = fe.extract_features(data)
+                    feature_vector = feature_set.combined_features.tolist()
+                except Exception:
+                    feature_vector = None
+
+                fault_type_mapping = {
+                    1: 'loosening',
+                    2: 'preload_decrease',
+                    3: 'severe_anomaly',
+                    4: 'failure',
+                }
+                fault_type = fault_type_mapping.get(final_status_code)
+
+                cbr_result = cbr_service.get_case_recommendations(
+                    node_type='bolt',
+                    node_id=bolt_id,
+                    fault_type=fault_type,
+                    fault_level=final_status_code if final_status_code > 0 else None,
+                    feature_vector=feature_vector,
+                    top_k=config.get('cbr.integration.top_k', 3),
+                    min_similarity=config.get('cbr.integration.min_similarity', 0.4),
+                    only_approved=True,
+                )
+
+                similar_cases = cbr_result.get('cases', [])
+                rag_context = cbr_result.get('rag_context', '')
+
+                # 合并推荐措施（知识库推荐 + 原推荐）
+                cbr_recommendations = cbr_result.get('aggregated_recommendations', [])
+                if cbr_recommendations:
+                    combined_recs = []
+                    seen = set()
+                    # 优先加入知识库推荐
+                    for rec in cbr_recommendations:
+                        if rec and rec not in seen:
+                            seen.add(rec)
+                            combined_recs.append(rec)
+                    # 再加入原推荐
+                    for rec in risk_assessment.recommendations:
+                        if rec and rec not in seen:
+                            seen.add(rec)
+                            combined_recs.append(rec)
+                    risk_assessment.recommendations = combined_recs[:10]
+                    logger.info(
+                        f"CBR推荐已合并: 螺栓 {bolt_id}, "
+                        f"找到 {len(similar_cases)} 个相似案例, "
+                        f"推荐措施 {len(combined_recs)} 条"
+                    )
+            except Exception as e:
+                logger.warning(f"CBR知识库检索失败，跳过: {e}")
+
         result = {
             'bolt_id': bolt_id,
             'status': final_status,
@@ -249,6 +316,18 @@ class PredictionOrchestrator:
             'recommendations': risk_assessment.recommendations,
             'recent_time': timestamps[-1] if timestamps else None,
             'data_quality': quality_info if quality_info else None,
+            'similar_cases': [
+                {
+                    'id': c.id,
+                    'case_no': c.case_no,
+                    'case_title': c.case_title,
+                    'fault_type': c.fault_type,
+                    'effectiveness_score': c.effectiveness_score,
+                    'similarity_score': getattr(c, 'similarity_score', None),
+                }
+                for c in similar_cases
+            ] if similar_cases else [],
+            'rag_context': rag_context,
         }
 
         # Step 5: 审计快照
@@ -357,6 +436,69 @@ class PredictionOrchestrator:
         # 推荐措施
         recommendations = model.get_recommendation(final_status_code, confidence)
 
+        # Step 4.5: CBR 知识库检索（相似案例与推荐措施增强）
+        similar_cases = []
+        rag_context = ''
+        cbr_enabled = config.get('cbr.enabled', True)
+        cbr_in_prediction = config.get('cbr.integration.in_prediction', True)
+
+        if cbr_enabled and cbr_in_prediction and final_status_code > 0:
+            try:
+                from app.services.knowledge import KnowledgeService
+
+                cbr_service = KnowledgeService()
+
+                # 使用所有螺栓拼接的数据提取特征
+                try:
+                    feature_set = self.feature_engineer.extract_features(all_data)
+                    feature_vector = feature_set.combined_features.tolist()
+                except Exception:
+                    feature_vector = None
+
+                fault_type_mapping = {
+                    1: 'loosening',
+                    2: 'preload_decrease',
+                    3: 'severe_anomaly',
+                    4: 'failure',
+                }
+                fault_type = fault_type_mapping.get(final_status_code)
+
+                cbr_result = cbr_service.get_case_recommendations(
+                    node_type='flange',
+                    node_id=flange_id,
+                    fault_type=fault_type,
+                    fault_level=final_status_code if final_status_code > 0 else None,
+                    feature_vector=feature_vector,
+                    top_k=config.get('cbr.integration.top_k', 3),
+                    min_similarity=config.get('cbr.integration.min_similarity', 0.4),
+                    only_approved=True,
+                )
+
+                similar_cases = cbr_result.get('cases', [])
+                rag_context = cbr_result.get('rag_context', '')
+
+                # 合并推荐措施
+                cbr_recommendations = cbr_result.get('aggregated_recommendations', [])
+                if cbr_recommendations:
+                    combined_recs = []
+                    seen = set()
+                    for rec in cbr_recommendations:
+                        if rec and rec not in seen:
+                            seen.add(rec)
+                            combined_recs.append(rec)
+                    for rec in risk_assessment.recommendations:
+                        if rec and rec not in seen:
+                            seen.add(rec)
+                            combined_recs.append(rec)
+                    risk_assessment.recommendations = combined_recs[:10]
+                    logger.info(
+                        f"CBR推荐已合并: 法兰面 {flange_id}, "
+                        f"找到 {len(similar_cases)} 个相似案例, "
+                        f"推荐措施 {len(combined_recs)} 条"
+                    )
+            except Exception as e:
+                logger.warning(f"CBR知识库检索失败，跳过: {e}")
+
         result = {
             'flange_id': flange_id,
             'status': final_status,
@@ -367,6 +509,18 @@ class PredictionOrchestrator:
             'attention_weights': attention.tolist() if attention is not None else None,
             'diagnosis': risk_assessment.diagnosis,
             'recommendations': risk_assessment.recommendations,
+            'similar_cases': [
+                {
+                    'id': c.id,
+                    'case_no': c.case_no,
+                    'case_title': c.case_title,
+                    'fault_type': c.fault_type,
+                    'effectiveness_score': c.effectiveness_score,
+                    'similarity_score': getattr(c, 'similarity_score', None),
+                }
+                for c in similar_cases
+            ] if similar_cases else [],
+            'rag_context': rag_context,
         }
 
         # Step 5: 审计快照
