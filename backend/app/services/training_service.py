@@ -1083,94 +1083,95 @@ class TrainingService:
         self, session_id, model_type, node_id, train_result, is_incremental
     ):
         try:
-            with get_db() as db:
-                if db is None:
-                    return
+            from app.services.model_version_service import get_model_version_service
 
-                nodes_to_save = []
-                if node_id:
-                    nodes_to_save.append(node_id)
-                elif 'details' in train_result:
-                    for detail in train_result['details']:
-                        if detail.get('status') == 'success':
-                            nid = detail.get('bolt_id') or detail.get('flange_id')
-                            if nid:
-                                nodes_to_save.append(nid)
+            service = get_model_version_service()
 
-                for nid in nodes_to_save:
-                    node_r = train_result
-                    if 'details' in train_result and len(nodes_to_save) > 1:
-                        node_r = next(
-                            (d for d in train_result['details']
-                             if (d.get('bolt_id') or d.get('flange_id')) == nid),
-                            train_result
-                        )
+            nodes_to_save = []
+            if node_id:
+                nodes_to_save.append(node_id)
+            elif 'details' in train_result:
+                for detail in train_result['details']:
+                    if detail.get('status') == 'success':
+                        nid = detail.get('bolt_id') or detail.get('flange_id')
+                        if nid:
+                            nodes_to_save.append(nid)
 
-                    version_number = self._get_next_version(db, nid, model_type)
-                    arch = self._get_architecture_summary(model_type, node_r)
-
-                    metrics_data = {
-                        'best_epoch': node_r.get('best_epoch'),
-                        'best_val_acc': node_r.get('best_val_acc'),
-                        'best_val_loss': node_r.get('best_val_loss'),
-                        'final_train_acc': node_r.get('final_train_acc'),
-                        'final_train_loss': node_r.get('final_train_loss'),
-                        'final_val_acc': node_r.get('final_val_acc'),
-                        'final_val_loss': node_r.get('final_val_loss'),
-                        'precision': node_r.get('precision'),
-                        'recall': node_r.get('recall'),
-                        'f1_score': node_r.get('f1_score'),
-                        'precision_per_class': node_r.get('precision_per_class'),
-                        'recall_per_class': node_r.get('recall_per_class'),
-                        'f1_per_class': node_r.get('f1_per_class'),
-                        'support_per_class': node_r.get('support_per_class'),
-                        'confusion_matrix': node_r.get('confusion_matrix'),
-                        'class_distribution': node_r.get('class_distribution'),
-                        'val_class_distribution': node_r.get('val_class_distribution'),
-                        'samples_count': node_r.get('samples_count'),
-                        'val_samples_count': node_r.get('val_samples_count'),
-                        'history': node_r.get('history'),
-                        'training_time_seconds': train_result.get('total_training_time_seconds')
-                    }
-                    cfg = node_r.get('config_used', {})
-                    cfg['data_source'] = node_r.get('data_source')
-
-                    parent_v = self._get_previous_version(db, nid, model_type) if is_incremental else None
-
-                    db.query(ModelVersionORM).filter(
-                        ModelVersionORM.model_id == nid,
-                        ModelVersionORM.model_type == model_type,
-                        ModelVersionORM.is_active == True
-                    ).update({ModelVersionORM.is_active: False})
-
-                    version = ModelVersionORM(
-                        model_id=nid,
-                        model_type=model_type,
-                        version=version_number,
-                        file_path=node_r.get('model_file_path'),
-                        file_hash=node_r.get('model_file_hash'),
-                        file_size_bytes=node_r.get('model_file_size'),
-                        metrics=json.dumps(metrics_data, ensure_ascii=False),
-                        config=json.dumps(cfg, ensure_ascii=False),
-                        is_active=True,
-                        description=f"训练会话 {session_id} - {'增量训练' if is_incremental else '完整训练'}",
-                        training_session_id=session_id,
-                        parent_version=parent_v,
-                        training_samples=node_r.get('samples_count'),
-                        validation_samples=node_r.get('val_samples_count'),
-                        training_duration_seconds=train_result.get('total_training_time_seconds'),
-                        architecture_summary=json.dumps(arch, ensure_ascii=False),
-                        freeze_layers=(
-                            json.dumps(cfg.get('incremental', {}).get('freeze_layers', []), ensure_ascii=False)
-                            if is_incremental else None
-                        ),
-                        create_time=datetime.now()
+            for nid in nodes_to_save:
+                node_r = train_result
+                if 'details' in train_result and len(nodes_to_save) > 1:
+                    node_r = next(
+                        (d for d in train_result['details']
+                         if (d.get('bolt_id') or d.get('flange_id')) == nid),
+                        train_result
                     )
-                    db.add(version)
-                    logger.info(
-                        f"模型版本已保存: {model_type}/{nid} "
-                        f"v{version_number}, F1={node_r.get('f1_score')}"
-                    )
+
+                arch = self._get_architecture_summary(model_type, node_r)
+
+                metrics_data = {
+                    'best_epoch': node_r.get('best_epoch'),
+                    'best_val_acc': node_r.get('best_val_acc'),
+                    'best_val_loss': node_r.get('best_val_loss'),
+                    'final_train_acc': node_r.get('final_train_acc'),
+                    'final_train_loss': node_r.get('final_train_loss'),
+                    'final_val_acc': node_r.get('final_val_acc'),
+                    'final_val_loss': node_r.get('final_val_loss'),
+                    'precision': node_r.get('precision'),
+                    'recall': node_r.get('recall'),
+                    'f1_score': node_r.get('f1_score'),
+                    'precision_per_class': node_r.get('precision_per_class'),
+                    'recall_per_class': node_r.get('recall_per_class'),
+                    'f1_per_class': node_r.get('f1_per_class'),
+                    'support_per_class': node_r.get('support_per_class'),
+                    'confusion_matrix': node_r.get('confusion_matrix'),
+                    'class_distribution': node_r.get('class_distribution'),
+                    'val_class_distribution': node_r.get('val_class_distribution'),
+                    'samples_count': node_r.get('samples_count'),
+                    'val_samples_count': node_r.get('val_samples_count'),
+                    'history': node_r.get('history'),
+                    'training_time_seconds': train_result.get('total_training_time_seconds')
+                }
+                cfg = node_r.get('config_used', {})
+                cfg['data_source'] = node_r.get('data_source')
+
+                parent_v = None
+                if is_incremental:
+                    with get_db() as db:
+                        if db:
+                            parent_v = self._get_previous_version(db, nid, model_type)
+
+                freeze_layers_list = None
+                if is_incremental:
+                    freeze_layers_list = cfg.get('incremental', {}).get('freeze_layers', [])
+
+                description = f"训练会话 {session_id} - {'增量训练' if is_incremental else '完整训练'}"
+
+                model_file_path = node_r.get('model_file_path')
+                if not model_file_path or not os.path.exists(model_file_path):
+                    logger.warning(f"模型文件不存在，跳过版本注册: {model_file_path}")
+                    continue
+
+                version_info = service.register_version(
+                    model_type=model_type,
+                    node_id=nid,
+                    model_file_path=model_file_path,
+                    metrics=metrics_data,
+                    training_config=cfg,
+                    description=description,
+                    training_session_id=session_id,
+                    parent_version=parent_v,
+                    training_samples=node_r.get('samples_count'),
+                    validation_samples=node_r.get('val_samples_count'),
+                    training_duration_seconds=train_result.get('total_training_time_seconds'),
+                    architecture_summary=arch,
+                    freeze_layers=freeze_layers_list,
+                )
+
+                logger.info(
+                    f"模型版本已注册: {model_type}/{nid} "
+                    f"v{version_info['version']}, F1={node_r.get('f1_score')}"
+                )
+
         except Exception as e:
             logger.warning(f"保存模型版本失败: {e}")
 

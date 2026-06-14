@@ -16,6 +16,7 @@
 """
 
 import time
+import os
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 from loguru import logger
@@ -88,29 +89,128 @@ class PredictionOrchestrator:
         self.warning_policy = warning_policy or WarningStrategyPolicy()
         self.repository = repository or PredictionRepository()
 
-        # 模型缓存
-        self.bolt_models: Dict[str, BoltLSTMModel] = {}
-        self.flange_models: Dict[str, FlangeAttentionModel] = {}
+        # 模型缓存：按版本缓存 {node_id: {version: model}}
+        self.bolt_models: Dict[str, Dict[str, BoltLSTMModel]] = {}
+        self.flange_models: Dict[str, Dict[str, FlangeAttentionModel]] = {}
 
         logger.info("预测编排器初始化完成")
 
     # ---------- 模型管理 ----------
 
-    def get_bolt_model(self, bolt_id: str) -> BoltLSTMModel:
+    def get_bolt_model(self, bolt_id: str, version: Optional[str] = None) -> BoltLSTMModel:
         """
-        获取或创建螺栓 LSTM 模型（带缓存）
-        """
-        if bolt_id not in self.bolt_models:
-            self.bolt_models[bolt_id] = BoltLSTMModel.load_or_create(bolt_id)
-        return self.bolt_models[bolt_id]
+        获取或创建螺栓 LSTM 模型（带版本缓存）
 
-    def get_flange_model(self, flange_id: str) -> FlangeAttentionModel:
+        Args:
+            bolt_id: 螺栓ID
+            version: 版本号，None 表示使用当前活动版本（默认路径）
+
+        Returns:
+            BoltLSTMModel 实例
         """
-        获取或创建法兰面 Attention 模型（带缓存）
+        cache_key = version or 'active'
+        if bolt_id not in self.bolt_models:
+            self.bolt_models[bolt_id] = {}
+
+        if cache_key not in self.bolt_models[bolt_id]:
+            if version is None:
+                model = BoltLSTMModel.load_or_create(bolt_id)
+            else:
+                model = self._load_versioned_bolt_model(bolt_id, version)
+            self.bolt_models[bolt_id][cache_key] = model
+
+        return self.bolt_models[bolt_id][cache_key]
+
+    def get_flange_model(self, flange_id: str, version: Optional[str] = None) -> FlangeAttentionModel:
         """
+        获取或创建法兰面 Attention 模型（带版本缓存）
+
+        Args:
+            flange_id: 法兰面ID
+            version: 版本号，None 表示使用当前活动版本（默认路径）
+
+        Returns:
+            FlangeAttentionModel 实例
+        """
+        cache_key = version or 'active'
         if flange_id not in self.flange_models:
-            self.flange_models[flange_id] = FlangeAttentionModel.load_or_create(flange_id)
-        return self.flange_models[flange_id]
+            self.flange_models[flange_id] = {}
+
+        if cache_key not in self.flange_models[flange_id]:
+            if version is None:
+                model = FlangeAttentionModel.load_or_create(flange_id)
+            else:
+                model = self._load_versioned_flange_model(flange_id, version)
+            self.flange_models[flange_id][cache_key] = model
+
+        return self.flange_models[flange_id][cache_key]
+
+    def _load_versioned_bolt_model(self, bolt_id: str, version: str) -> BoltLSTMModel:
+        """
+        加载指定版本的螺栓模型
+
+        Args:
+            bolt_id: 螺栓ID
+            version: 版本号
+
+        Returns:
+            BoltLSTMModel 实例
+        """
+        from app.services.model_version_service import get_model_version_service
+
+        service = get_model_version_service()
+        model_path = service.get_model_file_path('bolt', bolt_id, version)
+
+        if model_path is None or not os.path.exists(model_path):
+            raise FileNotFoundError(f"未找到版本 {version} 的螺栓模型: {bolt_id}")
+
+        model = BoltLSTMModel(bolt_id=bolt_id)
+        model.load(model_path)
+        logger.info(f"已加载螺栓模型版本: {bolt_id} v{version}")
+        return model
+
+    def _load_versioned_flange_model(self, flange_id: str, version: str) -> FlangeAttentionModel:
+        """
+        加载指定版本的法兰面模型
+
+        Args:
+            flange_id: 法兰面ID
+            version: 版本号
+
+        Returns:
+            FlangeAttentionModel 实例
+        """
+        from app.services.model_version_service import get_model_version_service
+
+        service = get_model_version_service()
+        model_path = service.get_model_file_path('flange', flange_id, version)
+
+        if model_path is None or not os.path.exists(model_path):
+            raise FileNotFoundError(f"未找到版本 {version} 的法兰面模型: {flange_id}")
+
+        model = FlangeAttentionModel(flange_id=flange_id)
+        model.load(model_path)
+        logger.info(f"已加载法兰面模型版本: {flange_id} v{version}")
+        return model
+
+    def reload_model(self, model_type: str, node_id: str, version: Optional[str] = None) -> None:
+        """
+        重新加载模型（清除缓存）
+
+        Args:
+            model_type: 模型类型 bolt/flange
+            node_id: 节点ID
+            version: 版本号，None 表示活动版本
+        """
+        cache_key = version or 'active'
+        if model_type == 'bolt':
+            if node_id in self.bolt_models and cache_key in self.bolt_models[node_id]:
+                del self.bolt_models[node_id][cache_key]
+                logger.info(f"已清除螺栓模型缓存: {node_id} v{cache_key}")
+        elif model_type == 'flange':
+            if node_id in self.flange_models and cache_key in self.flange_models[node_id]:
+                del self.flange_models[node_id][cache_key]
+                logger.info(f"已清除法兰面模型缓存: {node_id} v{cache_key}")
 
     # ---------- 螺栓预测 ----------
 
@@ -120,6 +220,8 @@ class PredictionOrchestrator:
         data: np.ndarray,
         timestamps: Optional[List[str]] = None,
         save_to_db: bool = True,
+        version: Optional[str] = None,
+        shadow_version: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         螺栓状态预测（完整流水线）
@@ -131,15 +233,77 @@ class PredictionOrchestrator:
             data: 预紧力数据
             timestamps: 时间戳列表
             save_to_db: 是否保存到数据库
+            version: 使用指定版本的模型（None 表示当前活动版本）
+            shadow_version: 影子版本号（Shadow Mode），仅运行预测不写库，用于A/B对比
 
         Returns:
-            预测结果字典
+            预测结果字典，包含 shadow_result（如果指定了 shadow_version）
         """
         start_time = time.time()
         set_bolt_id(str(bolt_id))
         
-        logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}")
+        logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}, version={version or 'active'}, shadow_version={shadow_version}")
 
+        # 主版本预测
+        main_result = self._run_bolt_prediction(
+            bolt_id=bolt_id,
+            data=data,
+            timestamps=timestamps,
+            version=version,
+            save_to_db=save_to_db,
+            is_shadow=False,
+        )
+
+        # Shadow Mode：副版本仅预测，不写库，不触发告警
+        if shadow_version and shadow_version != version:
+            try:
+                shadow_result = self._run_bolt_prediction(
+                    bolt_id=bolt_id,
+                    data=data,
+                    timestamps=timestamps,
+                    version=shadow_version,
+                    save_to_db=False,
+                    is_shadow=True,
+                )
+                main_result['shadow_result'] = shadow_result
+                main_result['shadow_version'] = shadow_version
+
+                logger.info(
+                    f"Shadow模式预测完成: 螺栓 {bolt_id}, "
+                    f"主版本={version or 'active'} -> {main_result['status']}, "
+                    f"影子版本={shadow_version} -> {shadow_result['status']}"
+                )
+            except Exception as e:
+                logger.warning(f"Shadow版本预测失败: {e}")
+                main_result['shadow_error'] = str(e)
+
+        duration = time.time() - start_time
+        logger.info(f"螺栓预测完成: {bolt_id} -> {main_result['status']}, 耗时: {duration*1000:.2f}ms")
+        return main_result
+
+    def _run_bolt_prediction(
+        self,
+        bolt_id: str,
+        data: np.ndarray,
+        timestamps: Optional[List[str]],
+        version: Optional[str],
+        save_to_db: bool,
+        is_shadow: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        执行单次螺栓预测（核心预测流水线）
+
+        Args:
+            bolt_id: 螺栓ID
+            data: 预紧力数据
+            timestamps: 时间戳列表
+            version: 模型版本号
+            save_to_db: 是否保存到数据库
+            is_shadow: 是否为影子模式（仅记录日志，不触发告警）
+
+        Returns:
+            预测结果字典
+        """
         original_status_code = 0
         original_status = ''
         model_type = 'rule'
@@ -154,10 +318,11 @@ class PredictionOrchestrator:
         )
 
         # Step 2: 模型推断（模型未训练则规则兜底）
-        model = self.get_bolt_model(bolt_id)
-        model_version = 'unknown'
+        model = self.get_bolt_model(bolt_id, version=version)
+        model_version_str = version or 'unknown'
         if model.is_trained:
-            model_version = self._get_model_version('bolt', bolt_id)
+            if version is None:
+                model_version_str = self._get_model_version('bolt', bolt_id)
             original_status_code, confidence, probs = model.predict(
                 processed.data,
                 return_proba=True,
@@ -321,6 +486,9 @@ class PredictionOrchestrator:
             'diagnosis': risk_assessment.diagnosis,
             'recommendations': risk_assessment.recommendations,
             'recent_time': timestamps[-1] if timestamps else None,
+            'model_version': model_version_str,
+            'model_type': model_type,
+            'is_shadow': is_shadow,
             'data_quality': quality_info if quality_info else None,
             'similar_cases': [
                 {
@@ -343,7 +511,7 @@ class PredictionOrchestrator:
                 node_id=bolt_id,
                 input_data=data,
                 processed_data=processed.data,
-                model_version=model_version,
+                model_version=model_version_str,
                 model_type=model_type,
                 original_status_code=original_status_code,
                 confidence=float(confidence),
@@ -356,31 +524,30 @@ class PredictionOrchestrator:
         except Exception as e:
             logger.warning(f"螺栓 {bolt_id} 审计快照记录异常: {e}")
 
-        # Step 6: 持久化
-        if save_to_db:
+        # Step 6: 持久化（Shadow 模式不写库）
+        if save_to_db and not is_shadow:
             self.repository.save_bolt_prediction(bolt_id, result)
 
-        # Step 7: 告警评估
-        try:
-            self._evaluate_alert(
-                node_type='bolt',
-                node_id=bolt_id,
-                result=result,
-            )
-        except Exception as e:
-            logger.warning(f"螺栓 {bolt_id} 告警评估异常: {e}")
+        # Step 7: 告警评估（Shadow 模式不触发告警）
+        if not is_shadow:
+            try:
+                self._evaluate_alert(
+                    node_type='bolt',
+                    node_id=bolt_id,
+                    result=result,
+                )
+            except Exception as e:
+                logger.warning(f"螺栓 {bolt_id} 告警评估异常: {e}")
 
         # 记录预测指标
-        duration = time.time() - start_time
         metrics.record_prediction(
             node_type='bolt',
             status_code=final_status_code,
             status_label=final_status,
-            duration=duration,
+            duration=0,
             model_type=model_type
         )
-        
-        logger.info(f"螺栓预测完成: {bolt_id} -> {final_status}, 耗时: {duration*1000:.2f}ms")
+
         return result
 
     # ---------- 法兰面预测 ----------
@@ -393,6 +560,8 @@ class PredictionOrchestrator:
         bolt_ids: Optional[List[str]] = None,
         bolt_data_dict: Optional[Dict[str, np.ndarray]] = None,
         enable_correlation_analysis: bool = True,
+        version: Optional[str] = None,
+        shadow_version: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         法兰面状态预测（完整流水线）
@@ -406,20 +575,93 @@ class PredictionOrchestrator:
             bolt_ids: 螺栓ID列表（与multi_bolt_data对应）
             bolt_data_dict: 螺栓数据字典 {bolt_id: data}，优先于multi_bolt_data+bolt_ids
             enable_correlation_analysis: 是否启用关联分析（Granger因果、根因定位等）
+            version: 使用指定版本的模型（None 表示当前活动版本）
+            shadow_version: 影子版本号（Shadow Mode），仅运行预测不写库，用于A/B对比
 
         Returns:
-            预测结果字典
+            预测结果字典，包含 shadow_result（如果指定了 shadow_version）
         """
         start_time = time.time()
         set_bolt_id(str(flange_id))
 
+        logger.info(
+            f"开始法兰面预测: {flange_id}, 螺栓数: {len(multi_bolt_data) if multi_bolt_data else (len(bolt_data_dict) if bolt_data_dict else 0)}, "
+            f"version={version or 'active'}, shadow_version={shadow_version}"
+        )
+
+        # 主版本预测
+        main_result = self._run_flange_prediction(
+            flange_id=flange_id,
+            multi_bolt_data=multi_bolt_data,
+            bolt_ids=bolt_ids,
+            bolt_data_dict=bolt_data_dict,
+            enable_correlation_analysis=enable_correlation_analysis,
+            version=version,
+            save_to_db=save_to_db,
+            is_shadow=False,
+        )
+
+        # Shadow Mode：副版本仅预测，不写库，不触发告警
+        if shadow_version and shadow_version != version:
+            try:
+                shadow_result = self._run_flange_prediction(
+                    flange_id=flange_id,
+                    multi_bolt_data=multi_bolt_data,
+                    bolt_ids=bolt_ids,
+                    bolt_data_dict=bolt_data_dict,
+                    enable_correlation_analysis=enable_correlation_analysis,
+                    version=shadow_version,
+                    save_to_db=False,
+                    is_shadow=True,
+                )
+                main_result['shadow_result'] = shadow_result
+                main_result['shadow_version'] = shadow_version
+
+                logger.info(
+                    f"Shadow模式预测完成: 法兰面 {flange_id}, "
+                    f"主版本={version or 'active'} -> {main_result['status']}, "
+                    f"影子版本={shadow_version} -> {shadow_result['status']}"
+                )
+            except Exception as e:
+                logger.warning(f"Shadow版本预测失败: {e}")
+                main_result['shadow_error'] = str(e)
+
+        duration = time.time() - start_time
+        logger.info(f"法兰面预测完成: {flange_id} -> {main_result['status']}, 耗时: {duration*1000:.2f}ms")
+        return main_result
+
+    def _run_flange_prediction(
+        self,
+        flange_id: str,
+        multi_bolt_data: List[np.ndarray],
+        bolt_ids: Optional[List[str]],
+        bolt_data_dict: Optional[Dict[str, np.ndarray]],
+        enable_correlation_analysis: bool,
+        version: Optional[str],
+        save_to_db: bool,
+        is_shadow: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        执行单次法兰面预测（核心预测流水线）
+
+        Args:
+            flange_id: 法兰面ID
+            multi_bolt_data: 多螺栓数据列表
+            bolt_ids: 螺栓ID列表
+            bolt_data_dict: 螺栓数据字典
+            enable_correlation_analysis: 是否启用关联分析
+            version: 模型版本号
+            save_to_db: 是否保存到数据库
+            is_shadow: 是否为影子模式
+
+        Returns:
+            预测结果字典
+        """
         if bolt_data_dict is not None:
             bolt_ids = list(bolt_data_dict.keys())
             multi_bolt_data = list(bolt_data_dict.values())
         elif bolt_ids is None:
             bolt_ids = [f"bolt_{i}" for i in range(len(multi_bolt_data))]
-
-        logger.info(f"开始法兰面预测: {flange_id}, 螺栓数: {len(multi_bolt_data)}")
 
         model_type = 'rule'
         attention = None
@@ -436,10 +678,11 @@ class PredictionOrchestrator:
             processed_bolts.append(processed.data)
 
         # Step 2: 模型推断（模型未训练则规则聚合兜底）
-        model = self.get_flange_model(flange_id)
-        model_version = 'unknown'
+        model = self.get_flange_model(flange_id, version=version)
+        model_version_str = version or 'unknown'
         if model.is_trained:
-            model_version = self._get_model_version('flange', flange_id)
+            if version is None:
+                model_version_str = self._get_model_version('flange', flange_id)
             original_status_code, confidence, attention = model.predict(
                 processed_bolts,
                 return_attention=True,
@@ -580,6 +823,9 @@ class PredictionOrchestrator:
             'attention_weights': attention.tolist() if attention is not None else None,
             'diagnosis': risk_assessment.diagnosis,
             'recommendations': risk_assessment.recommendations,
+            'model_version': model_version_str,
+            'model_type': model_type,
+            'is_shadow': is_shadow,
             'similar_cases': [
                 {
                     'id': c.id,
@@ -622,7 +868,7 @@ class PredictionOrchestrator:
                 node_id=flange_id,
                 input_data=all_data,
                 processed_data=None,
-                model_version=model_version,
+                model_version=model_version_str,
                 model_type=model_type,
                 original_status_code=original_status_code,
                 confidence=float(confidence),
@@ -637,31 +883,30 @@ class PredictionOrchestrator:
         except Exception as e:
             logger.warning(f"法兰面 {flange_id} 审计快照记录异常: {e}")
 
-        # Step 6: 持久化
-        if save_to_db:
+        # Step 6: 持久化（Shadow 模式不写库）
+        if save_to_db and not is_shadow:
             self.repository.save_flange_prediction(flange_id, result)
 
-        # Step 7: 告警评估
-        try:
-            self._evaluate_alert(
-                node_type='flange',
-                node_id=flange_id,
-                result=result,
-            )
-        except Exception as e:
-            logger.warning(f"法兰面 {flange_id} 告警评估异常: {e}")
+        # Step 7: 告警评估（Shadow 模式不触发告警）
+        if not is_shadow:
+            try:
+                self._evaluate_alert(
+                    node_type='flange',
+                    node_id=flange_id,
+                    result=result,
+                )
+            except Exception as e:
+                logger.warning(f"法兰面 {flange_id} 告警评估异常: {e}")
 
         # 记录预测指标
-        duration = time.time() - start_time
         metrics.record_prediction(
             node_type='flange',
             status_code=final_status_code,
             status_label=final_status,
-            duration=duration,
+            duration=0,
             model_type=model_type
         )
-        
-        logger.info(f"法兰面预测完成: {flange_id} -> {final_status}, 耗时: {duration*1000:.2f}ms")
+
         return result
 
     def _estimate_single_bolt_status(self, data: np.ndarray) -> int:

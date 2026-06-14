@@ -83,6 +83,9 @@ class BoltPredictionResponse(BaseModel):
         diagnosis: 诊断结论
         recommendations: 推荐措施
         prediction_time: 预测时间
+        model_version: 模型版本号
+        shadow_version: Shadow模式版本号（如有）
+        shadow_result: Shadow模式预测结果（如有）
     """
     bolt_id: str
     status: str
@@ -93,6 +96,9 @@ class BoltPredictionResponse(BaseModel):
     diagnosis: str
     recommendations: List[str]
     prediction_time: datetime
+    model_version: Optional[str] = Field(None, description="模型版本号")
+    shadow_version: Optional[str] = Field(None, description="Shadow模式版本号")
+    shadow_result: Optional[Dict[str, Any]] = Field(None, description="Shadow模式预测结果")
 
 
 # ==================== 法兰面预测 ====================
@@ -231,6 +237,9 @@ class FlangePredictionResponse(BaseModel):
     propagation_paths: Optional[PropagationPathsSchema] = None
     root_cause_analysis: Optional[RootCauseAnalysisSchema] = None
     root_cause_measures: Optional[str] = None
+    model_version: Optional[str] = Field(None, description="模型版本号")
+    shadow_version: Optional[str] = Field(None, description="Shadow模式版本号")
+    shadow_result: Optional[Dict[str, Any]] = Field(None, description="Shadow模式预测结果")
 
 
 # ==================== 风险评估 ====================
@@ -2636,7 +2645,16 @@ class ModelVersionListResponse(BaseModel):
 
 class ModelVersionActivateRequest(BaseModel):
     """激活/回滚模型版本请求"""
+    model_type: str = Field(..., description="模型类型 bolt/flange")
+    node_id: str = Field(..., description="节点ID")
     version: str = Field(..., description="目标版本号")
+
+
+class ModelVersionRollbackRequest(BaseModel):
+    """回滚模型版本请求"""
+    model_type: str = Field(..., description="模型类型 bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+    version: Optional[str] = Field(None, description="目标版本号，不填则回滚到上一版本")
 
 
 class ModelVersionCompareRequest(BaseModel):

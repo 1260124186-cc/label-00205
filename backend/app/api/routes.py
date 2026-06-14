@@ -114,6 +114,7 @@ from app.api.schemas import (
     StreamEventSchema,
     EpochMetricsSchema, TrainingSessionSchema, ModelVersionSchema,
     ModelVersionListResponse, ModelVersionActivateRequest,
+    ModelVersionRollbackRequest,
     ModelVersionCompareRequest, ModelVersionCompareResponse,
     TrainingSessionListResponse, TrainingStatusResponse,
     EarlyStoppingConfig, LRSchedulerConfig, ClassImbalanceConfig,
@@ -264,7 +265,9 @@ async def health_check():
 )
 async def predict_bolt(
     request: BoltPredictionRequest,
-    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式")
+    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式"),
+    version: Optional[str] = Query(None, description="使用指定版本的模型进行预测"),
+    shadow_version: Optional[str] = Query(None, description="Shadow模式版本号，仅预测不写库，用于A/B对比"),
 ):
     """
     预测单个螺栓的状态
@@ -315,7 +318,9 @@ async def predict_bolt(
         result = service.predict_bolt(
             bolt_id=bolt_id,
             data=values,
-            timestamps=timestamps
+            timestamps=timestamps,
+            version=version,
+            shadow_version=shadow_version,
         )
 
         # 添加校验信息到响应头
@@ -328,7 +333,10 @@ async def predict_bolt(
             risk_level=result['risk_level'],
             diagnosis=result['diagnosis'],
             recommendations=result['recommendations'],
-            prediction_time=datetime.now()
+            prediction_time=datetime.now(),
+            model_version=result.get('model_version'),
+            shadow_version=result.get('shadow_version'),
+            shadow_result=result.get('shadow_result'),
         )
 
         return response
@@ -350,7 +358,9 @@ async def predict_bolt(
 )
 async def predict_flange(
     request: FlangePredictionRequest,
-    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式")
+    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式"),
+    version: Optional[str] = Query(None, description="使用指定版本的模型进行预测"),
+    shadow_version: Optional[str] = Query(None, description="Shadow模式版本号，仅预测不写库，用于A/B对比"),
 ):
     """
     预测法兰面的整体状态
@@ -392,7 +402,9 @@ async def predict_flange(
         # 执行预测
         result = service.predict_flange(
             flange_id=flange_id,
-            multi_bolt_data=multi_bolt_data
+            multi_bolt_data=multi_bolt_data,
+            version=version,
+            shadow_version=shadow_version,
         )
 
         return FlangePredictionResponse(
@@ -406,7 +418,16 @@ async def predict_flange(
             attention_weights=result.get('attention_weights'),
             diagnosis=result['diagnosis'],
             recommendations=result['recommendations'],
-            prediction_time=datetime.now()
+            prediction_time=datetime.now(),
+            correlation_matrix=result.get('correlation_matrix'),
+            causal_graph=result.get('causal_graph'),
+            leading_bolts=result.get('leading_bolts'),
+            propagation_paths=result.get('propagation_paths'),
+            root_cause_analysis=result.get('root_cause_analysis'),
+            root_cause_measures=result.get('root_cause_measures'),
+            model_version=result.get('model_version'),
+            shadow_version=result.get('shadow_version'),
+            shadow_result=result.get('shadow_result'),
         )
 
     except HTTPException:
@@ -853,6 +874,155 @@ async def list_model_versions(model_type: str, node_id: str):
         raise
     except Exception as e:
         logger.error(f"列出模型版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/model/activate",
+    response_model=ModelVersionSchema,
+    tags=["模型管理"],
+    summary="激活指定模型版本"
+)
+async def activate_model_version(request: ModelVersionActivateRequest):
+    """
+    激活指定的模型版本（切换活动版本）
+
+    通过 model_type、node_id 和 version 切换当前活动版本。
+    激活后，后续预测将使用该版本的模型。
+    """
+    try:
+        from app.services.model_version_service import get_model_version_service
+
+        service = get_model_version_service()
+        result = service.activate_version(
+            model_type=request.model_type,
+            node_id=request.node_id,
+            version=request.version
+        )
+
+        try:
+            pred_service = get_prediction_service()
+            pred_service.reload_model(
+                model_type=request.model_type,
+                node_id=request.node_id,
+            )
+            logger.info(f"已清除模型缓存: {request.model_type}/{request.node_id}")
+        except Exception as e:
+            logger.warning(f"清除模型缓存失败: {e}")
+
+        return ModelVersionSchema(
+            version=result['version'],
+            create_time=result['create_time'],
+            is_active=result['is_active'],
+            description=result.get('description'),
+            file_path=result.get('file_path'),
+            file_hash=result.get('file_hash'),
+            file_size_bytes=result.get('file_size_bytes'),
+            training_samples=result.get('training_samples'),
+            validation_samples=result.get('validation_samples'),
+            training_duration_seconds=result.get('training_duration_seconds'),
+            parent_version=result.get('parent_version'),
+            training_session_id=result.get('training_session_id'),
+            metrics=result.get('metrics')
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"激活模型版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/model/rollback",
+    response_model=ModelVersionSchema,
+    tags=["模型管理"],
+    summary="回滚模型版本"
+)
+async def rollback_model_version(request: ModelVersionRollbackRequest):
+    """
+    回滚到指定版本（或上一个版本）
+
+    如果指定了 version，则回滚到该版本；
+    如果未指定 version，则回滚到上一个版本。
+    """
+    try:
+        from app.services.model_version_service import get_model_version_service
+
+        service = get_model_version_service()
+        result = service.rollback(
+            model_type=request.model_type,
+            node_id=request.node_id,
+            version=request.version
+        )
+
+        try:
+            pred_service = get_prediction_service()
+            pred_service.reload_model(
+                model_type=request.model_type,
+                node_id=request.node_id,
+            )
+            logger.info(f"已清除模型缓存: {request.model_type}/{request.node_id}")
+        except Exception as e:
+            logger.warning(f"清除模型缓存失败: {e}")
+
+        return ModelVersionSchema(
+            version=result['version'],
+            create_time=result['create_time'],
+            is_active=result['is_active'],
+            description=result.get('description'),
+            file_path=result.get('file_path'),
+            file_hash=result.get('file_hash'),
+            file_size_bytes=result.get('file_size_bytes'),
+            training_samples=result.get('training_samples'),
+            validation_samples=result.get('validation_samples'),
+            training_duration_seconds=result.get('training_duration_seconds'),
+            parent_version=result.get('parent_version'),
+            training_session_id=result.get('training_session_id'),
+            metrics=result.get('metrics')
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"回滚模型版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/model/versions/{model_type}/{node_id}/cleanup",
+    tags=["模型管理"],
+    summary="手动清理旧版本"
+)
+async def cleanup_old_versions(model_type: str, node_id: str):
+    """
+    手动清理超过 max_versions 限制的旧版本
+
+    保留最新的 N 个版本（N = max_versions），删除其余非活动版本。
+    """
+    try:
+        from app.services.model_version_service import get_model_version_service
+
+        service = get_model_version_service()
+        deleted_count = service.cleanup_old_versions_manual(model_type, node_id)
+
+        return {
+            'model_type': model_type,
+            'node_id': node_id,
+            'deleted_count': deleted_count,
+            'message': f'已清理 {deleted_count} 个旧版本'
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"清理旧版本失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
