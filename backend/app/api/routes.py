@@ -104,6 +104,12 @@ from app.api.schemas import (
     HealthIndexResponse, HealthIndexBatchResponse,
     HealthIndexHistoryResponse,
     RULPredictionResponse, HealthRollupResponse,
+    StreamDataIngestRequest, StreamBatchIngestRequest,
+    StreamModeSwitchRequest, StreamConfigUpdateRequest,
+    StreamDataIngestResponse, StreamBatchIngestResponse,
+    StreamWindowStatusResponse, StreamEngineStatusResponse,
+    StreamModeSwitchResponse, StreamConfigResponse,
+    StreamEventSchema,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -5623,4 +5629,407 @@ async def generate_health_rollup(request: HealthRollupRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"汇总报表生成失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 流式预测 ====================
+
+_stream_engine = None
+
+
+def get_stream_engine():
+    """获取流式预测引擎实例"""
+    global _stream_engine
+    if _stream_engine is None:
+        from app.streaming import StreamPredictionEngine, StreamPredictionMode
+
+        stream_config = config.get('stream_prediction', {})
+        default_mode = stream_config.get('prediction_mode', 'batch')
+        mode = StreamPredictionMode(default_mode)
+
+        _stream_engine = StreamPredictionEngine(prediction_mode=mode)
+
+        # 如果配置了启用流式预测，自动启动
+        if stream_config.get('enabled', False):
+            _stream_engine.start()
+
+    return _stream_engine
+
+
+@router.post(
+    "/stream/ingest",
+    response_model=StreamDataIngestResponse,
+    tags=["流式预测"],
+    summary="流式数据注入"
+)
+async def stream_ingest(request: StreamDataIngestRequest):
+    """
+    注入单条或微批次流数据
+
+    数据进入滑动窗口，窗口满后自动触发预测。
+    """
+    try:
+        engine = get_stream_engine()
+
+        if not engine.is_running:
+            return StreamDataIngestResponse(
+                success=False,
+                message="流式预测引擎未启动",
+                accepted=False
+            )
+
+        if engine.prediction_mode.value != 'stream':
+            return StreamDataIngestResponse(
+                success=False,
+                message=f"当前为 {engine.prediction_mode.value} 模式，请切换到 stream 模式",
+                accepted=False
+            )
+
+        # 构建消息数据
+        message_data = {
+            'node_type': request.node_type,
+            'node_id': request.node_id,
+        }
+
+        if request.value is not None and request.timestamp is not None:
+            message_data['value'] = request.value
+            message_data['timestamp'] = request.timestamp
+        elif request.values is not None and request.timestamps is not None:
+            message_data['values'] = request.values
+            message_data['timestamps'] = request.timestamps
+        elif request.data is not None:
+            message_data['data'] = request.data
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="缺少数据参数：需要 value/timestamp 或 values/timestamps 或 data"
+            )
+
+        if request.metadata:
+            message_data['metadata'] = request.metadata
+
+        # 注入消息
+        accepted = engine.ingest_message(message_data)
+
+        # 获取窗口状态
+        window_status = engine.get_window_status(request.node_id)
+
+        return StreamDataIngestResponse(
+            success=True,
+            message="数据注入成功",
+            node_id=request.node_id,
+            node_type=request.node_type,
+            window_current_size=window_status.get('current_size', 0) if window_status else 0,
+            window_is_full=window_status.get('is_full', False) if window_status else False,
+            accepted=accepted
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"流式数据注入失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/stream/ingest/batch",
+    response_model=StreamBatchIngestResponse,
+    tags=["流式预测"],
+    summary="批量流式数据注入"
+)
+async def stream_ingest_batch(request: StreamBatchIngestRequest):
+    """
+    批量注入多条流数据
+    """
+    try:
+        engine = get_stream_engine()
+
+        if not engine.is_running:
+            return StreamBatchIngestResponse(
+                success=False,
+                total_count=len(request.messages),
+                accepted_count=0,
+                rejected_count=len(request.messages),
+                messages=[{"error": "流式预测引擎未启动"}]
+            )
+
+        if engine.prediction_mode.value != 'stream':
+            return StreamBatchIngestResponse(
+                success=False,
+                total_count=len(request.messages),
+                accepted_count=0,
+                rejected_count=len(request.messages),
+                messages=[{"error": f"当前为 {engine.prediction_mode.value} 模式"}]
+            )
+
+        accepted_count = 0
+        rejected_count = 0
+        results = []
+
+        for msg in request.messages:
+            try:
+                accepted = engine.ingest_message(msg)
+                if accepted:
+                    accepted_count += 1
+                else:
+                    rejected_count += 1
+                results.append({
+                    'node_id': msg.get('node_id'),
+                    'accepted': accepted
+                })
+            except Exception as e:
+                rejected_count += 1
+                results.append({
+                    'node_id': msg.get('node_id'),
+                    'accepted': False,
+                    'error': str(e)
+                })
+
+        return StreamBatchIngestResponse(
+            success=True,
+            total_count=len(request.messages),
+            accepted_count=accepted_count,
+            rejected_count=rejected_count,
+            messages=results
+        )
+
+    except Exception as e:
+        logger.error(f"批量流式数据注入失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/stream/window/{bolt_id}",
+    response_model=StreamWindowStatusResponse,
+    tags=["流式预测"],
+    summary="获取窗口状态"
+)
+async def get_stream_window(bolt_id: str):
+    """
+    获取指定螺栓的滑动窗口状态
+    """
+    try:
+        engine = get_stream_engine()
+
+        window_status = engine.get_window_status(bolt_id)
+        if window_status is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"螺栓 {bolt_id} 的窗口不存在"
+            )
+
+        return StreamWindowStatusResponse(**window_status)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取窗口状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/stream/status",
+    response_model=StreamEngineStatusResponse,
+    tags=["流式预测"],
+    summary="获取流式预测引擎状态"
+)
+async def get_stream_engine_status():
+    """
+    获取流式预测引擎的运行状态和统计信息
+    """
+    try:
+        engine = get_stream_engine()
+        stats = engine.get_stats_dict()
+        return StreamEngineStatusResponse(**stats)
+
+    except Exception as e:
+        logger.error(f"获取引擎状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/stream/mode",
+    response_model=StreamModeSwitchResponse,
+    tags=["流式预测"],
+    summary="切换预测模式"
+)
+async def switch_prediction_mode(request: StreamModeSwitchRequest):
+    """
+    切换预测模式：batch 或 stream
+
+    - batch: 批处理模式，流式数据被忽略
+    - stream: 流式模式，启用实时预测
+    """
+    try:
+        engine = get_stream_engine()
+
+        success = engine.set_prediction_mode(request.mode)
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"无效的预测模式: {request.mode}"
+            )
+
+        return StreamModeSwitchResponse(
+            success=True,
+            current_mode=engine.prediction_mode.value,
+            message=f"已切换到 {request.mode} 模式"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"切换预测模式失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/stream/start",
+    tags=["流式预测"],
+    summary="启动流式预测引擎"
+)
+async def start_stream_engine():
+    """
+    启动流式预测引擎
+    """
+    try:
+        engine = get_stream_engine()
+
+        if engine.is_running:
+            return {
+                "success": True,
+                "message": "流式预测引擎已在运行中",
+                "is_running": True
+            }
+
+        engine.start()
+
+        return {
+            "success": True,
+            "message": "流式预测引擎已启动",
+            "is_running": True
+        }
+
+    except Exception as e:
+        logger.error(f"启动流式预测引擎失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/stream/stop",
+    tags=["流式预测"],
+    summary="停止流式预测引擎"
+)
+async def stop_stream_engine():
+    """
+    停止流式预测引擎
+    """
+    try:
+        engine = get_stream_engine()
+
+        if not engine.is_running:
+            return {
+                "success": True,
+                "message": "流式预测引擎未在运行",
+                "is_running": False
+            }
+
+        engine.stop()
+
+        return {
+            "success": True,
+            "message": "流式预测引擎已停止",
+            "is_running": False
+        }
+
+    except Exception as e:
+        logger.error(f"停止流式预测引擎失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/stream/config",
+    response_model=StreamConfigResponse,
+    tags=["流式预测"],
+    summary="更新流式预测配置"
+)
+async def update_stream_config(request: StreamConfigUpdateRequest):
+    """
+    动态更新流式预测配置
+
+    支持更新：窗口大小、最大并发流数、每流速率限制
+    """
+    try:
+        engine = get_stream_engine()
+
+        updated = {}
+
+        if request.window_size is not None:
+            engine.set_window_size(request.window_size)
+            updated['window_size'] = request.window_size
+
+        if request.max_concurrent_streams is not None:
+            engine.set_max_concurrent_streams(request.max_concurrent_streams)
+            updated['max_concurrent_streams'] = request.max_concurrent_streams
+
+        if request.rate_per_stream is not None:
+            engine.backpressure_manager.set_rate_per_stream(request.rate_per_stream)
+            updated['rate_per_stream'] = request.rate_per_stream
+
+        return StreamConfigResponse(
+            success=True,
+            config=updated,
+            message="配置更新成功"
+        )
+
+    except Exception as e:
+        logger.error(f"更新流式配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/stream/window/{bolt_id}",
+    tags=["流式预测"],
+    summary="清空指定螺栓窗口"
+)
+async def clear_stream_window(bolt_id: str):
+    """
+    清空指定螺栓的滑动窗口数据
+    """
+    try:
+        engine = get_stream_engine()
+
+        success = engine.clear_window(bolt_id)
+
+        return {
+            "success": success,
+            "message": f"已清空螺栓 {bolt_id} 的窗口" if success else "清空失败"
+        }
+
+    except Exception as e:
+        logger.error(f"清空窗口失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/stream/windows",
+    tags=["流式预测"],
+    summary="清空所有窗口"
+)
+async def clear_all_stream_windows():
+    """
+    清空所有螺栓的滑动窗口数据
+    """
+    try:
+        engine = get_stream_engine()
+
+        success = engine.clear_all_windows()
+
+        return {
+            "success": success,
+            "message": "已清空所有窗口" if success else "清空失败"
+        }
+
+    except Exception as e:
+        logger.error(f"清空所有窗口失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

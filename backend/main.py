@@ -87,12 +87,34 @@ async def lifespan(app: FastAPI):
     # 启动调度器
     scheduler.start()
     
+    # 启动流式预测引擎（如果配置启用）
+    try:
+        stream_enabled = config.get('stream_prediction.enabled', False)
+        if stream_enabled:
+            from app.streaming import get_stream_engine
+            stream_engine = get_stream_engine()
+            stream_engine.start()
+            logger.info("流式预测引擎已启动")
+    except Exception as e:
+        logger.warning(f"流式预测引擎启动失败: {e}")
+    
     logger.info("系统启动完成")
     
     yield
     
     # 关闭时
     logger.info("系统关闭中...")
+    
+    # 停止流式预测引擎
+    try:
+        from app.streaming import get_stream_engine
+        stream_engine = get_stream_engine()
+        if stream_engine.is_running:
+            stream_engine.stop()
+            logger.info("流式预测引擎已停止")
+    except Exception as e:
+        logger.warning(f"流式预测引擎停止失败: {e}")
+    
     scheduler.stop()
     db_manager.close()
     logger.info("系统已关闭")

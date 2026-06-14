@@ -2037,3 +2037,169 @@ class HealthRollupResponse(BaseModel):
     report_id: Optional[int] = None
     rollup_data: ProductionLineHealthRollupSchema
     saved: bool
+
+
+# ==================== 流式预测 ====================
+
+# ---------- 请求模型 ----------
+
+class StreamDataIngestRequest(BaseModel):
+    """
+    流式数据注入请求
+
+    支持单条或微批次数据注入
+    """
+    node_type: str = Field(..., description="节点类型 bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+    value: Optional[float] = Field(None, description="单条预紧力值")
+    timestamp: Optional[str] = Field(None, description="单条时间戳")
+    values: Optional[List[float]] = Field(None, description="批量预紧力值列表")
+    timestamps: Optional[List[str]] = Field(None, description="批量时间戳列表")
+    data: Optional[List[List[Any]]] = Field(
+        None,
+        description="时序数据 [[时间, 预紧力], ...]"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        None, description="元数据"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "node_type": "bolt",
+                "node_id": "B001",
+                "value": 400.5,
+                "timestamp": "2025-06-14T10:00:00",
+                "metadata": {"source": "sensor_01"}
+            }
+        }
+
+
+class StreamBatchIngestRequest(BaseModel):
+    """
+    批量流式数据注入请求
+    """
+    messages: List[Dict[str, Any]] = Field(
+        ...,
+        description="消息列表，每个消息包含 node_type, node_id, value/timestamp 或 values/timestamps"
+    )
+
+
+class StreamModeSwitchRequest(BaseModel):
+    """
+    流式预测模式切换请求
+    """
+    mode: str = Field(
+        ...,
+        description="预测模式: batch 或 stream"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "mode": "stream"
+            }
+        }
+
+
+class StreamConfigUpdateRequest(BaseModel):
+    """
+    流式预测配置更新请求
+    """
+    window_size: Optional[int] = Field(None, description="窗口大小", ge=10, le=1000)
+    max_concurrent_streams: Optional[int] = Field(
+        None, description="最大并发流数", ge=1, le=10000
+    )
+    rate_per_stream: Optional[float] = Field(
+        None, description="每个流的速率限制（每秒）", ge=0.1, le=1000.0
+    )
+
+
+# ---------- 响应模型 ----------
+
+class StreamDataIngestResponse(BaseModel):
+    """
+    流式数据注入响应
+    """
+    success: bool
+    message: str
+    node_id: Optional[str] = None
+    node_type: Optional[str] = None
+    window_current_size: Optional[int] = None
+    window_is_full: Optional[bool] = None
+    accepted: bool = True
+
+
+class StreamBatchIngestResponse(BaseModel):
+    """
+    批量流式数据注入响应
+    """
+    success: bool
+    total_count: int
+    accepted_count: int
+    rejected_count: int
+    messages: List[Dict[str, Any]] = []
+
+
+class StreamWindowStatusResponse(BaseModel):
+    """
+    流式窗口状态响应
+    """
+    bolt_id: str
+    window_size: int
+    current_size: int
+    is_full: bool
+    last_updated: Optional[float] = None
+    last_prediction_status: Optional[int] = None
+    prediction_count: Optional[int] = None
+    first_timestamp: Optional[str] = None
+    last_timestamp: Optional[str] = None
+
+
+class StreamEngineStatusResponse(BaseModel):
+    """
+    流式预测引擎状态响应
+    """
+    is_running: bool
+    mode: str
+    active_streams: int
+    total_predictions: int
+    status_changes: int
+    window_manager: Dict[str, Any]
+    backpressure: Dict[str, Any]
+    events: Dict[str, Any]
+    adapters: List[Dict[str, Any]]
+
+
+class StreamModeSwitchResponse(BaseModel):
+    """
+    流式预测模式切换响应
+    """
+    success: bool
+    current_mode: str
+    message: str
+
+
+class StreamConfigResponse(BaseModel):
+    """
+    流式预测配置响应
+    """
+    success: bool
+    config: Dict[str, Any]
+    message: str
+
+
+# ---------- 流事件模型 ----------
+
+class StreamEventSchema(BaseModel):
+    """
+    流事件数据结构
+    """
+    event_id: str
+    event_type: str
+    node_type: str
+    node_id: str
+    timestamp: str
+    data: Dict[str, Any] = {}
+    source: str = "stream"
+    metadata: Dict[str, Any] = {}
