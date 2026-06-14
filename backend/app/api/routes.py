@@ -22,8 +22,10 @@ import torch
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends, Request
 from loguru import logger
+
+from app.api.auth import get_tenant_context, revoke_tenant_token
 
 from app.api.schemas import (
     HealthResponse, ErrorResponse,
@@ -4166,6 +4168,81 @@ async def tenant_login(request: TenantLoginRequest):
     except Exception as e:
         logger.error(f"租户登录失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 当前用户信息 ----------
+
+@router.get(
+    "/tenant/me",
+    tags=["多租户"],
+    summary="获取当前登录用户信息",
+)
+async def get_current_tenant_user(
+    tenant_context: Dict[str, Any] = Depends(get_tenant_context)
+):
+    """获取当前登录用户的信息（通过 X-Tenant-Token 或 X-Tenant-API-Key）"""
+    if tenant_context["auth_method"] == "none":
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "Unauthorized", "message": "未登录或认证凭据无效"},
+        )
+
+    try:
+        from app.services.tenant import TenantService, TenantUserService
+        tenant_svc = TenantService()
+        user_svc = TenantUserService()
+
+        tenant = None
+        user = None
+        display_name = None
+
+        if tenant_context.get("tenant_id"):
+            tenant = tenant_svc.get_tenant(tenant_context["tenant_id"])
+        if tenant_context.get("user_id") and tenant_context.get("tenant_id"):
+            user = user_svc.get_user(tenant_context["tenant_id"], tenant_context["user_id"])
+            if user:
+                display_name = user.display_name
+
+        result = {
+            "tenant_id": tenant_context["tenant_id"],
+            "tenant_code": tenant.tenant_code if tenant else None,
+            "tenant_name": tenant.tenant_name if tenant else None,
+            "user_id": tenant_context.get("user_id"),
+            "username": tenant_context.get("username"),
+            "display_name": display_name or tenant_context.get("username"),
+            "role": tenant_context["role"],
+            "permissions": tenant_context.get("permissions", []),
+            "auth_method": tenant_context["auth_method"],
+            "email": user.email if user else None,
+            "phone": user.phone if user else None,
+            "org_node_id": user.org_node_id if user else None,
+            "status": user.status if user else None,
+            "last_login_time": user.last_login_time if user else None,
+        }
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取当前用户信息失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/tenant/logout",
+    tags=["多租户"],
+    summary="租户用户登出",
+)
+async def tenant_logout(
+    request: Request,
+    tenant_context: Dict[str, Any] = Depends(get_tenant_context)
+):
+    """登出，撤销当前登录令牌"""
+    if tenant_context["auth_method"] == "token":
+        from app.api.auth import _tenant_tokens
+        token_header = request.headers.get("X-Tenant-Token") or request.headers.get("x-tenant-token")
+        if token_header and token_header in _tenant_tokens:
+            revoke_tenant_token(token_header)
+    return {"status": "success", "message": "登出成功"}
 
 
 # ---------- 租户管理 ----------

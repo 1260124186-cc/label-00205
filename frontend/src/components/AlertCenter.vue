@@ -408,6 +408,9 @@ import {
 } from '@/types'
 import type { AlertEvent, AlertFilterOptions, AlertLevel, AlertStatus, AlertStrategy } from '@/types'
 import { fetchAlertList, handleAlert, createWorkOrderFromAlert, fetchAlertStats } from '@/api/alert'
+import { useAuth } from '@/composables/useAuth'
+
+const { canWrite } = useAuth()
 
 const alerts = ref<AlertEvent[]>([])
 const loading = ref(false)
@@ -568,6 +571,7 @@ function roundPercent(value: number | null | undefined): number {
 }
 
 function canShowActions(alert: AlertEvent): boolean {
+  if (!canWrite.value) return false
   return alert.status === 'pending' || alert.status === 'processing'
 }
 

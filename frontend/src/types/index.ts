@@ -634,3 +634,102 @@ export interface ConfigCenterResponse {
   scheduled_jobs: ScheduledJob[]
   updated_at: string
 }
+
+// ==================== 权限与认证相关类型 ====================
+
+export type UserRole = 'tenant_admin' | 'admin' | 'operator' | 'viewer' | 'anonymous' | 'api_key'
+
+export type AuthMethod = 'token' | 'api_key' | 'none'
+
+export const UserRoleMap: Record<UserRole, string> = {
+  tenant_admin: '租户管理员',
+  admin: '管理员',
+  operator: '运维人员',
+  viewer: '只读用户',
+  anonymous: '匿名用户',
+  api_key: 'API Key'
+}
+
+export const UserRoleColorMap: Record<UserRole, string> = {
+  tenant_admin: '#ef4444',
+  admin: '#8b5cf6',
+  operator: '#3b82f6',
+  viewer: '#64748b',
+  anonymous: '#94a3b8',
+  api_key: '#f97316'
+}
+
+export type Permission =
+  | 'monitoring:read'
+  | 'alert:read'
+  | 'alert:write'
+  | 'alert:handle'
+  | 'trend:read'
+  | 'model:read'
+  | 'model:write'
+  | 'model:train'
+  | 'config:read'
+  | 'config:write'
+  | 'workorder:read'
+  | 'workorder:write'
+  | 'tenant:admin'
+  | 'read'
+  | 'write'
+  | 'admin'
+  | 'tenant_admin'
+
+export interface CurrentUser {
+  tenant_id: number | null
+  tenant_code: string | null
+  tenant_name: string | null
+  user_id: number | null
+  username: string | null
+  display_name: string
+  role: UserRole
+  permissions: Permission[]
+  auth_method: AuthMethod
+  email: string | null
+  phone: string | null
+  org_node_id: number | null
+  status: string | null
+  last_login_time: string | null
+}
+
+export interface LoginRequest {
+  tenant_code: string
+  username: string
+  password: string
+}
+
+export interface LoginResponse {
+  token: string
+  tenant_id: number
+  user_id: number
+  username: string
+  role: UserRole
+  expires_at: string
+}
+
+export interface APIKeyLoginRequest {
+  api_key: string
+}
+
+// 角色到视图的映射（哪些角色可以看到哪些导航页面）
+export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config'>> = {
+  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config'],
+  admin: ['monitoring', 'alert', 'trend', 'model', 'config'],
+  operator: ['monitoring', 'alert', 'trend', 'model'],
+  viewer: ['monitoring', 'alert', 'trend'],
+  anonymous: [],
+  api_key: ['monitoring', 'alert', 'trend', 'model', 'config']
+}
+
+// 角色到权限的映射
+export const RolePermissionMap: Record<UserRole, Permission[]> = {
+  tenant_admin: ['read', 'write', 'admin', 'tenant_admin'],
+  admin: ['read', 'write', 'admin'],
+  operator: ['read', 'write'],
+  viewer: ['read'],
+  anonymous: [],
+  api_key: ['read']
+}

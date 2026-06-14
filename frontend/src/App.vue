@@ -1,5 +1,7 @@
 <template>
-  <div class="app-root">
+  <LoginView v-if="!isAuthenticated" @login-success="onLoginSuccess" />
+
+  <div v-else class="app-root">
     <header class="app-header">
       <div class="header-left">
         <div class="logo">
@@ -18,9 +20,10 @@
       <div class="header-center">
         <nav class="nav-tabs">
           <button
+            v-if="canViewMonitoring"
             class="nav-tab"
             :class="{ active: currentView === 'monitoring' }"
-            @click="currentView = 'monitoring'"
+            @click="switchView('monitoring')"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="10"></circle>
@@ -29,9 +32,10 @@
             监控视图
           </button>
           <button
+            v-if="canViewAlert"
             class="nav-tab"
             :class="{ active: currentView === 'alert' }"
-            @click="currentView = 'alert'"
+            @click="switchView('alert')"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
@@ -42,9 +46,10 @@
             <span v-if="alertStats.pending > 0" class="alert-badge">{{ alertStats.pending }}</span>
           </button>
           <button
+            v-if="canViewTrend"
             class="nav-tab"
             :class="{ active: currentView === 'trend' }"
-            @click="currentView = 'trend'"
+            @click="switchView('trend')"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
@@ -52,9 +57,10 @@
             趋势分析
           </button>
           <button
+            v-if="canViewModel"
             class="nav-tab"
             :class="{ active: currentView === 'model' }"
-            @click="currentView = 'model'"
+            @click="switchView('model')"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
@@ -64,13 +70,14 @@
             模型管理
           </button>
           <button
+            v-if="canViewConfig"
             class="nav-tab"
             :class="{ active: currentView === 'config' }"
-            @click="currentView = 'config'"
+            @click="switchView('config')"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 15a1.65 1.65 0 0 0-1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
             </svg>
             配置中心
           </button>
@@ -90,7 +97,7 @@
 
       <div class="header-right">
         <div class="refresh-controls" v-if="currentView === 'monitoring'">
-          <select v-model.number="refreshInterval" class="interval-select" :disabled="!autoRefresh">
+          <select v-model.number="refreshInterval" class="interval-select" :disabled="!autoRefresh || !canWrite">
             <option :value="3000">3秒</option>
             <option :value="5000">5秒</option>
             <option :value="10000">10秒</option>
@@ -101,6 +108,7 @@
             class="toggle-btn"
             :class="{ active: autoRefresh }"
             @click="toggleAutoRefresh"
+            :disabled="!canWrite"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="23 4 23 10 17 10"></polyline>
@@ -116,6 +124,61 @@
             </svg>
             刷新
           </button>
+        </div>
+
+        <div class="user-section">
+          <div class="user-info" @click="showUserMenu = !showUserMenu">
+            <div class="user-avatar" :style="{ background: avatarGradient }">
+              {{ avatarInitial }}
+            </div>
+            <div class="user-details">
+              <div class="user-name">{{ displayName }}</div>
+              <div class="user-role" :style="{ color: roleColor }">
+                {{ roleText }}
+                <span v-if="authMethod === 'api_key'" class="auth-method-tag">API Key</span>
+              </div>
+            </div>
+            <svg class="user-dropdown-icon" :class="{ rotated: showUserMenu }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
+
+          <transition name="dropdown">
+            <div v-if="showUserMenu" class="user-menu" @click.self="showUserMenu = false">
+              <div class="user-menu-header">
+                <div class="user-menu-avatar" :style="{ background: avatarGradient }">
+                  {{ avatarInitial }}
+                </div>
+                <div class="user-menu-info">
+                  <div class="user-menu-name">{{ displayName }}</div>
+                  <div class="user-menu-username" v-if="currentUser?.username">
+                    @{{ currentUser.username }}
+                  </div>
+                  <div class="user-menu-tenant" v-if="currentUser?.tenant_name">
+                    {{ currentUser.tenant_name }}
+                  </div>
+                </div>
+              </div>
+              <div class="user-menu-divider"></div>
+              <div class="user-menu-permissions">
+                <div class="permissions-title">权限信息</div>
+                <div class="permissions-list">
+                  <span v-for="p in displayPermissions" :key="p" class="permission-chip">
+                    {{ permissionText(p) }}
+                  </span>
+                </div>
+              </div>
+              <div class="user-menu-divider"></div>
+              <button class="user-menu-item menu-logout" @click="handleLogout">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                  <polyline points="16 17 21 12 16 7"></polyline>
+                  <line x1="21" y1="12" x2="9" y2="12"></line>
+                </svg>
+                退出登录
+              </button>
+            </div>
+          </transition>
         </div>
       </div>
     </header>
@@ -187,7 +250,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, computed, nextTick } from 'vue'
 import FilterPanel from '@/components/FilterPanel.vue'
 import StatsPanel from '@/components/StatsPanel.vue'
 import FlangeTopology from '@/components/FlangeTopology.vue'
@@ -196,11 +259,36 @@ import AlertCenter from '@/components/AlertCenter.vue'
 import TrendAnalysis from '@/components/TrendAnalysis.vue'
 import ModelManagement from '@/components/ModelManagement.vue'
 import ConfigCenter from '@/components/ConfigCenter.vue'
+import LoginView from '@/components/LoginView.vue'
 import { fetchTopology, fetchCollectors, fetchPositions } from '@/api/monitoring'
 import { fetchAlertStats } from '@/api/alert'
-import type { TopologyData, FilterOptions, Flange, Bolt } from '@/types'
+import { useAuth } from '@/composables/useAuth'
+import { UserRoleMap, UserRoleColorMap } from '@/types'
+import type { TopologyData, FilterOptions, Flange, Bolt, Permission, UserRole } from '@/types'
 
-const currentView = ref<'monitoring' | 'alert' | 'trend' | 'model' | 'config'>('monitoring')
+const {
+  initAuth,
+  isAuthenticated,
+  isLoading,
+  currentUser,
+  displayName,
+  userRole,
+  authMethod,
+  permissions,
+  canViewMonitoring,
+  canViewAlert,
+  canViewTrend,
+  canViewModel,
+  canViewConfig,
+  canWrite,
+  hasPermission,
+  logout
+} = useAuth()
+
+type ViewName = 'monitoring' | 'alert' | 'trend' | 'model' | 'config'
+
+const currentView = ref<ViewName>('monitoring')
+const showUserMenu = ref(false)
 
 const topologyData = ref<TopologyData | null>(null)
 const autoRefresh = ref(true)
@@ -229,7 +317,109 @@ const positionOptions = ref<{ position: string; collector_id: string }[]>([])
 const selectedBolt = ref<Bolt | null>(null)
 const selectedFlange = ref<Flange | null>(null)
 
+const avatarInitial = computed(() => {
+  const name = displayName.value || 'U'
+  return name.charAt(0).toUpperCase()
+})
+
+const avatarGradient = computed(() => {
+  const role = userRole.value
+  const gradients: Record<UserRole, string> = {
+    tenant_admin: 'linear-gradient(135deg, #ef4444, #dc2626)',
+    admin: 'linear-gradient(135deg, #8b5cf6, #7c3aed)',
+    operator: 'linear-gradient(135deg, #3b82f6, #2563eb)',
+    viewer: 'linear-gradient(135deg, #64748b, #475569)',
+    anonymous: 'linear-gradient(135deg, #94a3b8, #64748b)',
+    api_key: 'linear-gradient(135deg, #f97316, #ea580c)'
+  }
+  return gradients[role] || gradients.anonymous
+})
+
+const roleText = computed(() => UserRoleMap[userRole.value] || '未知角色')
+const roleColor = computed(() => UserRoleColorMap[userRole.value] || '#94a3b8')
+
+const displayPermissions = computed(() => {
+  const perms = permissions.value
+  if (perms.includes('tenant_admin')) return ['tenant_admin']
+  if (perms.includes('admin')) return ['admin']
+  if (perms.includes('write')) return ['read', 'write']
+  if (perms.includes('read')) return ['read']
+  return perms.slice(0, 4)
+})
+
+function permissionText(p: Permission | string): string {
+  const map: Record<string, string> = {
+    read: '读取',
+    write: '写入',
+    admin: '管理',
+    tenant_admin: '租户管理',
+    'monitoring:read': '监控读取',
+    'alert:read': '预警读取',
+    'alert:handle': '预警处理',
+    'model:read': '模型读取',
+    'model:train': '模型训练',
+    'config:read': '配置读取',
+    'config:write': '配置写入'
+  }
+  return map[p] || p
+}
+
+function switchView(view: ViewName) {
+  const allowed: Record<ViewName, boolean> = {
+    monitoring: canViewMonitoring.value,
+    alert: canViewAlert.value,
+    trend: canViewTrend.value,
+    model: canViewModel.value,
+    config: canViewConfig.value
+  }
+  if (!allowed[view]) return
+  currentView.value = view
+  showUserMenu.value = false
+}
+
+function ensureValidView() {
+  const allowed: Record<ViewName, boolean> = {
+    monitoring: canViewMonitoring.value,
+    alert: canViewAlert.value,
+    trend: canViewTrend.value,
+    model: canViewModel.value,
+    config: canViewConfig.value
+  }
+  if (!allowed[currentView.value]) {
+    const firstAllowed = (Object.keys(allowed) as ViewName[]).find(v => allowed[v])
+    if (firstAllowed) {
+      currentView.value = firstAllowed
+    }
+  }
+}
+
+async function onLoginSuccess() {
+  await nextTick()
+  ensureValidView()
+  loadData(true)
+  setupTimer()
+  loadAlertStats()
+  setupAlertStatsTimer()
+}
+
+async function handleLogout() {
+  await logout()
+  showUserMenu.value = false
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
+  if (alertStatsTimer) {
+    clearInterval(alertStatsTimer)
+    alertStatsTimer = null
+  }
+  topologyData.value = null
+  selectedBolt.value = null
+  selectedFlange.value = null
+}
+
 async function loadData(force = false) {
+  if (!isAuthenticated.value) return
   try {
     topologyData.value = await fetchTopology(force)
     if (collectorOptions.value.length === 0 || force) {
@@ -251,6 +441,7 @@ function onCollectorChange(id: string | null) {
 }
 
 function toggleAutoRefresh() {
+  if (!canWrite.value) return
   autoRefresh.value = !autoRefresh.value
   setupTimer()
 }
@@ -260,7 +451,7 @@ function setupTimer() {
     clearInterval(refreshTimer)
     refreshTimer = null
   }
-  if (autoRefresh.value) {
+  if (autoRefresh.value && isAuthenticated.value) {
     refreshTimer = setInterval(() => {
       loadData(false)
     }, refreshInterval.value)
@@ -298,6 +489,7 @@ function clearSelection() {
 }
 
 async function loadAlertStats() {
+  if (!isAuthenticated.value) return
   try {
     alertStats.value = await fetchAlertStats()
   } catch (e) {
@@ -310,20 +502,52 @@ function setupAlertStatsTimer() {
     clearInterval(alertStatsTimer)
     alertStatsTimer = null
   }
-  alertStatsTimer = setInterval(() => {
-    loadAlertStats()
-  }, 30000)
+  if (isAuthenticated.value) {
+    alertStatsTimer = setInterval(() => {
+      loadAlertStats()
+    }, 30000)
+  }
 }
 
 watch(refreshInterval, () => {
   setupTimer()
 })
 
-onMounted(() => {
-  loadData(true)
-  setupTimer()
-  loadAlertStats()
-  setupAlertStatsTimer()
+watch(isAuthenticated, (val) => {
+  if (val) {
+    ensureValidView()
+    loadData(true)
+    setupTimer()
+    loadAlertStats()
+    setupAlertStatsTimer()
+  } else {
+    if (refreshTimer) {
+      clearInterval(refreshTimer)
+      refreshTimer = null
+    }
+    if (alertStatsTimer) {
+      clearInterval(alertStatsTimer)
+      alertStatsTimer = null
+    }
+  }
+})
+
+document.addEventListener('click', (e) => {
+  const target = e.target as HTMLElement
+  if (!target.closest('.user-section')) {
+    showUserMenu.value = false
+  }
+})
+
+onMounted(async () => {
+  await initAuth()
+  if (isAuthenticated.value) {
+    ensureValidView()
+    loadData(true)
+    setupTimer()
+    loadAlertStats()
+    setupAlertStatsTimer()
+  }
 })
 
 onBeforeUnmount(() => {
@@ -709,5 +933,224 @@ body {
   color: #475569;
   max-width: 220px;
   line-height: 1.6;
+}
+
+.user-section {
+  margin-left: 16px;
+  padding-left: 16px;
+  border-left: 1px solid rgba(59, 130, 246, 0.15);
+  position: relative;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.user-info:hover {
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.user-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.user-details {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.user-role {
+  font-size: 11px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.auth-method-tag {
+  padding: 1px 5px;
+  background: rgba(249, 115, 22, 0.15);
+  border: 1px solid rgba(249, 115, 22, 0.3);
+  border-radius: 4px;
+  font-size: 9px;
+  color: #fb923c;
+}
+
+.user-dropdown-icon {
+  color: #64748b;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.user-dropdown-icon.rotated {
+  transform: rotate(180deg);
+}
+
+.user-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 280px;
+  background: rgba(15, 23, 42, 0.98);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  z-index: 100;
+  backdrop-filter: blur(12px);
+}
+
+.dropdown-enter-active,
+.dropdown-leave-active {
+  transition: all 0.2s;
+}
+
+.dropdown-enter-from,
+.dropdown-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.user-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  background: rgba(30, 41, 59, 0.6);
+  border-bottom: 1px solid rgba(59, 130, 246, 0.1);
+}
+
+.user-menu-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 16px;
+  font-weight: 600;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.user-menu-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.user-menu-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.user-menu-username {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.user-menu-tenant {
+  font-size: 11px;
+  color: #3b82f6;
+  margin-top: 2px;
+}
+
+.user-menu-divider {
+  height: 1px;
+  background: rgba(59, 130, 246, 0.1);
+  margin: 0 16px;
+}
+
+.user-menu-permissions {
+  padding: 12px 16px;
+}
+
+.permissions-title {
+  font-size: 11px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 8px;
+}
+
+.permissions-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.permission-chip {
+  padding: 4px 10px;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #60a5fa;
+}
+
+.user-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+  font-size: 13px;
+}
+
+.user-menu-item:hover {
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.menu-logout {
+  color: #f87171;
+  border-top: 1px solid rgba(59, 130, 246, 0.1);
+}
+
+.menu-logout:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
 }
 </style>
