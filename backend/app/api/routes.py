@@ -28,7 +28,7 @@ from loguru import logger
 from app.api.auth import get_tenant_context, revoke_tenant_token
 
 from app.api.schemas import (
-    HealthResponse, ErrorResponse,
+    HealthResponse, HealthComponentStatus, ErrorResponse,
     BoltPredictionRequest, BoltPredictionResponse,
     FlangePredictionRequest, FlangePredictionResponse,
     RiskAssessmentRequest, RiskAssessmentResponse,
@@ -207,12 +207,32 @@ async def health_check():
     """
     健康检查接口
 
-    返回服务状态和版本信息。
+    返回服务状态和版本信息，以及各组件的详细健康状态。
     """
+    from app.services.health_check_service import get_health_check_service
+
+    health_service = get_health_check_service()
+    components = health_service.check_all()
+
+    # 判断整体状态
+    all_healthy = all(
+        comp.get('status') == 'healthy'
+        for comp in components.values()
+    )
+
+    # 构建组件状态
+    component_status = {}
+    for name, comp in components.items():
+        component_status[name] = HealthComponentStatus(
+            status=comp.get('status', 'unknown'),
+            message=comp.get('message')
+        )
+
     return HealthResponse(
-        status="healthy",
+        status="healthy" if all_healthy else "unhealthy",
         version=__version__,
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
+        components=component_status
     )
 
 

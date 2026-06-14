@@ -15,6 +15,7 @@
 - AuditService / ExplainabilityService: 合规审计与可解释性
 """
 
+import time
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 from loguru import logger
@@ -29,6 +30,8 @@ from app.services.prediction.rule_classifier import RuleBasedClassifier
 from app.services.prediction.warning_strategy import WarningStrategyPolicy
 from app.services.prediction.repository import PredictionRepository
 from app.core.model_version import version_manager
+from app.core.prometheus import metrics
+from app.middleware import set_bolt_id
 from app.utils.config import config
 
 _data_quality_engine = None
@@ -132,6 +135,9 @@ class PredictionOrchestrator:
         Returns:
             预测结果字典
         """
+        start_time = time.time()
+        set_bolt_id(str(bolt_id))
+        
         logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}")
 
         original_status_code = 0
@@ -364,7 +370,17 @@ class PredictionOrchestrator:
         except Exception as e:
             logger.warning(f"螺栓 {bolt_id} 告警评估异常: {e}")
 
-        logger.info(f"螺栓预测完成: {bolt_id} -> {final_status}")
+        # 记录预测指标
+        duration = time.time() - start_time
+        metrics.record_prediction(
+            node_type='bolt',
+            status_code=final_status_code,
+            status_label=final_status,
+            duration=duration,
+            model_type=model_type
+        )
+        
+        logger.info(f"螺栓预测完成: {bolt_id} -> {final_status}, 耗时: {duration*1000:.2f}ms")
         return result
 
     # ---------- 法兰面预测 ----------
@@ -388,6 +404,9 @@ class PredictionOrchestrator:
         Returns:
             预测结果字典
         """
+        start_time = time.time()
+        set_bolt_id(str(flange_id))
+        
         logger.info(f"开始法兰面预测: {flange_id}, 螺栓数: {len(multi_bolt_data)}")
 
         model_type = 'rule'
@@ -559,7 +578,17 @@ class PredictionOrchestrator:
         except Exception as e:
             logger.warning(f"法兰面 {flange_id} 告警评估异常: {e}")
 
-        logger.info(f"法兰面预测完成: {flange_id} -> {final_status}")
+        # 记录预测指标
+        duration = time.time() - start_time
+        metrics.record_prediction(
+            node_type='flange',
+            status_code=final_status_code,
+            status_label=final_status,
+            duration=duration,
+            model_type=model_type
+        )
+        
+        logger.info(f"法兰面预测完成: {flange_id} -> {final_status}, 耗时: {duration*1000:.2f}ms")
         return result
 
     # ---------- 风险评估（独立接口） ----------
@@ -640,6 +669,7 @@ class PredictionOrchestrator:
         Args:
             node_type: 'bolt' 或 'flange'
         """
+        task_type = f"batch_{node_type}"
         logger.info(f"开始批量预测: {node_type}")
         try:
             if node_type == 'bolt':
@@ -648,12 +678,21 @@ class PredictionOrchestrator:
                 self._batch_predict_flanges()
             else:
                 logger.error(f"未知节点类型: {node_type}")
+                metrics.record_prediction_task(task_type, success=False, error_type="unknown_node_type")
+                return
+            
+            # 记录任务成功
+            metrics.record_prediction_task(task_type, success=True)
         except Exception as e:
             logger.error(f"批量预测失败: {e}")
+            metrics.record_prediction_task(task_type, success=False, error_type=str(type(e).__name__))
 
     def _batch_predict_bolts(self) -> None:
         """批量预测所有螺栓"""
         bolt_data = self.repository.fetch_batch_bolt_data(per_bolt_limit=100)
+        
+        success_count = 0
+        fail_count = 0
 
         for bolt_id, data_dict in bolt_data.items():
             try:
@@ -663,14 +702,22 @@ class PredictionOrchestrator:
                     timestamps=data_dict['timestamps'],
                     save_to_db=True,
                 )
+                success_count += 1
             except Exception as e:
                 logger.error(f"螺栓 {bolt_id} 预测失败: {e}")
+                fail_count += 1
 
-        logger.info(f"批量螺栓预测完成，共 {len(bolt_data)} 个")
+        # 更新模型加载数
+        metrics.update_model_count('bolt_lstm', len(self.bolt_models))
+        
+        logger.info(f"批量螺栓预测完成，共 {len(bolt_data)} 个，成功 {success_count} 个，失败 {fail_count} 个")
 
     def _batch_predict_flanges(self) -> None:
         """批量预测所有法兰面"""
         flange_ids = self.repository.fetch_all_flange_ids()
+        
+        success_count = 0
+        fail_count = 0
 
         for flange_id in flange_ids:
             try:
@@ -685,10 +732,15 @@ class PredictionOrchestrator:
                     multi_bolt_data=multi_bolt_data,
                     save_to_db=True,
                 )
+                success_count += 1
             except Exception as e:
                 logger.error(f"法兰面 {flange_id} 预测失败: {e}")
+                fail_count += 1
+        
+        # 更新模型加载数
+        metrics.update_model_count('flange_attention', len(self.flange_models))
 
-        logger.info(f"批量法兰面预测完成，共 {len(flange_ids)} 个")
+        logger.info(f"批量法兰面预测完成，共 {len(flange_ids)} 个，成功 {success_count} 个，失败 {fail_count} 个")
 
     # ---------- 审计快照 ----------
 

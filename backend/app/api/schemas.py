@@ -17,11 +17,18 @@ from pydantic import BaseModel, Field, field_serializer
 
 # ==================== 基础模型 ====================
 
+class HealthComponentStatus(BaseModel):
+    """组件健康状态"""
+    status: str
+    message: Optional[str] = None
+
+
 class HealthResponse(BaseModel):
     """健康检查响应"""
     status: str = "healthy"
     version: str
     timestamp: datetime
+    components: Optional[Dict[str, HealthComponentStatus]] = None
 
 
 class ErrorResponse(BaseModel):

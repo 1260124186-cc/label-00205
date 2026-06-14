@@ -21,7 +21,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
@@ -34,36 +34,45 @@ from app.schedulers.scheduler import scheduler
 from app.utils.config import config
 from app.utils.database import db_manager
 from app.utils.device import get_all_device_info
+from app.middleware import RequestContextMiddleware, setup_structured_logging
+from app.core.prometheus import metrics
 
 
 def setup_logging() -> None:
     """
-    配置日志系统
+    配置日志系统（结构化日志）
     """
     log_config = config.get('logging', {})
     log_level = log_config.get('level', 'INFO')
-    log_format = log_config.get('format', '{time} - {name} - {level} - {message}')
     log_file = log_config.get('file', './logs/app.log')
     
     # 确保日志目录存在
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # 配置loguru
-    logger.remove()
-    logger.add(
-        sys.stderr,
-        format=log_format,
-        level=log_level
+    # 配置结构化日志
+    setup_structured_logging()
+    
+    # 添加文件处理器
+    log_format_file = (
+        "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
+        "{level: <8} | "
+        "{name}:{function}:{line} | "
+        "request_id={extra[request_id]} | "
+        "bolt_id={extra[bolt_id]} | "
+        "{message}"
     )
+    
     logger.add(
         log_file,
-        format=log_format,
+        format=log_format_file,
         level=log_level,
         rotation=log_config.get('max_size', 10485760),
         retention=log_config.get('backup_count', 5),
         encoding='utf-8'
     )
+    
+    logger.info(f"日志系统初始化完成，级别: {log_level}")
 
 
 @asynccontextmanager
@@ -139,6 +148,7 @@ def create_app() -> FastAPI:
 - **风险评估**: 评估螺栓/法兰面的风险等级
 - **月度预测**: 预测未来30天的状态趋势
 - **模型管理**: 训练和管理预测模型
+- **监控指标**: Prometheus 格式的 /metrics 端点
 
 ## 状态类别
 
@@ -153,10 +163,17 @@ def create_app() -> FastAPI:
 ## API使用
 
 所有预测接口都支持中文字段名和英文字段名。
+
+## 监控
+
+访问 `/metrics` 获取 Prometheus 格式的监控指标。
         """,
         version=__version__,
         lifespan=lifespan
     )
+    
+    # 请求上下文中间件（必须放在最前面）
+    app.add_middleware(RequestContextMiddleware)
     
     # CORS中间件
     app.add_middleware(
@@ -169,6 +186,26 @@ def create_app() -> FastAPI:
     
     # 注册路由
     app.include_router(router, prefix="/api/v1")
+    
+    # Prometheus metrics 端点
+    @app.get("/metrics", tags=["监控"])
+    async def get_metrics():
+        """
+        获取 Prometheus 格式的监控指标
+        
+        返回系统运行指标，包括：
+        - HTTP 请求数和延迟
+        - 预测请求数和延迟
+        - 预测结果分布
+        - GPU 利用率
+        - 模型加载数
+        - 任务成功率
+        """
+        metrics_text = metrics.generate_metrics_text()
+        return Response(
+            content=metrics_text,
+            media_type="text/plain; version=0.0.4; charset=utf-8"
+        )
     
     return app
 
