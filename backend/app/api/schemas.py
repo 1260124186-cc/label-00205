@@ -304,6 +304,281 @@ class ModelInfoResponse(BaseModel):
     last_training_time: Optional[datetime]
     training_samples: Optional[int]
     validation_accuracy: Optional[float]
+    version: Optional[str] = None
+    file_hash: Optional[str] = None
+    create_time: Optional[datetime] = None
+    training_session_id: Optional[str] = None
+    description: Optional[str] = None
+    validation_samples: Optional[int] = None
+    is_incremental: Optional[bool] = None
+    parent_version: Optional[str] = None
+    metrics: Optional[Dict[str, Any]] = None
+    version_history: Optional[List[Dict[str, Any]]] = None
+
+
+# ==================== 训练体系增强 ====================
+
+class EarlyStoppingConfig(BaseModel):
+    """早停配置"""
+    enabled: bool = Field(default=True, description="是否启用早停")
+    patience: int = Field(default=10, ge=1, description="耐心轮数，连续多少轮无提升则停止")
+    min_delta: float = Field(default=0.001, ge=0, description="最小改进阈值")
+    mode: str = Field(default="min", description="监控模式 min=损失最小化/max=准确率最大化")
+
+
+class LRSchedulerConfig(BaseModel):
+    """学习率调度器配置"""
+    type: str = Field(
+        default="none",
+        description="调度器类型: none/reduce_on_plateau/step/cosine"
+    )
+    factor: Optional[float] = Field(default=0.5, description="reduce_on_plateau衰减因子")
+    patience: Optional[int] = Field(default=5, description="reduce_on_plateau耐心轮数")
+    min_lr: Optional[float] = Field(default=1e-6, description="最小学习率")
+    step_size: Optional[int] = Field(default=20, description="step衰减步长（epoch数）")
+    gamma: Optional[float] = Field(default=0.5, description="step衰减因子")
+    t_max: Optional[int] = Field(default=None, description="cosine最大迭代轮数")
+    eta_min: Optional[float] = Field(default=1e-6, description="cosine最小学习率")
+
+
+class ClassImbalanceConfig(BaseModel):
+    """类别不平衡处理配置"""
+    strategy: str = Field(
+        default="weighted_loss",
+        description="不平衡处理策略: weighted_loss/oversampling/none"
+    )
+    oversampling_ratio: Optional[float] = Field(default=1.0, description="过采样倍率")
+
+
+class IncrementalTrainingConfig(BaseModel):
+    """增量训练配置"""
+    enabled: bool = Field(default=False, description="是否增量训练")
+    freeze_layers: Optional[List[str]] = Field(
+        default=None,
+        description="冻结的层名称列表，如 ['lstm1', 'lstm2']"
+    )
+    base_model_version: Optional[str] = Field(
+        default=None,
+        description="基础模型版本号，None则使用最新版本"
+    )
+
+
+class FocalLossConfig(BaseModel):
+    """Focal Loss配置"""
+    enabled: bool = Field(default=False, description="是否启用Focal Loss")
+    gamma: float = Field(default=2.0, description="聚焦参数gamma，难例加权系数")
+    alpha: Optional[List[float]] = Field(default=None, description="类别权重alpha列表")
+
+
+class TrainingConfigSchema(BaseModel):
+    """完整训练配置"""
+    epochs: Optional[int] = Field(default=None, description="总训练轮数")
+    batch_size: Optional[int] = Field(default=None, description="批次大小")
+    learning_rate: Optional[float] = Field(default=None, description="初始学习率")
+    validation_split: Optional[float] = Field(default=None, description="验证集比例")
+    early_stopping: Optional[EarlyStoppingConfig] = Field(default=None, description="早停配置")
+    lr_scheduler: Optional[LRSchedulerConfig] = Field(default=None, description="学习率调度配置")
+    class_imbalance: Optional[ClassImbalanceConfig] = Field(default=None, description="类别不平衡处理配置")
+    incremental: Optional[IncrementalTrainingConfig] = Field(default=None, description="增量训练配置")
+    focal_loss: Optional[FocalLossConfig] = Field(default=None, description="Focal Loss配置")
+
+
+class EnhancedTrainingRequest(BaseModel):
+    """增强版模型训练请求"""
+    model_type: str = Field(..., description="模型类型: bolt/flange")
+    node_id: Optional[str] = Field(None, description="节点ID，空则训练所有")
+    force_retrain: bool = Field(default=False, description="是否强制重新训练")
+    data_source: str = Field(default="db", description="数据来源: db/csv/manual")
+    is_incremental: bool = Field(default=False, description="是否增量训练")
+    base_model_version: Optional[str] = Field(default=None, description="增量训练的基础版本")
+    freeze_layers: Optional[List[str]] = Field(default=None, description="冻结的层名称")
+    training_config: Optional[TrainingConfigSchema] = Field(default=None, description="详细训练配置")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "model_type": "bolt",
+                "node_id": "B001",
+                "force_retrain": True,
+                "is_incremental": False,
+                "training_config": {
+                    "epochs": 100,
+                    "batch_size": 32,
+                    "learning_rate": 0.001,
+                    "early_stopping": {
+                        "enabled": True,
+                        "patience": 15,
+                        "min_delta": 0.0001,
+                        "mode": "min"
+                    },
+                    "lr_scheduler": {
+                        "type": "reduce_on_plateau",
+                        "factor": 0.5,
+                        "patience": 5,
+                        "min_lr": 0.000001
+                    },
+                    "class_imbalance": {
+                        "strategy": "weighted_loss"
+                    },
+                    "focal_loss": {
+                        "enabled": False,
+                        "gamma": 2.0
+                    }
+                }
+            }
+        }
+
+
+class EnhancedTrainingResponse(BaseModel):
+    """增强版模型训练响应"""
+    session_id: str = Field(..., description="训练会话ID，用于查询状态")
+    model_type: str
+    node_id: Optional[str]
+    status: str = Field(..., description="启动状态: started/error")
+    message: str = Field(..., description="描述信息")
+    is_incremental: bool = Field(default=False, description="是否增量训练")
+
+
+class TrainingProgressSchema(BaseModel):
+    """训练进度信息"""
+    phase: Optional[str] = Field(None, description="当前阶段")
+    current_epoch: Optional[int] = Field(None, description="当前epoch")
+    total_epochs: Optional[int] = Field(None, description="总epoch数")
+    current_loss: Optional[float] = Field(None, description="当前损失")
+    current_acc: Optional[float] = Field(None, description="当前准确率")
+    bolt_id: Optional[str] = Field(None, description="当前训练的螺栓ID")
+    flange_id: Optional[str] = Field(None, description="当前训练的法兰面ID")
+
+
+class TrainingStatusResponse(BaseModel):
+    """训练状态查询响应"""
+    session_id: str = Field(..., description="训练会话ID")
+    model_type: Optional[str] = Field(None, description="模型类型")
+    node_id: Optional[str] = Field(None, description="节点ID")
+    status: str = Field(..., description="状态: pending/running/completed/failed/not_found")
+    message: str = Field(..., description="状态描述")
+    start_time: Optional[datetime] = Field(None, description="开始时间")
+    end_time: Optional[datetime] = Field(None, description="结束时间")
+    is_incremental: Optional[bool] = Field(None, description="是否增量训练")
+    data_source: Optional[str] = Field(None, description="数据来源")
+    total_epochs: Optional[int] = Field(None, description="总epoch数")
+    current_epoch: Optional[int] = Field(None, description="当前epoch")
+    best_epoch: Optional[int] = Field(None, description="最佳epoch")
+    best_val_acc: Optional[float] = Field(None, description="最佳验证准确率")
+    best_val_loss: Optional[float] = Field(None, description="最佳验证损失")
+    final_train_acc: Optional[float] = Field(None, description="最终训练准确率")
+    final_train_loss: Optional[float] = Field(None, description="最终训练损失")
+    final_val_acc: Optional[float] = Field(None, description="最终验证准确率")
+    final_val_loss: Optional[float] = Field(None, description="最终验证损失")
+    precision: Optional[float] = Field(None, description="精确率")
+    recall: Optional[float] = Field(None, description="召回率")
+    f1_score: Optional[float] = Field(None, description="F1分数")
+    samples_count: Optional[int] = Field(None, description="训练样本数")
+    val_samples_count: Optional[int] = Field(None, description="验证样本数")
+    error_message: Optional[str] = Field(None, description="错误信息（失败时）")
+    progress: Optional[TrainingProgressSchema] = Field(None, description="训练进度（运行中时）")
+
+
+class TrainingSessionItemSchema(BaseModel):
+    """训练会话列表项"""
+    session_id: str = Field(..., description="训练会话ID")
+    model_type: Optional[str] = Field(None)
+    model_id: Optional[str] = Field(None, description="节点ID")
+    status: str = Field(..., description="状态")
+    start_time: Optional[datetime] = Field(None)
+    end_time: Optional[datetime] = Field(None)
+    best_val_acc: Optional[float] = Field(None)
+    f1_score: Optional[float] = Field(None)
+    samples_count: Optional[int] = Field(None)
+    error_message: Optional[str] = Field(None)
+
+
+class TrainingSessionListResponse(BaseModel):
+    """训练会话列表响应"""
+    total: int = Field(..., description="总数量")
+    items: List[TrainingSessionItemSchema] = Field(default_factory=list, description="会话列表")
+
+
+class LabelImportCSVRequest(BaseModel):
+    """CSV标注导入请求"""
+    csv_path: str = Field(..., description="CSV文件路径")
+    node_type: str = Field(..., description="节点类型: bolt/flange")
+    label_column: Optional[str] = Field(None, description="标签列名，自动检测")
+    id_column: Optional[str] = Field(None, description="节点ID列名，自动检测")
+    data_column: Optional[str] = Field(None, description="数据点列名")
+    timestamp_column: Optional[str] = Field(None, description="时间戳列名")
+    labeler_name: Optional[str] = Field(None, description="标注人姓名")
+    auto_approve: bool = Field(default=True, description="是否自动审核通过")
+    skip_errors: bool = Field(default=True, description="是否跳过错误行")
+
+
+class LabelImportDBRequest(BaseModel):
+    """数据库标注导入请求"""
+    source_table: str = Field(..., description="源表名")
+    node_type: str = Field(..., description="节点类型: bolt/flange")
+    id_field: str = Field(..., description="节点ID字段名")
+    label_field: str = Field(..., description="标签字段名")
+    data_field: Optional[str] = Field(None, description="数据点字段名")
+    timestamp_field: Optional[str] = Field(None, description="时间戳字段名")
+    where_clause: Optional[str] = Field(None, description="WHERE条件，不带WHERE关键字")
+    labeler_name: Optional[str] = Field(None, description="标注人姓名")
+    auto_approve: bool = Field(default=True, description="是否自动审核通过")
+
+
+class LabelImportResultSchema(BaseModel):
+    """标注导入结果"""
+    total: int = Field(0, description="总行数")
+    imported: int = Field(0, description="成功导入数")
+    skipped: int = Field(0, description="跳过数")
+    duplicates: int = Field(0, description="重复数")
+    errors: int = Field(0, description="错误数")
+    error_details: Optional[List[Dict[str, Any]]] = Field(default=None, description="错误详情")
+
+
+class LabelImportResponse(BaseModel):
+    """标注导入响应"""
+    status: str = Field(..., description="状态: success/error")
+    message: str = Field(..., description="描述信息")
+    result: Optional[LabelImportResultSchema] = Field(default=None, description="导入结果统计")
+
+
+class LabelImportFileItemSchema(BaseModel):
+    """可导入文件列表项"""
+    filename: str = Field(..., description="文件名")
+    path: str = Field(..., description="文件完整路径")
+    size_bytes: int = Field(0, description="文件大小（字节）")
+    modified_time: Optional[datetime] = Field(None, description="修改时间")
+
+
+class LabelImportFileListResponse(BaseModel):
+    """可导入文件列表响应"""
+    total: int = Field(..., description="文件数量")
+    items: List[LabelImportFileItemSchema] = Field(default_factory=list, description="文件列表")
+
+
+class ModelVersionSchema(BaseModel):
+    """模型版本信息"""
+    version: str = Field(..., description="版本号 vX.Y.Z")
+    create_time: datetime
+    is_active: bool = Field(default=False)
+    description: Optional[str] = None
+    file_path: Optional[str] = None
+    file_hash: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    training_samples: Optional[int] = None
+    validation_samples: Optional[int] = None
+    training_duration_seconds: Optional[float] = None
+    parent_version: Optional[str] = None
+    training_session_id: Optional[str] = None
+    metrics: Optional[Dict[str, Any]] = None
+
+
+class ModelVersionListResponse(BaseModel):
+    """模型版本列表响应"""
+    model_type: str
+    node_id: str
+    total: int = Field(..., description="版本数量")
+    items: List[ModelVersionSchema] = Field(default_factory=list, description="版本列表")
 
 
 # ==================== 策略配置 ====================

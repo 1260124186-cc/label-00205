@@ -22,13 +22,16 @@
 """
 
 import os
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, CosineAnnealingLR
 import numpy as np
 from typing import Optional, Tuple, List, Dict, Any
 from pathlib import Path
+from collections import Counter
 from loguru import logger
 
 from app.utils.config import config
@@ -245,11 +248,19 @@ class BoltLSTMModel:
         epochs: Optional[int] = None,
         batch_size: Optional[int] = None,
         learning_rate: Optional[float] = None,
-        class_weights: Optional[np.ndarray] = None
-    ) -> Dict[str, List[float]]:
+        class_weights: Optional[np.ndarray] = None,
+        training_config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
-        训练模型
-        
+        增强版训练方法
+
+        支持：
+        - 可配置早停机制（patience/min_delta/mode）
+        - 学习率调度（ReduceLROnPlateau/StepLR/CosineAnnealing）
+        - 类别不平衡处理（加权损失 + 过采样 WeightedRandomSampler）
+        - 增量训练（冻结指定层，fine-tune）
+        - 完整评估指标（精确率/召回率/F1/混淆矩阵）
+
         Args:
             train_data: 训练数据
             train_labels: 训练标签
@@ -258,123 +269,394 @@ class BoltLSTMModel:
             epochs: 训练轮数
             batch_size: 批次大小
             learning_rate: 学习率
-            class_weights: 类别权重，用于处理类别不平衡
-            
+            class_weights: 类别权重
+            training_config: 增强训练配置字典，包含：
+                - early_stopping: {enabled, patience, min_delta, mode}
+                - lr_scheduler: {type, ...params}
+                - class_imbalance: {strategy: weighted_loss/oversampling/none, oversampling_ratio}
+                - incremental: {enabled, freeze_layers: [layer_names]}
+                - focal_loss: {enabled, gamma, alpha}
+
         Returns:
-            Dict: 训练历史 {'train_loss': [...], 'val_loss': [...], 'train_acc': [...], 'val_acc': [...]}
+            Dict: 包含训练历史和完整评估指标
         """
+        if training_config is None:
+            training_config = {}
+
         epochs = epochs or self.training_config.get('epochs', 100)
         batch_size = batch_size or self.training_config.get('batch_size', 32)
         learning_rate = learning_rate or self.training_config.get('learning_rate', 0.001)
-        patience = self.training_config.get('early_stopping_patience', 10)
-        
-        # 准备数据
+
+        es_config = training_config.get('early_stopping', {})
+        es_enabled = es_config.get('enabled', True)
+        patience = es_config.get('patience', self.training_config.get('early_stopping_patience', 10))
+        min_delta = es_config.get('min_delta', 0.001)
+        es_mode = es_config.get('mode', 'min')
+
+        lr_config = training_config.get('lr_scheduler', {})
+        lr_scheduler_type = lr_config.get('type', self.training_config.get('lr_scheduler_type', 'none'))
+
+        ci_config = training_config.get('class_imbalance', {})
+        ci_strategy = ci_config.get('strategy', 'weighted_loss')
+        oversampling_ratio = ci_config.get('oversampling_ratio', 1.0)
+
+        inc_config = training_config.get('incremental', {})
+        inc_enabled = inc_config.get('enabled', False)
+        freeze_layers = inc_config.get('freeze_layers', [])
+
+        fl_config = training_config.get('focal_loss', {})
+        fl_enabled = fl_config.get('enabled', False)
+        fl_gamma = fl_config.get('gamma', 2.0)
+        fl_alpha = fl_config.get('alpha', None)
+
         sequence_length = self.model_config.get('sequence_length', 100)
         X_train, y_train = self.prepare_data(train_data, train_labels, sequence_length)
-        
+
         if val_data is not None and val_labels is not None:
             X_val, y_val = self.prepare_data(val_data, val_labels, sequence_length)
         else:
-            # 自动划分验证集
             val_split = self.training_config.get('validation_split', 0.2)
-            val_size = int(len(X_train) * val_split)
+            val_size = max(1, int(len(X_train) * val_split))
             X_val = X_train[-val_size:]
             y_val = y_train[-val_size:]
             X_train = X_train[:-val_size]
             y_train = y_train[:-val_size]
-        
-        # 创建数据加载器
+
+        if inc_enabled and freeze_layers:
+            self._freeze_layers(freeze_layers)
+            logger.info(f"增量训练模式: 冻结层 {freeze_layers}")
+
         train_dataset = TensorDataset(X_train, y_train)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        
-        # 损失函数（加权交叉熵）
-        if class_weights is not None:
+        sampler = None
+        shuffle = True
+
+        if ci_strategy == 'oversampling':
+            try:
+                label_counts = Counter(y_train.cpu().numpy())
+                num_samples = len(y_train)
+                weights = []
+                max_count = max(label_counts.values())
+                for lbl in y_train.cpu().numpy():
+                    weight = (max_count / label_counts[lbl]) * oversampling_ratio
+                    weights.append(weight)
+                sampler = WeightedRandomSampler(
+                    weights=torch.DoubleTensor(weights),
+                    num_samples=int(num_samples * oversampling_ratio),
+                    replacement=True
+                )
+                shuffle = False
+                logger.info(f"过采样模式: 原始样本数 {num_samples}, 采样后 {int(num_samples * oversampling_ratio)}")
+            except Exception as e:
+                logger.warning(f"过采样设置失败，回退到默认: {e}")
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            sampler=sampler
+        )
+
+        if fl_enabled:
+            criterion = self._create_focal_loss(fl_gamma, fl_alpha, class_weights)
+            logger.info(f"使用Focal Loss: gamma={fl_gamma}")
+        elif class_weights is not None and ci_strategy in ('weighted_loss', 'none'):
             weights = torch.FloatTensor(class_weights).to(self.device)
             criterion = nn.CrossEntropyLoss(weight=weights)
+            logger.info(f"使用加权交叉熵损失: 权重={class_weights.tolist()}")
         else:
             criterion = nn.CrossEntropyLoss()
-        
-        # 优化器
-        optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-        
-        # 早停机制
-        best_val_loss = float('inf')
+
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        optimizer = optim.Adam(trainable_params, lr=learning_rate)
+
+        scheduler = None
+        if lr_scheduler_type == 'reduce_on_plateau':
+            scheduler = ReduceLROnPlateau(
+                optimizer,
+                mode=es_mode,
+                factor=lr_config.get('factor', 0.5),
+                patience=lr_config.get('patience', 5),
+                min_lr=lr_config.get('min_lr', 1e-6)
+            )
+            logger.info(f"学习率调度: ReduceLROnPlateau")
+        elif lr_scheduler_type == 'step':
+            scheduler = StepLR(
+                optimizer,
+                step_size=lr_config.get('step_size', 20),
+                gamma=lr_config.get('gamma', 0.5)
+            )
+            logger.info(f"学习率调度: StepLR")
+        elif lr_scheduler_type == 'cosine':
+            scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=lr_config.get('t_max', epochs),
+                eta_min=lr_config.get('eta_min', 1e-6)
+            )
+            logger.info(f"学习率调度: CosineAnnealing")
+
+        best_value = float('inf') if es_mode == 'min' else float('-inf')
         patience_counter = 0
         best_model_state = None
-        
+        best_epoch = 0
+
         history = {
             'train_loss': [],
             'val_loss': [],
             'train_acc': [],
-            'val_acc': []
+            'val_acc': [],
+            'learning_rates': []
         }
-        
+
+        class_distribution = dict(Counter(y_train.cpu().numpy().tolist()))
+        val_class_distribution = dict(Counter(y_val.cpu().numpy().tolist()))
+        logger.info(f"训练集类别分布: {class_distribution}")
+        logger.info(f"验证集类别分布: {val_class_distribution}")
         logger.info(f"开始训练: epochs={epochs}, batch_size={batch_size}, lr={learning_rate}")
-        
+
         for epoch in range(epochs):
-            # 训练阶段
+            epoch_start = time.time()
             self.model.train()
             train_loss = 0.0
             train_correct = 0
             train_total = 0
-            
+
             for batch_X, batch_y in train_loader:
                 optimizer.zero_grad()
                 outputs = self.model(batch_X)
                 loss = criterion(outputs, batch_y)
                 loss.backward()
                 optimizer.step()
-                
+
                 train_loss += loss.item()
                 _, predicted = torch.max(outputs.data, 1)
                 train_total += batch_y.size(0)
                 train_correct += (predicted == batch_y).sum().item()
-            
-            avg_train_loss = train_loss / len(train_loader)
-            train_acc = train_correct / train_total
-            
-            # 验证阶段
+
+            avg_train_loss = train_loss / max(1, len(train_loader))
+            train_acc = train_correct / max(1, train_total)
+
             self.model.eval()
+            all_val_preds = []
+            all_val_labels = []
             with torch.no_grad():
                 val_outputs = self.model(X_val)
                 val_loss = criterion(val_outputs, y_val).item()
                 _, val_predicted = torch.max(val_outputs.data, 1)
-                val_acc = (val_predicted == y_val).sum().item() / len(y_val)
-            
+                val_acc = (val_predicted == y_val).sum().item() / max(1, len(y_val))
+                all_val_preds = val_predicted.cpu().numpy().tolist()
+                all_val_labels = y_val.cpu().numpy().tolist()
+
+            current_lr = optimizer.param_groups[0]['lr']
             history['train_loss'].append(avg_train_loss)
             history['val_loss'].append(val_loss)
             history['train_acc'].append(train_acc)
             history['val_acc'].append(val_acc)
-            
-            # 早停检查
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            history['learning_rates'].append(current_lr)
+
+            if scheduler is not None:
+                if lr_scheduler_type == 'reduce_on_plateau':
+                    scheduler.step(val_loss if es_mode == 'min' else val_acc)
+                else:
+                    scheduler.step()
+
+            monitor_value = val_loss if es_mode == 'min' else val_acc
+            if es_mode == 'min':
+                is_improved = monitor_value < (best_value - min_delta)
+            else:
+                is_improved = monitor_value > (best_value + min_delta)
+
+            if is_improved:
+                best_value = monitor_value
                 patience_counter = 0
-                best_model_state = self.model.state_dict().copy()
+                best_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+                best_epoch = epoch + 1
             else:
                 patience_counter += 1
-            
+
             if (epoch + 1) % 10 == 0:
+                epoch_duration = time.time() - epoch_start
                 logger.info(
                     f"Epoch {epoch+1}/{epochs}: "
                     f"train_loss={avg_train_loss:.4f}, train_acc={train_acc:.4f}, "
-                    f"val_loss={val_loss:.4f}, val_acc={val_acc:.4f}"
+                    f"val_loss={val_loss:.4f}, val_acc={val_acc:.4f}, "
+                    f"lr={current_lr:.6f}, time={epoch_duration:.1f}s"
                 )
-            
-            if patience_counter >= patience:
-                logger.info(f"早停触发于 epoch {epoch+1}")
+
+            if es_enabled and patience_counter >= patience:
+                logger.info(f"早停触发于 epoch {epoch+1}，最佳 epoch={best_epoch}")
                 break
-        
-        # 恢复最佳模型
+
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
-        
+
+        eval_metrics = self._evaluate_model(
+            X_val, y_val, all_val_preds, all_val_labels
+        )
+
         self.is_trained = True
         self.training_history = history
-        
-        logger.info(f"训练完成: 最佳验证损失={best_val_loss:.4f}")
-        
-        return history
+
+        logger.info(
+            f"训练完成: 最佳{es_mode}={best_value:.4f} (epoch {best_epoch}), "
+            f"F1={eval_metrics['f1_weighted']:.4f}"
+        )
+
+        return {
+            'history': history,
+            'evaluation': eval_metrics,
+            'best_epoch': best_epoch,
+            'best_value': best_value,
+            'class_distribution': {str(k): v for k, v in class_distribution.items()},
+            'val_class_distribution': {str(k): v for k, v in val_class_distribution.items()},
+            'config_used': {
+                'epochs': epochs,
+                'batch_size': batch_size,
+                'learning_rate': learning_rate,
+                'early_stopping': es_config if es_enabled else None,
+                'lr_scheduler': lr_config if lr_scheduler_type != 'none' else None,
+                'class_imbalance': ci_config,
+                'incremental': inc_config if inc_enabled else None,
+                'focal_loss': fl_config if fl_enabled else None,
+            }
+        }
+
+    def _freeze_layers(self, layer_names: List[str]) -> None:
+        """
+        冻结指定层的参数
+
+        Args:
+            layer_names: 要冻结的层名称列表
+        """
+        for name, param in self.model.named_parameters():
+            for freeze_name in layer_names:
+                if freeze_name in name:
+                    param.requires_grad = False
+                    logger.debug(f"冻结参数: {name}")
+                    break
+
+    def unfreeze_all(self) -> None:
+        """解冻所有层参数"""
+        for param in self.model.parameters():
+            param.requires_grad = True
+
+    def get_trainable_layer_names(self) -> List[str]:
+        """获取所有可训练的层名称"""
+        return [name for name, _ in self.model.named_parameters()]
+
+    def _create_focal_loss(
+        self,
+        gamma: float = 2.0,
+        alpha: Optional[List[float]] = None,
+        class_weights: Optional[np.ndarray] = None
+    ):
+        """
+        创建Focal Loss损失函数
+
+        Args:
+            gamma: 聚焦参数，难例加权系数
+            alpha: 类别权重
+            class_weights: 可选的类别权重
+
+        Returns:
+            可调用的Focal Loss函数
+        """
+        if alpha is None and class_weights is not None:
+            alpha = class_weights.tolist()
+
+        if alpha is not None:
+            alpha_tensor = torch.FloatTensor(alpha).to(self.device)
+        else:
+            alpha_tensor = None
+
+        def focal_loss(inputs, targets):
+            ce_loss = nn.CrossEntropyLoss(
+                weight=alpha_tensor, reduction='none'
+            )(inputs, targets)
+
+            pt = torch.exp(-ce_loss)
+            focal_loss_value = ((1 - pt) ** gamma) * ce_loss
+
+            return focal_loss_value.mean()
+
+        return focal_loss
+
+    def _evaluate_model(
+        self,
+        X_val: torch.Tensor,
+        y_val: torch.Tensor,
+        preds: List[int],
+        labels: List[int]
+    ) -> Dict[str, Any]:
+        """
+        计算完整评估指标
+
+        Args:
+            X_val: 验证数据
+            y_val: 验证标签
+            preds: 预测结果
+            labels: 真实标签
+
+        Returns:
+            Dict: 包含 precision/recall/f1/confusion_matrix 等指标
+        """
+        num_classes = self.model_config.get('output_classes', 5)
+        y_true = np.array(labels)
+        y_pred = np.array(preds)
+
+        confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
+        for t, p in zip(y_true, y_pred):
+            if 0 <= t < num_classes and 0 <= p < num_classes:
+                confusion_matrix[t][p] += 1
+
+        precision_per_class = []
+        recall_per_class = []
+        f1_per_class = []
+        support_per_class = []
+
+        for c in range(num_classes):
+            tp = confusion_matrix[c][c]
+            fp = confusion_matrix[:, c].sum() - tp
+
+            fn = confusion_matrix[c, :].sum() - tp
+
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            support = int(confusion_matrix[c, :].sum())
+
+            precision_per_class.append(float(precision))
+            recall_per_class.append(float(recall))
+            f1_per_class.append(float(f1))
+            support_per_class.append(support)
+
+        total_support = sum(support_per_class)
+        if total_support > 0:
+            precision_weighted = sum(
+                p * s for p, s in zip(precision_per_class, support_per_class)
+            ) / total_support
+            recall_weighted = sum(
+                r * s for r, s in zip(recall_per_class, support_per_class)
+            ) / total_support
+            f1_weighted = sum(
+                f * s for f, s in zip(f1_per_class, support_per_class)
+            ) / total_support
+        else:
+            precision_weighted = recall_weighted = f1_weighted = 0.0
+
+        accuracy = np.mean(y_true == y_pred) if len(y_true) > 0 else 0.0
+
+        return {
+            'accuracy': float(accuracy),
+            'precision_weighted': float(precision_weighted),
+            'recall_weighted': float(recall_weighted),
+            'f1_weighted': float(f1_weighted),
+            'precision_per_class': precision_per_class,
+            'recall_per_class': recall_per_class,
+            'f1_per_class': f1_per_class,
+            'support_per_class': support_per_class,
+            'confusion_matrix': confusion_matrix.tolist(),
+            'num_samples': int(len(y_true))
+        }
     
     def predict(
         self, 

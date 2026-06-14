@@ -1379,6 +1379,139 @@ class SchedulerLeader(Base):
     )
 
 
+class TrainingLog(Base):
+    """
+    训练日志表模型
+
+    对应数据库表: sc_training_logs
+    存储训练任务的完整日志：状态机、指标、配置等。
+    """
+    __tablename__ = 'sc_training_logs'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id = Column(String(100), unique=True, nullable=False, comment='训练会话ID')
+    model_id = Column(String(100), comment='模型标识（bolt_id或flange_id）')
+    model_type = Column(String(20), comment='模型类型 bolt/flange')
+    status = Column(String(20), default='pending', comment='状态 pending/running/completed/failed')
+    start_time = Column(DateTime, comment='开始时间')
+    end_time = Column(DateTime, comment='结束时间')
+    total_epochs = Column(Integer, comment='总epoch数')
+    current_epoch = Column(Integer, default=0, comment='当前epoch')
+    best_val_acc = Column(Float, comment='最佳验证准确率')
+    best_val_loss = Column(Float, comment='最佳验证损失')
+    best_epoch = Column(Integer, comment='最佳epoch')
+    final_train_acc = Column(Float, comment='最终训练准确率')
+    final_train_loss = Column(Float, comment='最终训练损失')
+    final_val_acc = Column(Float, comment='最终验证准确率')
+    final_val_loss = Column(Float, comment='最终验证损失')
+    precision = Column(Float, comment='精确率')
+    recall = Column(Float, comment='召回率')
+    f1_score = Column(Float, comment='F1分数')
+    confusion_matrix = Column(Text, comment='混淆矩阵 JSON')
+    class_distribution = Column(Text, comment='类别分布 JSON')
+    samples_count = Column(Integer, comment='训练样本数')
+    val_samples_count = Column(Integer, comment='验证样本数')
+    config = Column(Text, comment='训练配置 JSON')
+    metrics_history = Column(Text, comment='逐epoch指标历史 JSON')
+    error_message = Column(Text, comment='错误信息')
+    error_stack = Column(Text, comment='错误栈追踪')
+    data_source = Column(String(50), comment='数据来源 csv/db/manual')
+    is_incremental = Column(Boolean, default=False, comment='是否增量训练')
+    base_model_version = Column(String(50), comment='基础模型版本号（增量训练用）')
+    freeze_layers = Column(Text, comment='冻结的层名称列表 JSON')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_session_id', 'session_id', unique=True),
+        Index('idx_model', 'model_type', 'model_id'),
+        Index('idx_status', 'status'),
+        Index('idx_start_time', 'start_time'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class ModelVersionORM(Base):
+    """
+    模型版本表模型
+
+    对应数据库表: sc_model_versions
+    存储模型版本信息和评估指标。
+    """
+    __tablename__ = 'sc_model_versions'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    model_id = Column(String(100), nullable=False, comment='模型标识')
+    model_type = Column(String(20), nullable=False, comment='模型类型 bolt/flange')
+    version = Column(String(20), nullable=False, comment='版本号 vX.Y.Z')
+    file_path = Column(String(500), comment='模型文件路径')
+    file_hash = Column(String(64), comment='文件MD5哈希')
+    file_size_bytes = Column(BigInteger, comment='文件大小（字节）')
+    metrics = Column(Text, comment='训练和验证指标 JSON')
+    config = Column(Text, comment='训练配置 JSON')
+    is_active = Column(Boolean, default=False, comment='是否为当前活动版本')
+    description = Column(String(500), comment='版本描述')
+    training_session_id = Column(String(100), comment='关联的训练会话ID')
+    parent_version = Column(String(20), comment='父版本号（增量训练用）')
+    training_samples = Column(Integer, comment='训练样本数')
+    validation_samples = Column(Integer, comment='验证样本数')
+    training_duration_seconds = Column(Float, comment='训练时长（秒）')
+    architecture_summary = Column(Text, comment='模型架构摘要 JSON')
+    freeze_layers = Column(Text, comment='冻结层列表 JSON（增量训练）')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_model_version', 'model_id', 'version', unique=True),
+        Index('idx_model_type', 'model_type'),
+        Index('idx_active', 'is_active'),
+        Index('idx_create_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class ManualLabelData(Base):
+    """
+    人工标注数据表模型
+
+    对应数据库表: sc_manual_label_data
+    存储人工导入的标注数据，用于覆盖自动生成的规则标签。
+    """
+    __tablename__ = 'sc_manual_label_data'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    node_id = Column(String(100), nullable=False, comment='节点ID（bolt_id或flange_id）')
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    data_hash = Column(String(64), comment='数据内容哈希（用于去重）')
+    label = Column(Integer, nullable=False, comment='人工标注标签 0-4')
+    label_source = Column(String(50), comment='标签来源 csv/db/manual_import')
+    label_confidence = Column(Float, default=1.0, comment='标注置信度 0-1')
+    data_points = Column(Text, comment='对应的数据点/时序数据 JSON')
+    data_timestamp = Column(DateTime, comment='数据时间戳')
+    label_time = Column(DateTime, default=datetime.now, comment='标注时间')
+    labeler_id = Column(String(50), comment='标注人ID')
+    labeler_name = Column(String(100), comment='标注人姓名')
+    review_status = Column(String(20), default='pending', comment='审核状态 pending/approved/rejected')
+    reviewer_id = Column(String(50), comment='审核人ID')
+    review_time = Column(DateTime, comment='审核时间')
+    notes = Column(Text, comment='备注')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_node_label', 'node_type', 'node_id'),
+        Index('idx_label_source', 'label_source'),
+        Index('idx_review_status', 'review_status'),
+        Index('idx_data_hash', 'data_hash'),
+        Index('idx_label_time', 'label_time'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类

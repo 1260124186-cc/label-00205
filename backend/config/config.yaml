@@ -47,7 +47,21 @@ model:
     learning_rate: 0.001
     early_stopping_patience: 10
     validation_split: 0.2
-    
+    lr_scheduler_type: "none"          # none / reduce_on_plateau / step / cosine
+    class_imbalance:
+      strategy: "weighted_loss"        # none / weighted_loss / oversampling
+      oversampling_ratio: 1.0
+    focal_loss:
+      enabled: false
+      gamma: 2.0
+    early_stopping:
+      enabled: true
+      min_delta: 0.001
+      mode: "min"                      # min (损失) / max (准确率)
+    incremental:
+      enabled: false
+      freeze_layers: []                # 如 ["lstm1", "lstm2"]
+
   # 模型保存路径
   save_path: "./trained_models"
 
@@ -172,6 +186,13 @@ llm:
 model_version:
   max_versions: 10            # 每个模型最大保留版本数
   auto_cleanup: true          # 是否自动清理旧版本
+
+# 人工标注数据导入配置
+label_import:
+  import_dir: "./data/label_imports"   # 待导入CSV文件目录
+  auto_review: false                    # 是否自动审核通过（否则需要人工审核）
+  default_confidence: 0.95             # 默认标注置信度
+  sequence_tolerance: 3                # 序列匹配容差（用于覆盖规则标签）
 
 # ============================================================
 # 联邦学习配置

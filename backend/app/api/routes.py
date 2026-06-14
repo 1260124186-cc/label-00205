@@ -116,6 +116,13 @@ from app.api.schemas import (
     ModelVersionListResponse, ModelVersionActivateRequest,
     ModelVersionCompareRequest, ModelVersionCompareResponse,
     TrainingSessionListResponse, TrainingStatusResponse,
+    EarlyStoppingConfig, LRSchedulerConfig, ClassImbalanceConfig,
+    IncrementalTrainingConfig, FocalLossConfig, TrainingConfigSchema,
+    EnhancedTrainingRequest, EnhancedTrainingResponse,
+    TrainingProgressSchema,
+    LabelImportCSVRequest, LabelImportDBRequest,
+    LabelImportResultSchema, LabelImportResponse,
+    LabelImportFileItemSchema, LabelImportFileListResponse,
     WarningStrategyConfigSchema, ThresholdConfigSchema,
     ScheduledJobSchema, SchedulerJobUpdateRequest,
     SchedulerTriggerRequest, ConfigCenterResponse,
@@ -575,7 +582,7 @@ async def get_model_info(model_type: str, node_id: str):
     """
     获取指定模型的信息
 
-    包括训练状态、最后训练时间、验证准确率等。
+    包括训练状态、最后训练时间、验证准确率、版本信息等。
     """
     try:
         service = get_training_service()
@@ -588,11 +595,414 @@ async def get_model_info(model_type: str, node_id: str):
             is_trained=info['is_trained'],
             last_training_time=info.get('last_training_time'),
             training_samples=info.get('training_samples'),
-            validation_accuracy=info.get('validation_accuracy')
+            validation_accuracy=info.get('validation_accuracy'),
+            version=info.get('version'),
+            file_hash=info.get('file_hash'),
+            create_time=info.get('create_time'),
+            training_session_id=info.get('training_session_id'),
+            description=info.get('description'),
+            validation_samples=info.get('validation_samples'),
+            is_incremental=info.get('is_incremental'),
+            parent_version=info.get('parent_version'),
+            metrics=info.get('metrics'),
+            version_history=info.get('version_history')
         )
 
     except Exception as e:
         logger.error(f"获取模型信息失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/model/train/enhanced",
+    response_model=EnhancedTrainingResponse,
+    tags=["模型管理"],
+    summary="增强版训练模型（增量训练/学习率调度/类不平衡等）"
+)
+async def train_model_enhanced(
+    request: EnhancedTrainingRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    增强版训练接口
+
+    支持：
+    - 增量训练（冻结部分层 + 新数据 fine-tune）
+    - 可配置早停机制
+    - 可配置学习率调度（ReduceLROnPlateau/StepLR/Cosine）
+    - 类别不平衡处理（加权损失/过采样）
+    - Focal Loss
+    - 人工标注数据覆盖
+
+    训练任务在后台执行，通过 session_id 查询进度和结果。
+    """
+    try:
+        service = get_training_service()
+
+        training_config = None
+        if request.training_config:
+            training_config = request.training_config.model_dump(exclude_none=True)
+
+        session_id = service.start_training(
+            model_type=request.model_type,
+            node_id=request.node_id,
+            force_retrain=request.force_retrain,
+            training_config=training_config,
+            data_source=request.data_source,
+            is_incremental=request.is_incremental,
+            base_model_version=request.base_model_version,
+            freeze_layers=request.freeze_layers
+        )
+
+        background_tasks.add_task(
+            service.execute_training,
+            session_id=session_id
+        )
+
+        return EnhancedTrainingResponse(
+            session_id=session_id,
+            model_type=request.model_type,
+            node_id=request.node_id,
+            status="started",
+            message=(
+                f"训练任务已启动（{'增量训练' if request.is_incremental else '完整训练'}），"
+                f"请使用 session_id={session_id} 查询状态"
+            ),
+            is_incremental=request.is_incremental
+        )
+
+    except Exception as e:
+        logger.error(f"启动增强训练失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model/train/status/{session_id}",
+    response_model=TrainingStatusResponse,
+    tags=["模型管理"],
+    summary="查询训练状态"
+)
+async def get_training_status_endpoint(session_id: str):
+    """
+    根据 session_id 查询训练任务的状态和进度
+
+    状态: pending → running → completed/failed
+    """
+    try:
+        service = get_training_service()
+        status_info = service.get_training_status(session_id)
+
+        progress = None
+        if 'progress' in status_info and status_info['progress']:
+            prog = status_info['progress']
+            progress = TrainingProgressSchema(
+                phase=prog.get('phase'),
+                current_epoch=prog.get('current_epoch'),
+                total_epochs=prog.get('total_epochs'),
+                current_loss=prog.get('current_loss'),
+                current_acc=prog.get('current_acc'),
+                bolt_id=prog.get('bolt_id'),
+                flange_id=prog.get('flange_id')
+            )
+
+        return TrainingStatusResponse(
+            session_id=session_id,
+            model_type=status_info.get('model_type'),
+            node_id=status_info.get('node_id'),
+            status=status_info.get('status', 'unknown'),
+            message=status_info.get('message', '未知状态'),
+            start_time=status_info.get('start_time'),
+            end_time=status_info.get('end_time'),
+            is_incremental=status_info.get('is_incremental'),
+            data_source=status_info.get('data_source'),
+            total_epochs=status_info.get('total_epochs'),
+            current_epoch=status_info.get('current_epoch'),
+            best_epoch=status_info.get('best_epoch'),
+            best_val_acc=status_info.get('best_val_acc'),
+            best_val_loss=status_info.get('best_val_loss'),
+            final_train_acc=status_info.get('final_train_acc'),
+            final_train_loss=status_info.get('final_train_loss'),
+            final_val_acc=status_info.get('final_val_acc'),
+            final_val_loss=status_info.get('final_val_loss'),
+            precision=status_info.get('precision'),
+            recall=status_info.get('recall'),
+            f1_score=status_info.get('f1_score'),
+            samples_count=status_info.get('samples_count'),
+            val_samples_count=status_info.get('val_samples_count'),
+            error_message=status_info.get('error_message'),
+            progress=progress
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询训练状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model/train/sessions",
+    response_model=TrainingSessionListResponse,
+    tags=["模型管理"],
+    summary="列出训练会话历史"
+)
+async def list_training_sessions(
+    model_type: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=500, description="返回数量限制")
+):
+    """
+    列出训练会话记录
+
+    可按模型类型和状态过滤，默认返回最近50条。
+    """
+    try:
+        service = get_training_service()
+        sessions = service.list_training_sessions(
+            model_type=model_type,
+            status=status,
+            limit=limit
+        )
+
+        items = [
+            TrainingSessionItemSchema(
+                session_id=s['session_id'],
+                model_type=s.get('model_type'),
+                model_id=s.get('model_id'),
+                status=s.get('status', 'unknown'),
+                start_time=s.get('start_time'),
+                end_time=s.get('end_time'),
+                best_val_acc=s.get('best_val_acc'),
+                f1_score=s.get('f1_score'),
+                samples_count=s.get('samples_count'),
+                error_message=s.get('error_message')
+            )
+            for s in sessions
+        ]
+
+        return TrainingSessionListResponse(
+            total=len(items),
+            items=items
+        )
+
+    except Exception as e:
+        logger.error(f"列出训练会话失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model/versions/{model_type}/{node_id}",
+    response_model=ModelVersionListResponse,
+    tags=["模型管理"],
+    summary="列出模型版本历史"
+)
+async def list_model_versions(model_type: str, node_id: str):
+    """
+    列出指定模型的所有版本
+
+    包括版本号、创建时间、训练指标、是否活动版本等。
+    """
+    try:
+        from app.utils.database import get_db, ModelVersionORM
+        import json
+
+        items = []
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=503, detail="数据库不可用")
+
+            versions = db.query(ModelVersionORM).filter(
+                ModelVersionORM.model_id == node_id,
+                ModelVersionORM.model_type == model_type
+            ).order_by(
+                ModelVersionORM.create_time.desc()
+            ).limit(50).all()
+
+            for v in versions:
+                metrics = None
+                if v.metrics:
+                    try:
+                        metrics = json.loads(v.metrics)
+                    except Exception:
+                        pass
+
+                items.append(ModelVersionSchema(
+                    version=v.version,
+                    create_time=v.create_time,
+                    is_active=v.is_active or False,
+                    description=v.description,
+                    file_path=v.file_path,
+                    file_hash=v.file_hash,
+                    file_size_bytes=v.file_size_bytes,
+                    training_samples=v.training_samples,
+                    validation_samples=v.validation_samples,
+                    training_duration_seconds=v.training_duration_seconds,
+                    parent_version=v.parent_version,
+                    training_session_id=v.training_session_id,
+                    metrics=metrics
+                ))
+
+        return ModelVersionListResponse(
+            model_type=model_type,
+            node_id=node_id,
+            total=len(items),
+            items=items
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"列出模型版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 人工标注数据导入 ====================
+
+@router.get(
+    "/model/label/import/files",
+    response_model=LabelImportFileListResponse,
+    tags=["模型管理"],
+    summary="列出可导入的标注CSV文件"
+)
+async def list_import_files():
+    """
+    列出导入目录中所有可导入的CSV文件
+    """
+    try:
+        from app.services.label_import import label_import_service
+        files = label_import_service.list_import_files()
+
+        items = [
+            LabelImportFileItemSchema(
+                filename=f['filename'],
+                path=f['path'],
+                size_bytes=f['size_bytes'],
+                modified_time=f['modified_time']
+            )
+            for f in files
+        ]
+
+        return LabelImportFileListResponse(
+            total=len(items),
+            items=items
+        )
+
+    except Exception as e:
+        logger.error(f"列出可导入文件失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/model/label/import/csv",
+    response_model=LabelImportResponse,
+    tags=["模型管理"],
+    summary="从CSV导入人工标注数据"
+)
+async def import_labels_from_csv(request: LabelImportCSVRequest):
+    """
+    从CSV文件导入人工标注数据
+
+    人工标注数据的标签优先级高于系统自动生成的规则标签。
+
+    CSV要求:
+    - 节点ID列（如 bolt_id、传感器id 等，自动检测）
+    - 标签列（数字 0-4 或中文标签名: 正常/关注级预警/检查级预警/紧急级预警/故障）
+    - 可选: 数据点列、时间戳列、标注人列
+    """
+    try:
+        from app.services.label_import import label_import_service
+
+        result = label_import_service.import_from_csv(
+            csv_path=request.csv_path,
+            node_type=request.node_type,
+            label_column=request.label_column,
+            id_column=request.id_column,
+            data_column=request.data_column,
+            timestamp_column=request.timestamp_column,
+            labeler_name=request.labeler_name,
+            auto_approve=request.auto_approve,
+            skip_errors=request.skip_errors
+        )
+
+        return LabelImportResponse(
+            status="success",
+            message=(
+                f"CSV标注导入完成: 成功{result.imported}条, "
+                f"重复{result.duplicates}条, 错误{result.errors}条"
+            ),
+            result=LabelImportResultSchema(
+                total=result.total,
+                imported=result.imported,
+                skipped=result.skipped,
+                duplicates=result.duplicates,
+                errors=result.errors,
+                error_details=result.error_details if result.error_details else None
+            )
+        )
+
+    except FileNotFoundError as e:
+        logger.warning(f"CSV导入失败 - 文件不存在: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        logger.warning(f"CSV导入失败 - 参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"CSV标注导入失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/model/label/import/db",
+    response_model=LabelImportResponse,
+    tags=["模型管理"],
+    summary="从数据库表导入人工标注数据"
+)
+async def import_labels_from_db(request: LabelImportDBRequest):
+    """
+    从现有数据库表导入人工标注数据
+
+    指定源表名、ID字段和标签字段，可带WHERE条件。
+    导入的标注会覆盖规则标签。
+    """
+    try:
+        from app.services.label_import import label_import_service
+
+        result = label_import_service.import_from_db(
+            source_table=request.source_table,
+            node_type=request.node_type,
+            id_field=request.id_field,
+            label_field=request.label_field,
+            data_field=request.data_field,
+            timestamp_field=request.timestamp_field,
+            where_clause=request.where_clause,
+            labeler_name=request.labeler_name,
+            auto_approve=request.auto_approve
+        )
+
+        return LabelImportResponse(
+            status="success",
+            message=(
+                f"数据库标注导入完成: 成功{result.imported}条, "
+                f"重复{result.duplicates}条, 错误{result.errors}条"
+            ),
+            result=LabelImportResultSchema(
+                total=result.total,
+                imported=result.imported,
+                skipped=result.skipped,
+                duplicates=result.duplicates,
+                errors=result.errors,
+                error_details=result.error_details if result.error_details else None
+            )
+        )
+
+    except ConnectionError as e:
+        logger.warning(f"DB导入失败 - 连接错误: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        logger.warning(f"DB导入失败 - 参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"DB标注导入失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
