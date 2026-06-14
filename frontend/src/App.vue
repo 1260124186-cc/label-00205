@@ -16,11 +16,37 @@
       </div>
 
       <div class="header-center">
-        <div class="realtime-status" :class="{ active: autoRefresh }">
+        <nav class="nav-tabs">
+          <button
+            class="nav-tab"
+            :class="{ active: currentView === 'monitoring' }"
+            @click="currentView = 'monitoring'"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polygon points="10 8 16 12 10 16 10 8"></polygon>
+            </svg>
+            监控视图
+          </button>
+          <button
+            class="nav-tab"
+            :class="{ active: currentView === 'alert' }"
+            @click="currentView = 'alert'"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+            预警中心
+            <span v-if="alertStats.pending > 0" class="alert-badge">{{ alertStats.pending }}</span>
+          </button>
+        </nav>
+        <div class="realtime-status" :class="{ active: autoRefresh }" v-if="currentView === 'monitoring'">
           <span class="status-dot"></span>
           {{ autoRefresh ? '实时监控中' : '已暂停' }}
         </div>
-        <div class="update-info" v-if="topologyData">
+        <div class="update-info" v-if="topologyData && currentView === 'monitoring'">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"></circle>
             <polyline points="12 6 12 12 16 14"></polyline>
@@ -30,7 +56,7 @@
       </div>
 
       <div class="header-right">
-        <div class="refresh-controls">
+        <div class="refresh-controls" v-if="currentView === 'monitoring'">
           <select v-model.number="refreshInterval" class="interval-select" :disabled="!autoRefresh">
             <option :value="3000">3秒</option>
             <option :value="5000">5秒</option>
@@ -62,53 +88,57 @@
     </header>
 
     <main class="app-main">
-      <aside class="sidebar-left">
-        <FilterPanel
-          v-model="filters"
-          :collector-options="collectorOptions"
-          :position-options="positionOptions"
-          @collector-change="onCollectorChange"
-        />
-        <div class="sidebar-spacer"></div>
-        <StatsPanel v-if="topologyData" :stats="topologyData.stats" />
-      </aside>
+      <template v-if="currentView === 'monitoring'">
+        <aside class="sidebar-left">
+          <FilterPanel
+            v-model="filters"
+            :collector-options="collectorOptions"
+            :position-options="positionOptions"
+            @collector-change="onCollectorChange"
+          />
+          <div class="sidebar-spacer"></div>
+          <StatsPanel v-if="topologyData" :stats="topologyData.stats" />
+        </aside>
 
-      <section class="main-content">
-        <FlangeTopology
-          v-if="topologyData"
-          :flanges="topologyData.flanges"
-          :bolts="topologyData.bolts"
-          :collectors="topologyData.collectors"
-          :filters="filters"
-          @select-flange="onSelectFlange"
-          @select-bolt="onSelectBolt"
-        />
-        <div v-else class="loading-state">
-          <div class="loading-spinner"></div>
-          <div class="loading-text">正在加载监控数据...</div>
-        </div>
-      </section>
+        <section class="main-content">
+          <FlangeTopology
+            v-if="topologyData"
+            :flanges="topologyData.flanges"
+            :bolts="topologyData.bolts"
+            :collectors="topologyData.collectors"
+            :filters="filters"
+            @select-flange="onSelectFlange"
+            @select-bolt="onSelectBolt"
+          />
+          <div v-else class="loading-state">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">正在加载监控数据...</div>
+          </div>
+        </section>
 
-      <aside class="sidebar-right">
-        <DetailPanel
-          v-if="selectedBolt || selectedFlange"
-          :selected-bolt="selectedBolt"
-          :selected-flange="selectedFlange"
-          :bolts="topologyData?.bolts || []"
-          :collectors="topologyData?.collectors || []"
-          @close="clearSelection"
-          @select-bolt="onSelectBoltFromDetail"
-        />
-        <div v-else class="empty-detail">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <circle cx="12" cy="12" r="10"></circle>
-            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-            <line x1="12" y1="17" x2="12.01" y2="17"></line>
-          </svg>
-          <div class="empty-title">选择节点查看详情</div>
-          <div class="empty-desc">点击拓扑图中的法兰面或螺栓查看详细信息</div>
-        </div>
-      </aside>
+        <aside class="sidebar-right">
+          <DetailPanel
+            v-if="selectedBolt || selectedFlange"
+            :selected-bolt="selectedBolt"
+            :selected-flange="selectedFlange"
+            :bolts="topologyData?.bolts || []"
+            :collectors="topologyData?.collectors || []"
+            @close="clearSelection"
+            @select-bolt="onSelectBoltFromDetail"
+          />
+          <div v-else class="empty-detail">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="10"></circle>
+              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+            <div class="empty-title">选择节点查看详情</div>
+            <div class="empty-desc">点击拓扑图中的法兰面或螺栓查看详细信息</div>
+          </div>
+        </aside>
+      </template>
+
+      <AlertCenter v-else />
     </main>
   </div>
 </template>
@@ -119,14 +149,28 @@ import FilterPanel from '@/components/FilterPanel.vue'
 import StatsPanel from '@/components/StatsPanel.vue'
 import FlangeTopology from '@/components/FlangeTopology.vue'
 import DetailPanel from '@/components/DetailPanel.vue'
+import AlertCenter from '@/components/AlertCenter.vue'
 import { fetchTopology, fetchCollectors, fetchPositions } from '@/api/monitoring'
+import { fetchAlertStats } from '@/api/alert'
 import { StatusCode } from '@/types'
 import type { TopologyData, FilterOptions, Flange, Bolt } from '@/types'
+
+const currentView = ref<'monitoring' | 'alert'>('monitoring')
 
 const topologyData = ref<TopologyData | null>(null)
 const autoRefresh = ref(true)
 const refreshInterval = ref(5000)
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+
+const alertStats = ref({
+  total: 0,
+  pending: 0,
+  processing: 0,
+  resolved: 0,
+  byLevel: {} as Record<number, number>
+})
+
+let alertStatsTimer: ReturnType<typeof setInterval> | null = null
 
 const filters = ref<FilterOptions>({
   collector_id: null,
@@ -208,6 +252,24 @@ function clearSelection() {
   selectedFlange.value = null
 }
 
+async function loadAlertStats() {
+  try {
+    alertStats.value = await fetchAlertStats()
+  } catch (e) {
+    console.error('加载预警统计失败:', e)
+  }
+}
+
+function setupAlertStatsTimer() {
+  if (alertStatsTimer) {
+    clearInterval(alertStatsTimer)
+    alertStatsTimer = null
+  }
+  alertStatsTimer = setInterval(() => {
+    loadAlertStats()
+  }, 30000)
+}
+
 watch(refreshInterval, () => {
   setupTimer()
 })
@@ -215,11 +277,16 @@ watch(refreshInterval, () => {
 onMounted(() => {
   loadData(true)
   setupTimer()
+  loadAlertStats()
+  setupAlertStatsTimer()
 })
 
 onBeforeUnmount(() => {
   if (refreshTimer) {
     clearInterval(refreshTimer)
+  }
+  if (alertStatsTimer) {
+    clearInterval(alertStatsTimer)
   }
 })
 </script>
@@ -319,6 +386,60 @@ body {
   display: flex;
   align-items: center;
   gap: 20px;
+}
+
+.nav-tabs {
+  display: flex;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.nav-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+
+.nav-tab:hover {
+  color: #cbd5e1;
+  background: rgba(71, 85, 105, 0.4);
+}
+
+.nav-tab.active {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: white;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
+}
+
+.alert-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: #ef4444;
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: translate(50%, -30%);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
 }
 
 .realtime-status {

@@ -304,3 +304,102 @@ export function refreshMockStatus(data: TopologyData): TopologyData {
 
   return data
 }
+
+// ==================== 预警 Mock 数据 ====================
+
+import type { AlertEvent, AlertStatus, AlertLevel, AlertStrategy } from '@/types'
+
+const alertTitles = [
+  '螺栓预紧力异常下降',
+  '法兰面密封泄漏预警',
+  '预紧力波动异常',
+  '螺栓松动风险预警',
+  '密封性能下降',
+  '预紧力超出安全阈值预警',
+  '法兰面应力不均',
+  '螺栓疲劳损伤预警'
+]
+
+const alertContents = [
+  '检测到预紧力持续下降，已低于正常范围，建议尽快检查。',
+  '法兰面螺栓预紧力分布不均，存在泄漏风险。',
+  '近期预紧力波动较大，可能存在外部干扰或松动。',
+  '基于趋势分析显示螺栓存在松动趋势，风险等级升高。',
+  '密封性能指标下降，需关注密封状态。',
+  '预紧力已接近安全阈值，需及时处理。',
+  '法兰面各螺栓应力分布不均匀，建议复核。',
+  '基于历史数据分析，螺栓存在疲劳损伤风险。'
+]
+
+function randomAlert(): AlertStatus {
+  const r = Math.random()
+  if (r < 0.4) return 'pending'
+  if (r < 0.7) return 'processing'
+  if (r < 0.9) return 'resolved'
+  return 'ignored'
+}
+
+function randomLevel(): AlertLevel {
+  const r = Math.random()
+  if (r < 0.35) return 1
+  if (r < 0.65) return 2
+  if (r < 0.9) return 3
+  return 4
+}
+
+function randomStrategy(): AlertStrategy {
+  return Math.random() < 0.6 ? 1 : 2
+}
+
+function randomNodeType(): 'bolt' | 'flange' {
+  return Math.random() < 0.7 ? 'bolt' : 'flange'
+}
+
+export function generateMockAlerts(count = 30): AlertEvent[] {
+  const alerts: AlertEvent[] = []
+  const now = Date.now()
+
+  for (let i = 0; i < count; i++) {
+    const level = randomLevel()
+    const status = randomAlert()
+    const nodeType = randomNodeType()
+    const strategy = randomStrategy()
+    const createTime = new Date(now - Math.random() * 7 * 24 * 60 * 60 * 1000)
+    const titleIdx = Math.floor(Math.random() * alertTitles.length)
+
+    const alert: AlertEvent = {
+      id: i + 1,
+      alert_no: `ALT${String(10000 + i)}`,
+      rule_id: Math.floor(Math.random() * 10) + 1,
+      alert_level: level,
+      original_level: level > 1 ? (level - 1) as AlertLevel : null,
+      node_type: nodeType,
+      node_id: nodeType === 'bolt'
+        ? `B${String(2700 + Math.floor(Math.random() * 50)).padStart(4, '0'))`
+        : `F${String(100 + Math.floor(Math.random() * 20)).padStart(3, '0')}`,
+      title: alertTitles[titleIdx],
+      content: alertContents[titleIdx],
+      confidence: Math.round((0.7 + Math.random() * 0.3) * 10000) / 10000,
+      risk_score: Math.round((3 + Math.random() * 7) * 10) / 10,
+      recommendations: generateRecommendations(level as unknown as StatusCode),
+      status: status,
+      handler_id: status !== 'pending' ? `user${Math.floor(Math.random() * 10)}` : null,
+      handler_name: status !== 'pending' ? ['张三', '李四', '王五', '赵六'][Math.floor(Math.random() * 4)] : null,
+      handle_time: status !== 'pending' ? new Date(createTime.getTime() + Math.random() * 2 * 60 * 60 * 1000).toISOString() : null,
+      handle_note: status === 'resolved' ? '已现场检查并处理完毕' : status === 'processing' ? '正在处理中' : null,
+      is_upgraded: Math.random() < 0.2,
+      upgrade_count: Math.floor(Math.random() * 3),
+      last_upgrade_time: Math.random() < 0.2 ? new Date(createTime.getTime() + Math.random() * 60 * 60 * 1000).toISOString() : null,
+      work_order_id: status === 'processing' || status === 'resolved' ? Math.floor(Math.random() * 100) + 1 : null,
+      source_prediction_id: Math.floor(Math.random() * 1000) + 1,
+      silence_until: null,
+      create_time: createTime.toISOString(),
+      update_time: new Date(createTime.getTime() + Math.random() * 3600000).toISOString(),
+      strategy_type: strategy
+    }
+
+    alerts.push(alert)
+  }
+
+  return alerts
+}
