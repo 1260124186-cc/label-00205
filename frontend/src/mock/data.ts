@@ -5,7 +5,11 @@ import type {
   Position,
   TopologyData,
   StatusCode,
-  Statistics
+  Statistics,
+  AlertEvent,
+  AlertStatus,
+  AlertLevel,
+  AlertStrategy
 } from '@/types'
 
 const collectorNames = ['一号采集器', '二号采集器', '三号采集器', '四号采集器', '五号采集器']
@@ -307,8 +311,6 @@ export function refreshMockStatus(data: TopologyData): TopologyData {
 
 // ==================== 预警 Mock 数据 ====================
 
-import type { AlertEvent, AlertStatus, AlertLevel, AlertStrategy } from '@/types'
-
 const alertTitles = [
   '螺栓预紧力异常下降',
   '法兰面密封泄漏预警',
@@ -375,7 +377,7 @@ export function generateMockAlerts(count = 30): AlertEvent[] {
       original_level: level > 1 ? (level - 1) as AlertLevel : null,
       node_type: nodeType,
       node_id: nodeType === 'bolt'
-        ? `B${String(2700 + Math.floor(Math.random() * 50)).padStart(4, '0'))`
+        ? `B${String(2700 + Math.floor(Math.random() * 50)).padStart(4, '0')}`
         : `F${String(100 + Math.floor(Math.random() * 20)).padStart(3, '0')}`,
       title: alertTitles[titleIdx],
       content: alertContents[titleIdx],
