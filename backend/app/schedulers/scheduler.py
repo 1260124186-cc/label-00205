@@ -5,12 +5,19 @@
 
 主要任务:
 1. 模型训练任务 - 每周执行
-2. 预测任务 - 每30分钟执行
+2. 预测任务 - 每30分钟执行（支持分片并行 + Leader选举）
 3. 月度预测任务 - 每月执行
+4. 告警升级任务 - 每5分钟执行
+5. 审计清理任务 - 每天执行
+
+新增功能:
+- Leader选举: 大集群场景下避免重复执行预测任务
+- 任务分片: 按bolt_id范围并行处理预测任务
+- 执行日志: 记录每次任务的起止、节点数、成功/失败数、错误摘要
 
 使用示例:
     from app.schedulers.scheduler import TaskScheduler
-    
+
     scheduler = TaskScheduler()
     scheduler.start()
 """
@@ -20,32 +27,49 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Any
 from loguru import logger
+import threading
 
 from app.utils.config import config
+from app.schedulers.scheduler_ext import enhanced_scheduler
+from app.schedulers.leader_election import get_leader_election
+from app.schedulers.job_execution import (
+    job_execution_context,
+    JobExecutionService,
+    JobExecutionContext,
+)
+from app.schedulers.task_sharding import (
+    get_sharded_task_executor,
+    ShardedTaskExecutor,
+)
+
+_task_lock = threading.Lock()
+_running_jobs = set()
 
 
 class TaskScheduler:
     """
     任务调度器类
-    
+
     管理所有定时任务的调度和执行。
-    
+
     Attributes:
         scheduler: APScheduler调度器实例
         config: 调度器配置
         is_running: 调度器是否正在运行
+        leader_election: Leader选举器
+        job_execution_service: 任务执行服务
+        sharded_executor: 分片任务执行器
     """
-    
+
     def __init__(self):
         """
         初始化任务调度器
         """
         self.config = config.get('scheduler', {})
         self.is_running = False
-        
-        # 配置作业存储和执行器
+
         jobstores = {
             'default': MemoryJobStore()
         }
@@ -53,18 +77,36 @@ class TaskScheduler:
             'default': ThreadPoolExecutor(10)
         }
         job_defaults = {
-            'coalesce': True,  # 合并多个排队的作业
-            'max_instances': 1  # 同一作业最多同时运行一个实例
+            'coalesce': True,
+            'max_instances': 1,
         }
-        
+
         self.scheduler = BackgroundScheduler(
             jobstores=jobstores,
             executors=executors,
             job_defaults=job_defaults
         )
-        
+
+        self.leader_election = get_leader_election()
+        self.job_execution_service = JobExecutionService()
+        self.sharded_executor = get_sharded_task_executor()
+
+        self.job_type_map = {
+            'training_job': 'training',
+            'prediction_job': 'prediction',
+            'monthly_prediction_job': 'prediction',
+            'alert_upgrade_job': 'alert',
+            'audit_cleanup_job': 'maintenance',
+        }
+
+        self.leader_required = config.get('scheduler.leader_election.required', False)
+        self.leader_jobs = config.get(
+            'scheduler.leader_election.jobs',
+            ['prediction_job', 'monthly_prediction_job']
+        )
+
         logger.info("任务调度器初始化完成")
-    
+
     def start(self) -> None:
         """
         启动调度器
@@ -72,34 +114,34 @@ class TaskScheduler:
         if not self.config.get('enabled', True):
             logger.info("调度器已禁用")
             return
-        
+
         if self.is_running:
             logger.warning("调度器已在运行中")
             return
-        
-        # 添加任务
+
         self._add_jobs()
-        
-        # 启动调度器
+
         self.scheduler.start()
         self.is_running = True
-        
+
+        enhanced_scheduler.start()
+
         logger.info("任务调度器已启动")
-    
+
     def stop(self) -> None:
         """
         停止调度器
         """
         if self.is_running:
+            self.leader_election.stop_all_heartbeats()
             self.scheduler.shutdown(wait=False)
             self.is_running = False
             logger.info("任务调度器已停止")
-    
+
     def _add_jobs(self) -> None:
         """
         添加定时任务
         """
-        # 训练任务
         training_config = self.config.get('training_job', {})
         if training_config.get('enabled', True):
             cron = training_config.get('cron', '0 2 * * 0')
@@ -111,8 +153,7 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"训练任务已添加: {cron}")
-        
-        # 预测任务
+
         prediction_config = self.config.get('prediction_job', {})
         if prediction_config.get('enabled', True):
             cron = prediction_config.get('cron', '*/30 * * * *')
@@ -124,8 +165,7 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"预测任务已添加: {cron}")
-        
-        # 月度预测任务
+
         monthly_config = self.config.get('monthly_prediction_job', {})
         if monthly_config.get('enabled', True):
             cron = monthly_config.get('cron', '0 3 1 * *')
@@ -138,7 +178,6 @@ class TaskScheduler:
             )
             logger.info(f"月度预测任务已添加: {cron}")
 
-        # 告警升级任务（每5分钟检查一次）
         alert_upgrade_config = self.config.get('alert_upgrade_job', {})
         if alert_upgrade_config.get('enabled', True):
             cron = alert_upgrade_config.get('cron', '*/5 * * * *')
@@ -151,7 +190,6 @@ class TaskScheduler:
             )
             logger.info(f"告警升级任务已添加: {cron}")
 
-        # 审计过期清理任务（每天执行一次）
         audit_config = config.get('audit', {})
         if audit_config.get('auto_cleanup_enabled', True):
             cleanup_hours = audit_config.get('cleanup_interval_hours', 24)
@@ -164,114 +202,275 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"审计清理任务已添加: {cron}")
-    
+
+    def _acquire_leadership_if_needed(self, job_name: str) -> bool:
+        """
+        如果需要，获取Leader地位
+
+        Args:
+            job_name: 任务名称
+
+        Returns:
+            bool: 是否获得了Leader地位（或不需要Leader）
+        """
+        if not self.leader_required or job_name not in self.leader_jobs:
+            return True
+
+        with _task_lock:
+            if job_name in _running_jobs:
+                logger.warning(f"任务 {job_name} 已在运行中，跳过本次执行")
+                return False
+
+        success = self.leader_election.try_acquire_leadership(job_name)
+        if not success:
+            leader_info = self.leader_election.get_leader_info(job_name)
+            leader_id = leader_info.get('leader_id', 'unknown') if leader_info else 'unknown'
+            logger.info(f"任务 {job_name} 未获取到Leader地位，Leader节点: {leader_id}，跳过本次执行")
+            return False
+
+        with _task_lock:
+            _running_jobs.add(job_name)
+
+        logger.info(f"任务 {job_name} 获得Leader地位")
+        return True
+
+    def _release_leadership_if_needed(self, job_name: str) -> None:
+        """
+        如果需要，释放Leader地位
+
+        Args:
+            job_name: 任务名称
+        """
+        with _task_lock:
+            _running_jobs.discard(job_name)
+
+        if not self.leader_required or job_name not in self.leader_jobs:
+            return
+
+        self.leader_election.release_leadership(job_name)
+        logger.info(f"任务 {job_name} 已释放Leader地位")
+
     def _training_job(self) -> None:
         """
         模型训练任务
         """
+        job_name = 'training_job'
         logger.info("开始执行模型训练任务")
-        
+
         try:
-            from app.services.training_service import TrainingService
-            
-            service = TrainingService()
-            
-            # 训练螺栓模型
-            bolt_result = service.train_model('bolt', force_retrain=False)
-            logger.info(f"螺栓模型训练完成: {bolt_result.get('message')}")
-            
-            # 训练法兰面模型
-            flange_result = service.train_model('flange', force_retrain=False)
-            logger.info(f"法兰面模型训练完成: {flange_result.get('message')}")
-            
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.training_service import TrainingService
+
+                service = TrainingService()
+
+                bolt_result = service.train_model('bolt', force_retrain=False)
+                logger.info(f"螺栓模型训练完成: {bolt_result.get('message')}")
+                ctx.record_success('bolt_model')
+
+                flange_result = service.train_model('flange', force_retrain=False)
+                logger.info(f"法兰面模型训练完成: {flange_result.get('message')}")
+                ctx.record_success('flange_model')
+
         except Exception as e:
             logger.error(f"模型训练任务失败: {e}")
-    
-    def _prediction_job(self) -> None:
+
+    def _prediction_job(
+        self,
+        num_shards: Optional[int] = None,
+        log_id: Optional[int] = None,
+    ) -> None:
         """
-        预测任务
+        预测任务（支持Leader选举和分片并行）
+
+        Args:
+            num_shards: 分片数，None则自动计算
+            log_id: 已有的日志ID（手动触发时使用）
         """
-        logger.info("开始执行预测任务")
-        
+        job_name = 'prediction_job'
+
+        if not self._acquire_leadership_if_needed(job_name):
+            return
+
         try:
-            from app.services.prediction_service import PredictionService
-            
-            service = PredictionService()
-            
-            # 批量预测螺栓
-            service.batch_predict_from_db('bolt')
-            
-            # 批量预测法兰面
-            service.batch_predict_from_db('flange')
-            
-            logger.info("预测任务执行完成")
-            
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='manual' if log_id else 'scheduled',
+                service=self.job_execution_service,
+                log_id=log_id,
+            ) as ctx:
+                logger.info("开始执行预测任务")
+
+                from app.services.prediction_service import PredictionService
+                from app.services.training_service import TrainingService
+                from app.utils.database import get_db, BoltData
+                from sqlalchemy import distinct
+
+                service = PredictionService()
+                training_service = TrainingService()
+
+                try:
+                    with get_db() as db:
+                        bolt_ids = [str(r[0]) for r in db.query(distinct(BoltData.sensor_id)).all()]
+                except Exception:
+                    bolt_ids = training_service._get_all_bolt_ids()
+
+                if not bolt_ids:
+                    logger.info("没有可用的螺栓ID，跳过预测")
+                    return
+
+                logger.info(f"获取到 {len(bolt_ids)} 个螺栓ID，开始分片预测")
+
+                def process_bolt(bolt_id: str) -> bool:
+                    """处理单个螺栓预测"""
+                    try:
+                        service.batch_predict_from_db('bolt', specific_bolt_id=bolt_id)
+                        return True
+                    except Exception as e:
+                        raise RuntimeError(f"螺栓 {bolt_id} 预测失败: {e}")
+
+                default_shards = config.get('scheduler.sharding.default_num_shards', 4)
+                num_shards = num_shards or default_shards
+
+                result = self.sharded_executor.execute_sharded(
+                    task_name=job_name,
+                    task_type=self.job_type_map[job_name],
+                    items=bolt_ids,
+                    process_func=process_bolt,
+                    num_shards=num_shards,
+                    trigger_type='manual' if log_id else 'scheduled',
+                    key_extractor=lambda x: str(x),
+                )
+
+                ctx.total_nodes = result.total_count
+                ctx.success_count = result.success_count
+                ctx.failed_count = result.failed_count
+                ctx.skipped_count = result.skipped_count
+                ctx.bolt_id_min = str(result.item_min) if result.item_min else None
+                ctx.bolt_id_max = str(result.item_max) if result.item_max else None
+
+                for i in range(result.error_summary.total_errors):
+                    if i < len(result.error_summary.failed_node_ids):
+                        node_id = result.error_summary.failed_node_ids[i]
+                        err_type = list(result.error_summary.error_types.keys())[0] if result.error_summary.error_types else 'Exception'
+                        ctx.record_failure(node_id, f"分片执行错误", err_type)
+
+                logger.info(
+                    f"螺栓预测任务完成: 总数={result.total_count}, "
+                    f"成功={result.success_count}, 失败={result.failed_count}, "
+                    f"跳过={result.skipped_count}"
+                )
+
+                logger.info("开始法兰面预测")
+                try:
+                    service.batch_predict_from_db('flange')
+                    logger.info("法兰面预测完成")
+                except Exception as e:
+                    logger.error(f"法兰面预测失败: {e}")
+
+                logger.info("预测任务执行完成")
+
         except Exception as e:
             logger.error(f"预测任务失败: {e}")
-    
+        finally:
+            self._release_leadership_if_needed(job_name)
+
     def _monthly_prediction_job(self) -> None:
         """
-        月度预测任务
+        月度预测任务（支持Leader选举）
         """
-        logger.info("开始执行月度预测任务")
-        
+        job_name = 'monthly_prediction_job'
+
+        if not self._acquire_leadership_if_needed(job_name):
+            return
+
         try:
-            from app.services.prediction_service import PredictionService
-            from app.services.training_service import TrainingService
-            
-            prediction_service = PredictionService()
-            training_service = TrainingService()
-            
-            # 获取所有节点
-            bolt_ids = training_service._get_all_bolt_ids()
-            flange_ids = training_service._get_all_flange_ids()
-            
-            # 预测所有螺栓
-            for bolt_id in bolt_ids:
-                try:
-                    prediction_service.forecast_monthly(
-                        node_id=bolt_id,
-                        node_type='bolt',
-                        days=30
-                    )
-                except Exception as e:
-                    logger.error(f"螺栓 {bolt_id} 月度预测失败: {e}")
-            
-            # 预测所有法兰面
-            for flange_id in flange_ids:
-                try:
-                    prediction_service.forecast_monthly(
-                        node_id=flange_id,
-                        node_type='flange',
-                        days=30
-                    )
-                except Exception as e:
-                    logger.error(f"法兰面 {flange_id} 月度预测失败: {e}")
-            
-            logger.info("月度预测任务执行完成")
-            
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                logger.info("开始执行月度预测任务")
+
+                from app.services.prediction_service import PredictionService
+                from app.services.training_service import TrainingService
+
+                prediction_service = PredictionService()
+                training_service = TrainingService()
+
+                bolt_ids = training_service._get_all_bolt_ids()
+                flange_ids = training_service._get_all_flange_ids()
+
+                total_nodes = len(bolt_ids) + len(flange_ids)
+                ctx.total_nodes = total_nodes
+
+                logger.info(f"待处理: 螺栓 {len(bolt_ids)} 个, 法兰面 {len(flange_ids)} 个")
+
+                for bolt_id in bolt_ids:
+                    try:
+                        prediction_service.forecast_monthly(
+                            node_id=bolt_id,
+                            node_type='bolt',
+                            days=30
+                        )
+                        ctx.record_success(str(bolt_id))
+                    except Exception as e:
+                        logger.error(f"螺栓 {bolt_id} 月度预测失败: {e}")
+                        ctx.record_failure(str(bolt_id), str(e), type(e).__name__)
+
+                for flange_id in flange_ids:
+                    try:
+                        prediction_service.forecast_monthly(
+                            node_id=flange_id,
+                            node_type='flange',
+                            days=30
+                        )
+                        ctx.record_success(str(flange_id))
+                    except Exception as e:
+                        logger.error(f"法兰面 {flange_id} 月度预测失败: {e}")
+                        ctx.record_failure(str(flange_id), str(e), type(e).__name__)
+
+                logger.info(
+                    f"月度预测任务完成: 总数={total_nodes}, "
+                    f"成功={ctx.success_count}, 失败={ctx.failed_count}"
+                )
+
         except Exception as e:
             logger.error(f"月度预测任务失败: {e}")
+        finally:
+            self._release_leadership_if_needed(job_name)
 
     def _alert_upgrade_job(self) -> None:
         """
         告警自动升级任务
-
-        每5分钟扫描一次，超时未处理的告警自动升级。
-        默认30分钟未处理升级（可由告警规则单独配置）。
         """
+        job_name = 'alert_upgrade_job'
         logger.info("开始执行告警升级任务")
 
         try:
-            from app.services.alert import AlertService
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.alert import AlertService
 
-            alert_service = AlertService()
-            upgraded_count = alert_service.process_pending_upgrades()
+                alert_service = AlertService()
+                upgraded_count = alert_service.process_pending_upgrades()
 
-            if upgraded_count > 0:
-                logger.info(f"告警升级任务完成，共升级 {upgraded_count} 条告警")
-            else:
-                logger.info("告警升级任务完成，无需升级的告警")
+                ctx.success_count = upgraded_count
+
+                if upgraded_count > 0:
+                    logger.info(f"告警升级任务完成，共升级 {upgraded_count} 条告警")
+                else:
+                    logger.info("告警升级任务完成，无需升级的告警")
 
         except Exception as e:
             logger.error(f"告警升级任务失败: {e}")
@@ -279,25 +478,32 @@ class TaskScheduler:
     def _audit_cleanup_job(self) -> None:
         """
         审计过期记录清理任务
-
-        按配置的保留年限自动清理过期的审计快照记录。
         """
+        job_name = 'audit_cleanup_job'
         logger.info("开始执行审计过期记录清理任务")
 
         try:
-            from app.services.audit import AuditService
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.audit import AuditService
 
-            audit_service = AuditService()
-            cleaned_count = audit_service.cleanup_expired()
+                audit_service = AuditService()
+                cleaned_count = audit_service.cleanup_expired()
 
-            if cleaned_count > 0:
-                logger.info(f"审计清理任务完成，共清理 {cleaned_count} 条过期记录")
-            else:
-                logger.info("审计清理任务完成，无过期记录")
+                ctx.success_count = cleaned_count
+
+                if cleaned_count > 0:
+                    logger.info(f"审计清理任务完成，共清理 {cleaned_count} 条过期记录")
+                else:
+                    logger.info("审计清理任务完成，无过期记录")
 
         except Exception as e:
             logger.error(f"审计清理任务失败: {e}")
-    
+
     def get_jobs(self) -> list:
         """
         获取所有任务列表
@@ -311,14 +517,36 @@ class TaskScheduler:
                 'trigger': str(job.trigger)
             })
         return jobs
-    
-    def run_job_now(self, job_id: str) -> bool:
+
+    def run_job_now(
+        self,
+        job_id: str,
+        num_shards: Optional[int] = None,
+        log_id: Optional[int] = None,
+    ) -> bool:
         """
         立即执行指定任务
+
+        Args:
+            job_id: 任务ID
+            num_shards: 分片数（仅适用于prediction_job）
+            log_id: 已有的日志ID
+
+        Returns:
+            bool: 是否成功触发
         """
         job = self.scheduler.get_job(job_id)
         if job:
-            job.modify(next_run_time=datetime.now())
+            if job_id == 'prediction_job':
+                self.scheduler.add_job(
+                    func=self._prediction_job,
+                    kwargs={'num_shards': num_shards, 'log_id': log_id},
+                    id=f'{job_id}_manual_{datetime.now().strftime("%Y%m%d%H%M%S")}',
+                    replace_existing=False,
+                    misfire_grace_time=3600,
+                )
+            else:
+                job.modify(next_run_time=datetime.now())
             return True
         return False
 

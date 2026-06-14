@@ -772,18 +772,22 @@ class PredictionOrchestrator:
 
     # ---------- 批量预测（调度器用） ----------
 
-    def batch_predict_from_db(self, node_type: str) -> None:
+    def batch_predict_from_db(self, node_type: str, specific_bolt_id: Optional[str] = None) -> None:
         """
         从数据库批量拉取数据并预测（调度任务入口）
 
         Args:
             node_type: 'bolt' 或 'flange'
+            specific_bolt_id: 可选，指定要预测的单个螺栓ID（用于分片执行）
         """
         task_type = f"batch_{node_type}"
-        logger.info(f"开始批量预测: {node_type}")
+        logger.info(f"开始批量预测: {node_type}" + (f" (指定螺栓: {specific_bolt_id})" if specific_bolt_id else ""))
         try:
             if node_type == 'bolt':
-                self._batch_predict_bolts()
+                if specific_bolt_id:
+                    self._predict_single_bolt(specific_bolt_id)
+                else:
+                    self._batch_predict_bolts()
             elif node_type == 'flange':
                 self._batch_predict_flanges()
             else:
@@ -792,10 +796,28 @@ class PredictionOrchestrator:
                 return
             
             # 记录任务成功
-            metrics.record_prediction_task(task_type, success=True)
+            if not specific_bolt_id:
+                metrics.record_prediction_task(task_type, success=True)
         except Exception as e:
             logger.error(f"批量预测失败: {e}")
-            metrics.record_prediction_task(task_type, success=False, error_type=str(type(e).__name__))
+            if not specific_bolt_id:
+                metrics.record_prediction_task(task_type, success=False, error_type=str(type(e).__name__))
+            raise
+
+    def _predict_single_bolt(self, bolt_id: str) -> None:
+        """预测单个螺栓（用于分片执行）"""
+        bolt_data = self.repository.fetch_batch_bolt_data(per_bolt_limit=100, bolt_ids=[bolt_id])
+
+        if bolt_id not in bolt_data:
+            raise RuntimeError(f"未找到螺栓 {bolt_id} 的数据")
+
+        data_dict = bolt_data[bolt_id]
+        self.predict_bolt(
+            bolt_id=bolt_id,
+            data=np.array(data_dict['data']),
+            timestamps=data_dict['timestamps'],
+            save_to_db=True,
+        )
 
     def _batch_predict_bolts(self) -> None:
         """批量预测所有螺栓"""

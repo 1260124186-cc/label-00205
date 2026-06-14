@@ -759,3 +759,146 @@ SHOW TABLES LIKE 'sc_%health%';
 SHOW TABLES LIKE 'sc_%rul%';
 SHOW TABLES LIKE 'sc_%rollup%';
 SHOW TABLES LIKE 'sc_%degradation%';
+
+-- ============================================================
+-- 任务调度与编排扩展
+-- ============================================================
+
+-- ============================================================
+-- 任务执行日志表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_job_execution_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    job_name VARCHAR(100) NOT NULL COMMENT '任务名称',
+    job_type VARCHAR(50) NOT NULL COMMENT '任务类型: training/prediction/monthly_prediction/alert_upgrade/audit_cleanup',
+    trigger_type VARCHAR(20) DEFAULT 'scheduled' COMMENT '触发类型: scheduled/manual',
+    status VARCHAR(20) DEFAULT 'running' COMMENT '状态: running/completed/failed/skipped',
+    start_time DATETIME NOT NULL COMMENT '开始时间',
+    end_time DATETIME COMMENT '结束时间',
+    duration_seconds INT COMMENT '执行时长（秒）',
+    total_nodes INT DEFAULT 0 COMMENT '处理节点总数',
+    success_count INT DEFAULT 0 COMMENT '成功处理节点数',
+    failed_count INT DEFAULT 0 COMMENT '失败节点数',
+    skipped_count INT DEFAULT 0 COMMENT '跳过节点数',
+    shard_index INT COMMENT '分片索引',
+    shard_total INT COMMENT '总分片数',
+    bolt_id_min VARCHAR(100) COMMENT '处理的最小bolt_id',
+    bolt_id_max VARCHAR(100) COMMENT '处理的最大bolt_id',
+    error_summary TEXT COMMENT '错误摘要 JSON',
+    error_details TEXT COMMENT '详细错误信息 JSON',
+    instance_id VARCHAR(100) COMMENT '执行实例ID',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_job_name (job_name),
+    INDEX idx_job_type (job_type),
+    INDEX idx_status (status),
+    INDEX idx_start_time (start_time),
+    INDEX idx_instance (instance_id),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='任务执行日志表';
+
+-- ============================================================
+-- 调度器Leader选举表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_scheduler_leader (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    leader_key VARCHAR(100) NOT NULL UNIQUE COMMENT 'Leader锁键',
+    leader_id VARCHAR(100) NOT NULL COMMENT '当前Leader实例ID',
+    lease_expire_time DATETIME NOT NULL COMMENT '租约过期时间',
+    last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '最后心跳时间',
+    version BIGINT DEFAULT 0 COMMENT '版本号（乐观锁）',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_leader_key (leader_key),
+    INDEX idx_lease_expire (lease_expire_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='调度器Leader选举表';
+
+-- ============================================================
+-- 任务分片信息表（可选，用于跟踪分片状态）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_job_shards (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    job_execution_id BIGINT NOT NULL COMMENT '关联的任务执行日志ID',
+    shard_index INT NOT NULL COMMENT '分片索引',
+    shard_total INT NOT NULL COMMENT '总分片数',
+    bolt_id_min VARCHAR(100) COMMENT '分片最小bolt_id',
+    bolt_id_max VARCHAR(100) COMMENT '分片最大bolt_id',
+    status VARCHAR(20) DEFAULT 'pending' COMMENT '分片状态: pending/running/completed/failed',
+    start_time DATETIME COMMENT '开始时间',
+    end_time DATETIME COMMENT '结束时间',
+    total_nodes INT DEFAULT 0 COMMENT '节点总数',
+    success_count INT DEFAULT 0 COMMENT '成功数',
+    failed_count INT DEFAULT 0 COMMENT '失败数',
+    error_message TEXT COMMENT '错误信息',
+    worker_id VARCHAR(100) COMMENT '处理Worker ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_job_execution (job_execution_id),
+    INDEX idx_shard_status (status),
+    INDEX idx_worker (worker_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='任务分片信息表';
+
+-- 显示调度扩展新增的表
+SHOW TABLES LIKE 'sc_job%';
+SHOW TABLES LIKE 'sc_scheduler%';
+
+-- ============================================================
+-- 定时调度与任务编排扩展
+-- ============================================================
+
+-- ============================================================
+-- 任务执行日志表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_job_execution_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    job_name VARCHAR(100) NOT NULL COMMENT '任务名称',
+    job_type VARCHAR(50) NOT NULL COMMENT '任务类型: training/prediction/monthly_prediction/alert_upgrade/audit_cleanup',
+    trigger_type VARCHAR(20) DEFAULT 'scheduled' COMMENT '触发类型: scheduled/manual',
+    status VARCHAR(20) DEFAULT 'running' COMMENT '状态: running/completed/failed/skipped',
+    start_time DATETIME NOT NULL COMMENT '开始时间',
+    end_time DATETIME COMMENT '结束时间',
+    duration_seconds INT COMMENT '执行时长（秒）',
+    total_nodes INT DEFAULT 0 COMMENT '处理节点总数',
+    success_count INT DEFAULT 0 COMMENT '成功处理节点数',
+    failed_count INT DEFAULT 0 COMMENT '失败节点数',
+    skipped_count INT DEFAULT 0 COMMENT '跳过节点数',
+    shard_index INT COMMENT '分片索引（分片执行时）',
+    shard_total INT COMMENT '总分片数',
+    bolt_id_min VARCHAR(100) COMMENT '处理的最小bolt_id',
+    bolt_id_max VARCHAR(100) COMMENT '处理的最大bolt_id',
+    error_summary TEXT COMMENT '错误摘要（JSON格式，包含主要错误类型和数量）',
+    error_details TEXT COMMENT '详细错误信息（JSON格式）',
+    instance_id VARCHAR(100) COMMENT '执行实例ID（用于集群环境）',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_job_name (job_name),
+    INDEX idx_job_type (job_type),
+    INDEX idx_status (status),
+    INDEX idx_start_time (start_time),
+    INDEX idx_instance (instance_id),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='任务执行日志表';
+
+-- ============================================================
+-- 调度器Leader选举表（大集群场景）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_scheduler_leader (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    leader_key VARCHAR(100) NOT NULL UNIQUE COMMENT 'Leader锁键（如 prediction_job）',
+    leader_id VARCHAR(100) NOT NULL COMMENT '当前Leader实例ID',
+    lease_expire_time DATETIME NOT NULL COMMENT '租约过期时间',
+    last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '最后心跳时间',
+    version BIGINT DEFAULT 0 COMMENT '版本号（用于乐观锁）',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_leader_key (leader_key),
+    INDEX idx_lease_expire (lease_expire_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='调度器Leader选举表';
+
+-- 初始化Leader选举记录（为每个需要选举的任务创建一条记录）
+INSERT IGNORE INTO sc_scheduler_leader (leader_key, leader_id, lease_expire_time, version) VALUES
+('prediction_job', '', DATE_SUB(NOW(), INTERVAL 1 HOUR), 0),
+('training_job', '', DATE_SUB(NOW(), INTERVAL 1 HOUR), 0),
+('monthly_prediction_job', '', DATE_SUB(NOW(), INTERVAL 1 HOUR), 0);
+
+-- 显示调度模块新增的表
+SHOW TABLES LIKE 'sc_%job%';
+SHOW TABLES LIKE 'sc_%scheduler%';

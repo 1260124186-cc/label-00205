@@ -100,17 +100,28 @@ risk_assessment:
 # 定时任务配置
 scheduler:
   enabled: true
-  
+
+  # Leader选举配置
+  enable_leader_election: true   # 是否启用Leader选举（大集群场景）
+  lease_ttl_seconds: 60          # Leader租约有效期（秒）
+
+  # 任务分片配置
+  enable_sharding: true          # 是否启用任务分片
+  shard_count: 4                 # 默认分片数
+  max_parallel_shards: 4         # 最大并行分片数
+  min_bolts_per_shard: 10        # 每个分片最少螺栓数
+  max_shard_count: 16            # 最大分片数
+
   # 模型训练任务
   training_job:
     enabled: true
     cron: "0 2 * * 0"         # 每周日凌晨2点
-    
+
   # 预测任务
   prediction_job:
     enabled: true
     cron: "*/30 * * * *"      # 每30分钟执行一次
-    
+
   # 月度预测任务
   monthly_prediction_job:
     enabled: true

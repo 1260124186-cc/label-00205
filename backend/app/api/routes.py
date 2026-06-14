@@ -119,6 +119,8 @@ from app.api.schemas import (
     WarningStrategyConfigSchema, ThresholdConfigSchema,
     ScheduledJobSchema, SchedulerJobUpdateRequest,
     SchedulerTriggerRequest, ConfigCenterResponse,
+    JobExecutionLogSchema, JobExecutionLogListResponse,
+    LeaderStatusSchema, SchedulerTriggerResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -129,6 +131,9 @@ from app.api.validators import (
     get_validator,
 )
 from app.utils.config import config
+from app.schedulers.job_execution import JobExecutionService
+from app.schedulers.leader_election import get_leader_election
+from app.schedulers.job_execution import get_instance_id
 from app import __version__
 
 
@@ -6849,4 +6854,245 @@ async def trigger_scheduler_job(job_id: str):
         raise
     except Exception as e:
         logger.error(f"触发调度任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 调度器扩展API ----------
+
+_job_execution_service = JobExecutionService()
+
+
+@router.post(
+    "/scheduler/trigger/{job_name}",
+    tags=["调度器"],
+    summary="手动触发调度任务（按任务名称）",
+    response_model=SchedulerTriggerResponse,
+)
+async def trigger_scheduler_job_by_name(
+    job_name: str,
+    background_tasks: BackgroundTasks,
+    require_leader: bool = Query(False, description="是否需要Leader节点才能执行"),
+    num_shards: Optional[int] = Query(None, ge=1, le=32, description="分片数（仅适用于支持分片的任务）"),
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """
+    按任务名称手动触发调度任务。
+
+    支持的任务名称:
+    - training_job: 模型训练
+    - prediction_job: 预测任务（支持分片）
+    - monthly_prediction_job: 月度预测
+    - alert_upgrade_job: 告警升级
+    - audit_cleanup_job: 审计清理
+
+    Args:
+        job_name: 任务名称
+        require_leader: 是否需要Leader节点才能执行
+        num_shards: 分片数（仅适用于prediction_job）
+    """
+    try:
+        valid_jobs = [
+            'training_job', 'prediction_job', 'monthly_prediction_job',
+            'alert_upgrade_job', 'audit_cleanup_job'
+        ]
+        if job_name not in valid_jobs:
+            raise HTTPException(
+                status_code=404,
+                detail=f"任务 {job_name} 不存在，支持的任务: {', '.join(valid_jobs)}"
+            )
+
+        leader_election = get_leader_election()
+        is_leader = None
+
+        if require_leader:
+            acquired = leader_election.try_acquire_leadership(job_name)
+            if not acquired:
+                leader_info = leader_election.get_leader_info(job_name)
+                current_leader = leader_info.get('leader_id') if leader_info else 'unknown'
+                return SchedulerTriggerResponse(
+                    job_name=job_name,
+                    status='skipped',
+                    message=f'当前实例不是Leader，Leader节点: {current_leader}',
+                    is_leader=False,
+                )
+            is_leader = True
+
+        sched = _get_scheduler()
+        if not sched.is_running:
+            if require_leader and is_leader:
+                leader_election.release_leadership(job_name)
+            raise HTTPException(status_code=503, detail="调度器未启动")
+
+        job_type_map = {
+            'training_job': 'training',
+            'prediction_job': 'prediction',
+            'monthly_prediction_job': 'prediction',
+            'alert_upgrade_job': 'alert',
+            'audit_cleanup_job': 'maintenance',
+        }
+        job_type = job_type_map.get(job_name, 'other')
+
+        log_id = None
+        try:
+            log_id = _job_execution_service.start_execution(
+                job_name=job_name,
+                job_type=job_type,
+                trigger_type='manual',
+                shard_index=0 if job_name == 'prediction_job' and num_shards else None,
+                shard_total=num_shards,
+            )
+        except Exception as log_err:
+            logger.warning(f"创建任务执行日志失败: {log_err}")
+
+        success = sched.run_job_now(job_name, num_shards=num_shards, log_id=log_id)
+        if not success:
+            if log_id:
+                _job_execution_service.skip_execution(log_id, reason='任务调度失败')
+            if require_leader and is_leader:
+                leader_election.release_leadership(job_name)
+            raise HTTPException(status_code=404, detail=f"任务 {job_name} 未在调度器中注册")
+
+        return SchedulerTriggerResponse(
+            job_name=job_name,
+            status='triggered',
+            message=f'任务 {job_name} 已触发执行',
+            log_id=log_id,
+            is_leader=is_leader,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"触发调度任务失败 [{job_name}]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/scheduler/logs",
+    tags=["调度器"],
+    summary="查询任务执行日志列表",
+    response_model=JobExecutionLogListResponse,
+)
+async def get_job_execution_logs(
+    job_name: Optional[str] = Query(None, description="按任务名称过滤"),
+    job_type: Optional[str] = Query(None, description="按任务类型过滤"),
+    status: Optional[str] = Query(None, description="按状态过滤"),
+    trigger_type: Optional[str] = Query(None, description="按触发类型过滤"),
+    start_time_from: Optional[datetime] = Query(None, description="开始时间起始"),
+    start_time_to: Optional[datetime] = Query(None, description="开始时间结束"),
+    instance_id: Optional[str] = Query(None, description="按实例ID过滤"),
+    has_errors: Optional[bool] = Query(None, description="是否仅显示有错误的"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(50, ge=1, le=200, description="每页大小"),
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """查询任务执行日志列表"""
+    try:
+        logs, total = _job_execution_service.repository.get_recent_logs(
+            job_name=job_name,
+            job_type=job_type,
+            status=status,
+            trigger_type=trigger_type,
+            start_time_from=start_time_from,
+            start_time_to=start_time_to,
+            instance_id=instance_id,
+            has_errors=has_errors,
+            limit=page_size,
+            offset=(page - 1) * page_size,
+        )
+
+        for log in logs:
+            if 'error_summary' in log and log['error_summary']:
+                try:
+                    log['error_summary'] = json.loads(log['error_summary'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if 'error_details' in log and log['error_details']:
+                try:
+                    log['error_details'] = json.loads(log['error_details'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        return JobExecutionLogListResponse(
+            total=total,
+            items=[JobExecutionLogSchema(**log) for log in logs],
+        )
+    except Exception as e:
+        logger.error(f"查询任务执行日志失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/scheduler/logs/{log_id}",
+    tags=["调度器"],
+    summary="获取任务执行日志详情",
+    response_model=JobExecutionLogSchema,
+)
+async def get_job_execution_log_detail(
+    log_id: int,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """获取单条任务执行日志详情"""
+    try:
+        log = _job_execution_service.repository.get_log_by_id(log_id)
+        if not log:
+            raise HTTPException(status_code=404, detail=f"日志ID {log_id} 不存在")
+
+        if 'error_summary' in log and log['error_summary']:
+            try:
+                log['error_summary'] = json.loads(log['error_summary'])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if 'error_details' in log and log['error_details']:
+            try:
+                log['error_details'] = json.loads(log['error_details'])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return JobExecutionLogSchema(**log)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取任务执行日志详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/scheduler/leader/{job_key}",
+    tags=["调度器"],
+    summary="获取Leader选举状态",
+    response_model=LeaderStatusSchema,
+)
+async def get_leader_status(
+    job_key: str,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """获取指定任务的Leader选举状态"""
+    try:
+        leader_election = get_leader_election()
+        leader_info = leader_election.get_leader_info(job_key)
+
+        if not leader_info:
+            raise HTTPException(
+                status_code=404,
+                detail=f"任务 {job_key} 暂无Leader记录"
+            )
+
+        now = datetime.now()
+        lease_expire = leader_info.get('lease_expire_time', now)
+        is_expired = lease_expire < now
+        is_current_instance = leader_info.get('leader_id') == get_instance_id()
+
+        return LeaderStatusSchema(
+            leader_key=job_key,
+            leader_id=leader_info.get('leader_id', ''),
+            lease_expire_time=lease_expire,
+            last_heartbeat=leader_info.get('last_heartbeat', now),
+            version=leader_info.get('version', 0),
+            is_expired=is_expired,
+            is_current_instance=is_current_instance,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取Leader状态失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

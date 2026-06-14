@@ -1314,6 +1314,71 @@ class HealthConfig(Base):
     )
 
 
+class JobExecutionLog(Base):
+    """
+    任务执行日志表模型
+
+    对应数据库表: sc_job_execution_log
+    记录每次任务执行的起止时间、处理节点数、成功/失败数、错误摘要。
+    """
+    __tablename__ = 'sc_job_execution_log'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    job_name = Column(String(100), nullable=False, comment='任务名称')
+    job_type = Column(String(50), nullable=False, comment='任务类型')
+    trigger_type = Column(String(20), default='scheduled', comment='触发类型: scheduled/manual')
+    status = Column(String(20), default='running', comment='状态: running/completed/failed/skipped')
+    start_time = Column(DateTime, nullable=False, comment='开始时间')
+    end_time = Column(DateTime, comment='结束时间')
+    duration_seconds = Column(Integer, comment='执行时长（秒）')
+    total_nodes = Column(Integer, default=0, comment='处理节点总数')
+    success_count = Column(Integer, default=0, comment='成功处理节点数')
+    failed_count = Column(Integer, default=0, comment='失败节点数')
+    skipped_count = Column(Integer, default=0, comment='跳过节点数')
+    shard_index = Column(Integer, comment='分片索引')
+    shard_total = Column(Integer, comment='总分片数')
+    bolt_id_min = Column(String(100), comment='处理的最小bolt_id')
+    bolt_id_max = Column(String(100), comment='处理的最大bolt_id')
+    error_summary = Column(Text, comment='错误摘要 JSON')
+    error_details = Column(Text, comment='详细错误信息 JSON')
+    instance_id = Column(String(100), comment='执行实例ID')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_job_name', 'job_name'),
+        Index('idx_job_type', 'job_type'),
+        Index('idx_status', 'status'),
+        Index('idx_start_time', 'start_time'),
+        Index('idx_instance', 'instance_id'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class SchedulerLeader(Base):
+    """
+    调度器Leader选举表模型
+
+    对应数据库表: sc_scheduler_leader
+    用于大集群场景下的单实例Leader选举，避免重复预测。
+    使用基于租约的乐观锁机制。
+    """
+    __tablename__ = 'sc_scheduler_leader'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    leader_key = Column(String(100), nullable=False, unique=True, comment='Leader锁键')
+    leader_id = Column(String(100), nullable=False, comment='当前Leader实例ID')
+    lease_expire_time = Column(DateTime, nullable=False, comment='租约过期时间')
+    last_heartbeat = Column(DateTime, default=datetime.now, comment='最后心跳时间')
+    version = Column(BigInteger, default=0, comment='版本号（乐观锁）')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_leader_key', 'leader_key'),
+        Index('idx_lease_expire', 'lease_expire_time'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类

@@ -102,32 +102,57 @@ class PredictionRepository:
 
     def fetch_batch_bolt_data(
         self,
-        per_bolt_limit: int = 100
+        per_bolt_limit: int = 100,
+        bolt_ids: Optional[List[str]] = None
     ) -> Dict[str, Dict[str, List]]:
         """
-        批量获取所有螺栓的最近 N 条数据（用于批量预测）
+        批量获取螺栓的最近 N 条数据（用于批量预测）
 
         Args:
             per_bolt_limit: 每个螺栓取最近多少条
+            bolt_ids: 可选，指定要获取的螺栓ID列表，None则获取所有
 
         Returns:
             {bolt_id: {'data': [...], 'timestamps': [...]}}
         """
         with get_db() as db:
-            query = text("""
-                SELECT id, create_time, sensor_id, ptf
-                FROM (
-                    SELECT id, create_time, sensor_id, ptf,
-                        @rank := IF(@current_sensor = sensor_id, @rank + 1, 1) AS sensor_rank,
-                        @current_sensor := sensor_id
-                    FROM sc_bolt_data
-                    CROSS JOIN (SELECT @current_sensor := NULL, @rank := 0) AS vars
+            if bolt_ids is not None and len(bolt_ids) > 0:
+                placeholders = ', '.join([f':id_{i}' for i in range(len(bolt_ids))])
+                params = {}
+                for i, bid in enumerate(bolt_ids):
+                    params[f'id_{i}'] = str(bid)
+                params['limit'] = per_bolt_limit
+
+                query = text(f"""
+                    SELECT id, create_time, sensor_id, ptf
+                    FROM (
+                        SELECT id, create_time, sensor_id, ptf,
+                            @rank := IF(@current_sensor = sensor_id, @rank + 1, 1) AS sensor_rank,
+                            @current_sensor := sensor_id
+                        FROM sc_bolt_data
+                        CROSS JOIN (SELECT @current_sensor := NULL, @rank := 0) AS vars
+                        WHERE sensor_id IN ({placeholders})
+                        ORDER BY sensor_id, create_time DESC
+                    ) AS ranked_data
+                    WHERE sensor_rank <= :limit
                     ORDER BY sensor_id, create_time DESC
-                ) AS ranked_data
-                WHERE sensor_rank <= :limit
-                ORDER BY sensor_id, create_time DESC
-            """)
-            result = db.execute(query, {'limit': per_bolt_limit})
+                """)
+                result = db.execute(query, params)
+            else:
+                query = text("""
+                    SELECT id, create_time, sensor_id, ptf
+                    FROM (
+                        SELECT id, create_time, sensor_id, ptf,
+                            @rank := IF(@current_sensor = sensor_id, @rank + 1, 1) AS sensor_rank,
+                            @current_sensor := sensor_id
+                        FROM sc_bolt_data
+                        CROSS JOIN (SELECT @current_sensor := NULL, @rank := 0) AS vars
+                        ORDER BY sensor_id, create_time DESC
+                    ) AS ranked_data
+                    WHERE sensor_rank <= :limit
+                    ORDER BY sensor_id, create_time DESC
+                """)
+                result = db.execute(query, {'limit': per_bolt_limit})
             rows = result.fetchall()
 
         bolt_data: Dict[str, Dict[str, List]] = {}

@@ -2444,6 +2444,56 @@ class SchedulerTriggerRequest(BaseModel):
     job_id: str = Field(..., description="任务ID")
 
 
+class JobExecutionLogSchema(BaseModel):
+    """任务执行日志"""
+    id: int = Field(..., description="日志ID")
+    job_name: str = Field(..., description="任务名称")
+    job_type: str = Field(..., description="任务类型")
+    trigger_type: str = Field(..., description="触发类型")
+    status: str = Field(..., description="状态")
+    start_time: datetime = Field(..., description="开始时间")
+    end_time: Optional[datetime] = Field(None, description="结束时间")
+    duration_seconds: Optional[int] = Field(None, description="执行时长（秒）")
+    total_nodes: int = Field(0, description="处理节点总数")
+    success_count: int = Field(0, description="成功节点数")
+    failed_count: int = Field(0, description="失败节点数")
+    skipped_count: int = Field(0, description="跳过节点数")
+    shard_index: Optional[int] = Field(None, description="分片索引")
+    shard_total: Optional[int] = Field(None, description="总分片数")
+    bolt_id_min: Optional[str] = Field(None, description="最小bolt_id")
+    bolt_id_max: Optional[str] = Field(None, description="最大bolt_id")
+    instance_id: Optional[str] = Field(None, description="执行实例ID")
+    error_summary: Optional[Dict[str, Any]] = Field(None, description="错误摘要")
+    error_details: Optional[Dict[str, Any]] = Field(None, description="错误详情")
+    create_time: datetime = Field(..., description="创建时间")
+
+
+class JobExecutionLogListResponse(BaseModel):
+    """任务执行日志列表响应"""
+    total: int = Field(..., description="总记录数")
+    items: List[JobExecutionLogSchema] = Field(..., description="日志列表")
+
+
+class LeaderStatusSchema(BaseModel):
+    """Leader选举状态"""
+    leader_key: str = Field(..., description="Leader锁键")
+    leader_id: str = Field(..., description="当前Leader实例ID")
+    lease_expire_time: datetime = Field(..., description="租约过期时间")
+    last_heartbeat: datetime = Field(..., description="最后心跳时间")
+    version: int = Field(..., description="版本号")
+    is_expired: bool = Field(..., description="租约是否已过期")
+    is_current_instance: bool = Field(..., description="当前实例是否为Leader")
+
+
+class SchedulerTriggerResponse(BaseModel):
+    """调度任务触发响应"""
+    job_name: str = Field(..., description="任务名称")
+    status: str = Field(..., description="状态: triggered/skipped")
+    message: str = Field(..., description="消息")
+    log_id: Optional[int] = Field(None, description="任务执行日志ID")
+    is_leader: Optional[bool] = Field(None, description="是否为Leader节点")
+
+
 # ---------- 配置中心整体响应 ----------
 
 class ConfigCenterResponse(BaseModel):
