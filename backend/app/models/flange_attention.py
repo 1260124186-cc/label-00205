@@ -644,6 +644,741 @@ class FlangeAttentionModel:
         self.model.eval()
         logger.info(f"法兰面模型已加载: {path}")
     
+    def granger_causality_test(
+        self,
+        bolt_data: Dict[str, np.ndarray],
+        max_lag: int = 5,
+        significance_level: float = 0.05
+    ) -> Dict[str, Any]:
+        """
+        格兰杰因果检验
+
+        检验螺栓之间的因果关系：如果螺栓X的历史值有助于预测螺栓Y的未来值，
+        则称X Granger引起Y。
+
+        Args:
+            bolt_data: 螺栓数据字典 {bolt_id: time_series}
+            max_lag: 最大滞后阶数
+            significance_level: 显著性水平
+
+        Returns:
+            Dict: 包含因果矩阵、p值矩阵、F统计量矩阵的字典
+        """
+        self.bolt_ids = list(bolt_data.keys())
+        n_bolts = len(self.bolt_ids)
+
+        if n_bolts < 2:
+            return {
+                'causal_matrix': np.zeros((1, 1)),
+                'p_value_matrix': np.ones((1, 1)),
+                'f_stat_matrix': np.zeros((1, 1)),
+                'optimal_lags': np.zeros((1, 1), dtype=int),
+                'bolt_ids': self.bolt_ids
+            }
+
+        causal_matrix = np.zeros((n_bolts, n_bolts))
+        p_value_matrix = np.ones((n_bolts, n_bolts))
+        f_stat_matrix = np.zeros((n_bolts, n_bolts))
+        optimal_lags = np.zeros((n_bolts, n_bolts), dtype=int)
+
+        for i, bolt_i in enumerate(self.bolt_ids):
+            for j, bolt_j in enumerate(self.bolt_ids):
+                if i == j:
+                    causal_matrix[i, j] = 1.0
+                    p_value_matrix[i, j] = 0.0
+                    continue
+
+                data_i = bolt_data[bolt_i]
+                data_j = bolt_data[bolt_j]
+
+                min_len = min(len(data_i), len(data_j))
+                x = data_i[-min_len:]
+                y = data_j[-min_len:]
+
+                best_p_value = 1.0
+                best_f_stat = 0.0
+                best_lag = 0
+
+                for lag in range(1, min(max_lag, min_len // 4) + 1):
+                    f_stat, p_value = self._granger_test_pair(x, y, lag)
+                    if p_value < best_p_value:
+                        best_p_value = p_value
+                        best_f_stat = f_stat
+                        best_lag = lag
+
+                p_value_matrix[i, j] = best_p_value
+                f_stat_matrix[i, j] = best_f_stat
+                optimal_lags[i, j] = best_lag
+
+                if best_p_value < significance_level:
+                    causal_matrix[i, j] = 1.0
+
+        self.causal_matrix = causal_matrix
+        self.p_value_matrix = p_value_matrix
+        self.f_stat_matrix = f_stat_matrix
+        self.optimal_lags = optimal_lags
+
+        logger.info(f"格兰杰因果检验完成: {n_bolts}个螺栓, 显著因果对: {int(np.sum(causal_matrix) - n_bolts)}")
+
+        return {
+            'causal_matrix': causal_matrix.tolist(),
+            'p_value_matrix': p_value_matrix.tolist(),
+            'f_stat_matrix': f_stat_matrix.tolist(),
+            'optimal_lags': optimal_lags.tolist(),
+            'bolt_ids': self.bolt_ids
+        }
+
+    def _granger_test_pair(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        lag: int
+    ) -> Tuple[float, float]:
+        """
+        对两个时间序列进行Granger因果检验
+
+        使用F检验比较受限模型（仅y自回归）和非受限模型（y自回归 + x滞后）
+
+        Args:
+            x: 原因变量序列
+            y: 结果变量序列
+            lag: 滞后阶数
+
+        Returns:
+            Tuple: (F统计量, p值)
+        """
+        n = len(y) - lag
+
+        if n < lag * 2 + 2:
+            return 0.0, 1.0
+
+        y_future = y[lag:]
+
+        Y_restricted = np.zeros((n, lag + 1))
+        for i in range(lag):
+            Y_restricted[:, i] = y[lag - i - 1:n + lag - i - 1]
+        Y_restricted[:, lag] = 1.0
+
+        Y_unrestricted = np.zeros((n, lag * 2 + 1))
+        for i in range(lag):
+            Y_unrestricted[:, i] = y[lag - i - 1:n + lag - i - 1]
+        for i in range(lag):
+            Y_unrestricted[:, lag + i] = x[lag - i - 1:n + lag - i - 1]
+        Y_unrestricted[:, lag * 2] = 1.0
+
+        try:
+            beta_restricted = np.linalg.lstsq(Y_restricted, y_future, rcond=None)[0]
+            residuals_restricted = y_future - Y_restricted @ beta_restricted
+            ssr_restricted = np.sum(residuals_restricted ** 2)
+
+            beta_unrestricted = np.linalg.lstsq(Y_unrestricted, y_future, rcond=None)[0]
+            residuals_unrestricted = y_future - Y_unrestricted @ beta_unrestricted
+            ssr_unrestricted = np.sum(residuals_unrestricted ** 2)
+
+            df1 = lag
+            df2 = n - lag * 2 - 1
+
+            if df2 <= 0 or ssr_unrestricted <= 0:
+                return 0.0, 1.0
+
+            f_stat = ((ssr_restricted - ssr_unrestricted) / df1) / (ssr_unrestricted / df2)
+
+            from scipy.stats import f as f_dist
+            p_value = 1 - f_dist.cdf(f_stat, df1, df2)
+
+            return f_stat, p_value
+        except Exception:
+            return 0.0, 1.0
+
+    def build_causal_graph(
+        self,
+        bolt_data: Dict[str, np.ndarray],
+        max_lag: int = 5,
+        significance_level: float = 0.05,
+        min_correlation: float = 0.3
+    ) -> Dict[str, Any]:
+        """
+        构建螺栓因果关系图
+
+        结合相关性和Granger因果关系，构建有向因果图。
+
+        Args:
+            bolt_data: 螺栓数据字典 {bolt_id: time_series}
+            max_lag: 最大滞后阶数
+            significance_level: Granger检验显著性水平
+            min_correlation: 最小相关系数阈值
+
+        Returns:
+            Dict: 因果图数据，包含节点、边、邻接矩阵等
+        """
+        if self.correlation_matrix is None or self.bolt_ids != list(bolt_data.keys()):
+            self.analyze_bolt_correlations(bolt_data)
+
+        granger_result = self.granger_causality_test(bolt_data, max_lag, significance_level)
+        causal_matrix = np.array(granger_result['causal_matrix'])
+        p_value_matrix = np.array(granger_result['p_value_matrix'])
+        f_stat_matrix = np.array(granger_result['f_stat_matrix'])
+        optimal_lags = np.array(granger_result['optimal_lags'])
+
+        n_bolts = len(self.bolt_ids)
+
+        adjacency_matrix = np.zeros((n_bolts, n_bolts))
+        edge_weights = np.zeros((n_bolts, n_bolts))
+
+        edges = []
+        for i in range(n_bolts):
+            for j in range(n_bolts):
+                if i == j:
+                    continue
+
+                corr = abs(self.correlation_matrix[i, j])
+                is_causal = causal_matrix[i, j] == 1
+                is_correlated = corr >= min_correlation
+
+                if is_causal and is_correlated:
+                    weight = corr * (1 - p_value_matrix[i, j])
+                    adjacency_matrix[i, j] = 1
+                    edge_weights[i, j] = weight
+
+                    edges.append({
+                        'source': self.bolt_ids[i],
+                        'target': self.bolt_ids[j],
+                        'source_idx': i,
+                        'target_idx': j,
+                        'weight': float(weight),
+                        'correlation': float(self.correlation_matrix[i, j]),
+                        'p_value': float(p_value_matrix[i, j]),
+                        'f_stat': float(f_stat_matrix[i, j]),
+                        'lag': int(optimal_lags[i, j]),
+                        'type': 'causal'
+                    })
+                elif is_correlated and abs(self.correlation_matrix[j, i]) < min_correlation:
+                    weight = corr * 0.5
+                    adjacency_matrix[i, j] = 1
+                    edge_weights[i, j] = weight
+
+                    edges.append({
+                        'source': self.bolt_ids[i],
+                        'target': self.bolt_ids[j],
+                        'source_idx': i,
+                        'target_idx': j,
+                        'weight': float(weight),
+                        'correlation': float(self.correlation_matrix[i, j]),
+                        'p_value': None,
+                        'f_stat': None,
+                        'lag': None,
+                        'type': 'correlated'
+                    })
+
+        nodes = []
+        in_degree = np.sum(adjacency_matrix, axis=0)
+        out_degree = np.sum(adjacency_matrix, axis=1)
+
+        for i, bolt_id in enumerate(self.bolt_ids):
+            nodes.append({
+                'id': bolt_id,
+                'index': i,
+                'in_degree': int(in_degree[i]),
+                'out_degree': int(out_degree[i]),
+                'total_degree': int(in_degree[i] + out_degree[i]),
+                'centrality': float((in_degree[i] + out_degree[i]) / max(n_bolts - 1, 1))
+            })
+
+        self.causal_graph = {
+            'nodes': nodes,
+            'edges': edges,
+            'adjacency_matrix': adjacency_matrix.tolist(),
+            'edge_weights': edge_weights.tolist(),
+            'bolt_ids': self.bolt_ids
+        }
+
+        logger.info(f"因果图构建完成: {n_bolts}个节点, {len(edges)}条边")
+
+        return self.causal_graph
+
+    def identify_leading_bolts(
+        self,
+        bolt_data: Dict[str, np.ndarray],
+        max_lag: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        识别领先螺栓
+
+        领先螺栓定义：
+        1. 出度 > 入度（作为原因的次数多于作为结果的次数）
+        2. Granger因果检验中显著影响多个其他螺栓
+        3. 变化趋势领先于其他螺栓
+
+        Args:
+            bolt_data: 螺栓数据字典
+            max_lag: 最大滞后阶数
+
+        Returns:
+            List[Dict]: 领先螺栓列表，按领先程度排序
+        """
+        if not hasattr(self, 'causal_graph') or self.causal_graph is None:
+            self.build_causal_graph(bolt_data, max_lag)
+
+        if self.correlation_matrix is None:
+            self.analyze_bolt_correlations(bolt_data)
+
+        adjacency_matrix = np.array(self.causal_graph['adjacency_matrix'])
+        edge_weights = np.array(self.causal_graph['edge_weights'])
+
+        in_degree = np.sum(adjacency_matrix, axis=0)
+        out_degree = np.sum(adjacency_matrix, axis=1)
+
+        out_strength = np.sum(edge_weights, axis=1)
+        in_strength = np.sum(edge_weights, axis=0)
+
+        leading_scores = []
+        for i, bolt_id in enumerate(self.bolt_ids):
+            net_out_degree = out_degree[i] - in_degree[i]
+            net_out_strength = out_strength[i] - in_strength[i]
+
+            trend_lead = self._calculate_trend_leadership(bolt_data, bolt_id, max_lag)
+
+            score = (
+                0.4 * net_out_degree / max(len(self.bolt_ids) - 1, 1) +
+                0.3 * net_out_strength +
+                0.3 * trend_lead
+            )
+
+            leading_scores.append({
+                'bolt_id': bolt_id,
+                'index': i,
+                'leading_score': float(score),
+                'out_degree': int(out_degree[i]),
+                'in_degree': int(in_degree[i]),
+                'net_degree': int(net_out_degree),
+                'out_strength': float(out_strength[i]),
+                'in_strength': float(in_strength[i]),
+                'net_strength': float(net_out_strength),
+                'trend_leadership': float(trend_lead),
+                'is_leading': bool(score > 0)
+            })
+
+        leading_scores.sort(key=lambda x: x['leading_score'], reverse=True)
+
+        self.leading_bolts = leading_scores
+        logger.info(f"领先螺栓识别完成: {sum(1 for b in leading_scores if b['is_leading'])}个领先螺栓")
+
+        return leading_scores
+
+    def _calculate_trend_leadership(
+        self,
+        bolt_data: Dict[str, np.ndarray],
+        target_bolt: str,
+        max_lag: int
+    ) -> float:
+        """
+        计算螺栓的趋势领先性
+
+        通过交叉相关分析，判断该螺栓的趋势变化是否领先于其他螺栓。
+
+        Args:
+            bolt_data: 螺栓数据字典
+            target_bolt: 目标螺栓ID
+            max_lag: 最大滞后阶数
+
+        Returns:
+            float: 趋势领先性得分 [-1, 1]
+        """
+        target_data = bolt_data[target_bolt]
+        leadership_scores = []
+
+        for other_bolt, other_data in bolt_data.items():
+            if other_bolt == target_bolt:
+                continue
+
+            min_len = min(len(target_data), len(other_data))
+            x = target_data[-min_len:]
+            y = other_data[-min_len:]
+
+            x = (x - np.mean(x)) / (np.std(x) + 1e-6)
+            y = (y - np.mean(y)) / (np.std(y) + 1e-6)
+
+            best_corr = 0
+            best_lag = 0
+
+            for lag in range(-max_lag, max_lag + 1):
+                if lag == 0:
+                    continue
+                if lag > 0:
+                    x_slice = x[:-lag]
+                    y_slice = y[lag:]
+                else:
+                    x_slice = x[-lag:]
+                    y_slice = y[:lag]
+
+                if len(x_slice) < max_lag:
+                    continue
+
+                corr = np.correlate(x_slice - np.mean(x_slice),
+                                    y_slice - np.mean(y_slice),
+                                    mode='valid')[0] / len(x_slice)
+                corr = corr / (np.std(x_slice) * np.std(y_slice) + 1e-6)
+
+                if abs(corr) > abs(best_corr):
+                    best_corr = corr
+                    best_lag = lag
+
+            if best_lag < 0:
+                leadership_scores.append(abs(best_corr))
+            elif best_lag > 0:
+                leadership_scores.append(-abs(best_corr))
+            else:
+                leadership_scores.append(0)
+
+        if leadership_scores:
+            return float(np.mean(leadership_scores))
+        return 0.0
+
+    def analyze_propagation_paths(
+        self,
+        bolt_data: Dict[str, np.ndarray],
+        source_bolt: Optional[str] = None,
+        max_depth: int = 3
+    ) -> Dict[str, Any]:
+        """
+        分析松动传播路径
+
+        从领先螺栓或指定源螺栓出发，追踪松动的传播路径。
+
+        Args:
+            bolt_data: 螺栓数据字典
+            source_bolt: 源螺栓ID，None则使用领先螺栓
+            max_depth: 最大传播深度
+
+        Returns:
+            Dict: 传播路径分析结果
+        """
+        if not hasattr(self, 'causal_graph') or self.causal_graph is None:
+            self.build_causal_graph(bolt_data)
+
+        if source_bolt is None:
+            if not hasattr(self, 'leading_bolts') or self.leading_bolts is None:
+                self.identify_leading_bolts(bolt_data)
+            if self.leading_bolts and self.leading_bolts[0]['is_leading']:
+                source_bolt = self.leading_bolts[0]['bolt_id']
+            else:
+                source_bolt = self.bolt_ids[0]
+
+        if source_bolt not in self.bolt_ids:
+            raise ValueError(f"源螺栓 {source_bolt} 不在螺栓列表中")
+
+        source_idx = self.bolt_ids.index(source_bolt)
+        adjacency_matrix = np.array(self.causal_graph['adjacency_matrix'])
+        edge_weights = np.array(self.causal_graph['edge_weights'])
+
+        paths = []
+        visited = set()
+
+        def dfs(current_idx: int, path: List[int], depth: int, weight: float):
+            if depth > max_depth:
+                return
+
+            if len(path) >= 2:
+                paths.append({
+                    'path': [self.bolt_ids[idx] for idx in path],
+                    'path_indices': path.copy(),
+                    'depth': depth,
+                    'total_weight': weight,
+                    'avg_weight': weight / max(depth, 1)
+                })
+
+            for next_idx in range(len(self.bolt_ids)):
+                if next_idx not in visited and adjacency_matrix[current_idx, next_idx] > 0:
+                    visited.add(next_idx)
+                    path.append(next_idx)
+                    dfs(next_idx, path, depth + 1, weight + edge_weights[current_idx, next_idx])
+                    path.pop()
+                    visited.remove(next_idx)
+
+        visited.add(source_idx)
+        dfs(source_idx, [source_idx], 0, 0.0)
+
+        paths.sort(key=lambda p: p['total_weight'], reverse=True)
+
+        reachable_bolts = set()
+        for path in paths:
+            for bolt_id in path['path']:
+                reachable_bolts.add(bolt_id)
+
+        propagation_distance = {}
+        for bolt_id in self.bolt_ids:
+            if bolt_id == source_bolt:
+                propagation_distance[bolt_id] = 0
+            else:
+                shortest = None
+                for path in paths:
+                    if path['path'][-1] == bolt_id:
+                        if shortest is None or path['depth'] < shortest:
+                            shortest = path['depth']
+                propagation_distance[bolt_id] = shortest
+
+        self.propagation_paths = {
+            'source_bolt': source_bolt,
+            'source_idx': source_idx,
+            'paths': paths[:20],
+            'total_path_count': len(paths),
+            'reachable_bolts': list(reachable_bolts),
+            'propagation_distance': propagation_distance,
+            'max_depth': max_depth
+        }
+
+        logger.info(f"传播路径分析完成: 源螺栓={source_bolt}, 路径数={len(paths)}, 可达螺栓数={len(reachable_bolts)}")
+
+        return self.propagation_paths
+
+    def identify_root_cause_bolt(
+        self,
+        bolt_data: Dict[str, np.ndarray],
+        bolt_statuses: Optional[Dict[str, int]] = None,
+        bolt_health_indices: Optional[Dict[str, float]] = None
+    ) -> Dict[str, Any]:
+        """
+        定位根因螺栓
+
+        当多个螺栓出现不均衡松动时，识别根因螺栓。
+        综合考虑：
+        1. 因果图中的出度和因果强度
+        2. 趋势领先性
+        3. 健康状况（最差的可能是根因）
+        4. 传播路径的源头位置
+
+        Args:
+            bolt_data: 螺栓数据字典
+            bolt_statuses: 螺栓状态字典 {bolt_id: status_code}
+            bolt_health_indices: 螺栓健康度字典 {bolt_id: health_index}
+
+        Returns:
+            Dict: 根因螺栓分析结果
+        """
+        if not hasattr(self, 'leading_bolts') or self.leading_bolts is None:
+            self.identify_leading_bolts(bolt_data)
+
+        if not hasattr(self, 'propagation_paths') or self.propagation_paths is None:
+            self.analyze_propagation_paths(bolt_data)
+
+        n_bolts = len(self.bolt_ids)
+
+        if bolt_statuses is None:
+            bolt_statuses = {}
+        if bolt_health_indices is None:
+            bolt_health_indices = {}
+
+        abnormal_bolts = []
+        for bolt_id in self.bolt_ids:
+            status = bolt_statuses.get(bolt_id, 0)
+            hi = bolt_health_indices.get(bolt_id, 50.0)
+            if status >= 2 or hi < 50:
+                abnormal_bolts.append(bolt_id)
+
+        is_unbalanced_loosening = len(abnormal_bolts) >= 2 and len(abnormal_bolts) < n_bolts
+
+        root_cause_scores = []
+        for i, bolt_id in enumerate(self.bolt_ids):
+            score = 0.0
+
+            leading_info = next((b for b in self.leading_bolts if b['bolt_id'] == bolt_id), None)
+            if leading_info:
+                score += 0.4 * leading_info['leading_score']
+
+            status = bolt_statuses.get(bolt_id, 0)
+            hi = bolt_health_indices.get(bolt_id, 50.0)
+
+            if status >= 2:
+                score += 0.3 * (status / 4.0)
+            if hi < 70:
+                score += 0.3 * ((100 - hi) / 100.0)
+
+            prop_dist = self.propagation_paths['propagation_distance'].get(bolt_id)
+            if prop_dist is not None and prop_dist > 0:
+                score += 0.2 * (1.0 / (prop_dist + 1))
+            elif prop_dist == 0:
+                score += 0.2
+
+            root_cause_scores.append({
+                'bolt_id': bolt_id,
+                'index': i,
+                'root_cause_score': float(score),
+                'status_code': status,
+                'health_index': hi,
+                'is_abnormal': bolt_id in abnormal_bolts
+            })
+
+        root_cause_scores.sort(key=lambda x: x['root_cause_score'], reverse=True)
+
+        root_cause_bolt = root_cause_scores[0] if root_cause_scores else None
+
+        result = {
+            'root_cause_bolt': root_cause_bolt,
+            'root_cause_ranking': root_cause_scores,
+            'abnormal_bolts': abnormal_bolts,
+            'is_unbalanced_loosening': is_unbalanced_loosening,
+            'total_bolts': n_bolts,
+            'abnormal_count': len(abnormal_bolts)
+        }
+
+        self.root_cause_analysis = result
+
+        logger.info(
+            f"根因螺栓定位完成: "
+            f"根因={root_cause_bolt['bolt_id'] if root_cause_bolt else 'N/A'}, "
+            f"异常螺栓数={len(abnormal_bolts)}, "
+            f"不均衡松动={is_unbalanced_loosening}"
+        )
+
+        return result
+
+    def generate_root_cause_measures(
+        self,
+        root_cause_result: Dict[str, Any],
+        flange_id: Optional[str] = None
+    ) -> str:
+        """
+        生成根因分析相关的推荐措施
+
+        Args:
+            root_cause_result: 根因分析结果
+            flange_id: 法兰面ID
+
+        Returns:
+            str: 推荐措施文本
+        """
+        root_cause_bolt = root_cause_result.get('root_cause_bolt')
+        abnormal_bolts = root_cause_result.get('abnormal_bolts', [])
+        is_unbalanced = root_cause_result.get('is_unbalanced_loosening', False)
+
+        measures = []
+
+        if not root_cause_bolt:
+            return "法兰面螺栓状态整体良好，继续正常监测。"
+
+        bolt_id = root_cause_bolt['bolt_id']
+        score = root_cause_bolt.get('root_cause_score', 0)
+
+        if is_unbalanced and len(abnormal_bolts) >= 2:
+            measures.append(
+                f"检测到多螺栓不均衡松动现象，共 {len(abnormal_bolts)} 个螺栓状态异常。"
+            )
+            measures.append(
+                f"根因螺栓初步判定为 {bolt_id}（根因评分: {score:.2f}），建议优先检查该螺栓。"
+            )
+
+            if hasattr(self, 'propagation_paths') and self.propagation_paths:
+                paths = self.propagation_paths.get('paths', [])
+                if paths:
+                    top_path = paths[0]
+                    path_str = ' → '.join(top_path['path'][:4])
+                    measures.append(f"主要传播路径: {path_str}，建议沿路径依次检查。")
+
+            measures.append(
+                "建议按以下优先级处理："
+                "1) 首先检查并紧固根因螺栓；"
+                "2) 沿传播路径依次检查关联螺栓；"
+                "3) 检查法兰面密封性能；"
+                "4) 分析松动原因（振动、温度循环、安装工艺等）；"
+                "5) 处理后进行复测验证。"
+            )
+        elif len(abnormal_bolts) == 1:
+            measures.append(f"螺栓 {bolt_id} 状态异常，建议进行检查和紧固。")
+            measures.append("检查完成后进行复测，确认状态恢复正常。")
+        else:
+            measures.append("法兰面整体状态良好，继续保持日常监测。")
+
+        if not is_unbalanced and len(abnormal_bolts) == 0:
+            if hasattr(self, 'leading_bolts') and self.leading_bolts:
+                leaders = [b['bolt_id'] for b in self.leading_bolts if b.get('is_leading')]
+                if leaders:
+                    measures.append(
+                        f"领先螺栓: {', '.join(leaders[:3])}，"
+                        f"这些螺栓的状态变化可能预示整体趋势，建议重点关注。"
+                    )
+
+        return ' '.join(measures)
+
+    def comprehensive_correlation_analysis(
+        self,
+        bolt_data: Dict[str, np.ndarray],
+        bolt_ids: Optional[List[str]] = None,
+        bolt_statuses: Optional[Dict[str, int]] = None,
+        bolt_health_indices: Optional[Dict[str, float]] = None,
+        max_lag: int = 5,
+        significance_level: float = 0.05,
+        min_correlation: float = 0.3
+    ) -> Dict[str, Any]:
+        """
+        综合关联分析
+
+        一次性执行所有关联分析：
+        1. 相关性矩阵
+        2. Granger因果检验
+        3. 因果图构建
+        4. 领先螺栓识别
+        5. 传播路径分析
+        6. 根因螺栓定位
+
+        Args:
+            bolt_data: 螺栓数据字典 {bolt_id: time_series}
+            bolt_ids: 螺栓ID列表（可选）
+            bolt_statuses: 螺栓状态字典
+            bolt_health_indices: 螺栓健康度字典
+            max_lag: 最大滞后阶数
+            significance_level: Granger检验显著性水平
+            min_correlation: 最小相关系数阈值
+
+        Returns:
+            Dict: 综合分析结果
+        """
+        if bolt_ids is not None:
+            filtered_data = {bid: bolt_data[bid] for bid in bolt_ids if bid in bolt_data}
+        else:
+            filtered_data = bolt_data
+
+        self.analyze_bolt_correlations(filtered_data)
+
+        self.build_causal_graph(
+            filtered_data,
+            max_lag=max_lag,
+            significance_level=significance_level,
+            min_correlation=min_correlation
+        )
+
+        self.identify_leading_bolts(filtered_data, max_lag=max_lag)
+
+        self.analyze_propagation_paths(filtered_data, max_depth=3)
+
+        root_cause_result = self.identify_root_cause_bolt(
+            filtered_data,
+            bolt_statuses=bolt_statuses,
+            bolt_health_indices=bolt_health_indices
+        )
+
+        root_cause_measures = self.generate_root_cause_measures(root_cause_result)
+
+        result = {
+            'flange_id': self.flange_id,
+            'bolt_count': len(self.bolt_ids),
+            'bolt_ids': self.bolt_ids,
+            'correlation_matrix': self.correlation_matrix.tolist() if self.correlation_matrix is not None else None,
+            'causal_graph': self.causal_graph,
+            'leading_bolts': self.leading_bolts,
+            'propagation_paths': self.propagation_paths,
+            'root_cause_analysis': root_cause_result,
+            'root_cause_measures': root_cause_measures,
+            'analysis_params': {
+                'max_lag': max_lag,
+                'significance_level': significance_level,
+                'min_correlation': min_correlation
+            }
+        }
+
+        logger.info(f"综合关联分析完成: 法兰面={self.flange_id}, 螺栓数={len(self.bolt_ids)}")
+
+        return result
+
     @classmethod
     def load_or_create(cls, flange_id: str) -> 'FlangeAttentionModel':
         """加载已有模型或创建新模型"""

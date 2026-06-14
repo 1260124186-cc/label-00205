@@ -390,23 +390,35 @@ class PredictionOrchestrator:
         flange_id: str,
         multi_bolt_data: List[np.ndarray],
         save_to_db: bool = True,
+        bolt_ids: Optional[List[str]] = None,
+        bolt_data_dict: Optional[Dict[str, np.ndarray]] = None,
+        enable_correlation_analysis: bool = True,
     ) -> Dict[str, Any]:
         """
         法兰面状态预测（完整流水线）
 
-        流程: 预处理 → 模型/规则 → 风险评估 → 预警策略 → 审计快照 → 持久化
+        流程: 预处理 → 模型/规则 → 风险评估 → 关联分析 → 预警策略 → 审计快照 → 持久化
 
         Args:
             flange_id: 法兰面ID
             multi_bolt_data: 多螺栓数据列表
             save_to_db: 是否保存到数据库
+            bolt_ids: 螺栓ID列表（与multi_bolt_data对应）
+            bolt_data_dict: 螺栓数据字典 {bolt_id: data}，优先于multi_bolt_data+bolt_ids
+            enable_correlation_analysis: 是否启用关联分析（Granger因果、根因定位等）
 
         Returns:
             预测结果字典
         """
         start_time = time.time()
         set_bolt_id(str(flange_id))
-        
+
+        if bolt_data_dict is not None:
+            bolt_ids = list(bolt_data_dict.keys())
+            multi_bolt_data = list(bolt_data_dict.values())
+        elif bolt_ids is None:
+            bolt_ids = [f"bolt_{i}" for i in range(len(multi_bolt_data))]
+
         logger.info(f"开始法兰面预测: {flange_id}, 螺栓数: {len(multi_bolt_data)}")
 
         model_type = 'rule'
@@ -454,6 +466,44 @@ class PredictionOrchestrator:
 
         # 推荐措施
         recommendations = model.get_recommendation(final_status_code, confidence)
+
+        # Step 4.3: 关联分析（Granger因果、领先螺栓、根因定位）
+        correlation_analysis = None
+        root_cause_measures = ''
+        if enable_correlation_analysis and len(multi_bolt_data) >= 2:
+            try:
+                bolt_data_dict_analysis = {
+                    bid: data for bid, data in zip(bolt_ids, multi_bolt_data)
+                }
+
+                bolt_statuses = {}
+                for i, bid in enumerate(bolt_ids):
+                    bolt_status = self._estimate_single_bolt_status(multi_bolt_data[i])
+                    bolt_statuses[bid] = bolt_status
+
+                correlation_analysis = model.comprehensive_correlation_analysis(
+                    bolt_data=bolt_data_dict_analysis,
+                    bolt_ids=bolt_ids,
+                    bolt_statuses=bolt_statuses,
+                    bolt_health_indices=None,
+                    max_lag=5,
+                    significance_level=0.05,
+                    min_correlation=0.3
+                )
+
+                root_cause_measures = correlation_analysis.get('root_cause_measures', '')
+
+                if root_cause_measures:
+                    risk_assessment.recommendations.append(root_cause_measures)
+
+                logger.info(
+                    f"关联分析完成: 法兰面 {flange_id}, "
+                    f"因果边数={len(correlation_analysis['causal_graph']['edges']) if correlation_analysis.get('causal_graph') else 0}, "
+                    f"根因螺栓={correlation_analysis['root_cause_analysis']['root_cause_bolt']['bolt_id'] if correlation_analysis.get('root_cause_analysis', {}).get('root_cause_bolt') else 'N/A'}"
+                )
+            except Exception as e:
+                logger.warning(f"关联分析失败，跳过: {e}")
+                correlation_analysis = None
 
         # Step 4.5: CBR 知识库检索（相似案例与推荐措施增强）
         similar_cases = []
@@ -525,6 +575,8 @@ class PredictionOrchestrator:
             'confidence': float(confidence),
             'risk_score': float(risk_assessment.score),
             'risk_level': risk_assessment.level.value,
+            'bolt_count': len(multi_bolt_data),
+            'bolt_ids': bolt_ids,
             'attention_weights': attention.tolist() if attention is not None else None,
             'diagnosis': risk_assessment.diagnosis,
             'recommendations': risk_assessment.recommendations,
@@ -540,6 +592,27 @@ class PredictionOrchestrator:
                 for c in similar_cases
             ] if similar_cases else [],
             'rag_context': rag_context,
+            'correlation_matrix': (
+                correlation_analysis.get('correlation_matrix')
+                if correlation_analysis else None
+            ),
+            'causal_graph': (
+                correlation_analysis.get('causal_graph')
+                if correlation_analysis else None
+            ),
+            'leading_bolts': (
+                correlation_analysis.get('leading_bolts')
+                if correlation_analysis else None
+            ),
+            'propagation_paths': (
+                correlation_analysis.get('propagation_paths')
+                if correlation_analysis else None
+            ),
+            'root_cause_analysis': (
+                correlation_analysis.get('root_cause_analysis')
+                if correlation_analysis else None
+            ),
+            'root_cause_measures': root_cause_measures if root_cause_measures else None,
         }
 
         # Step 5: 审计快照
@@ -590,6 +663,43 @@ class PredictionOrchestrator:
         
         logger.info(f"法兰面预测完成: {flange_id} -> {final_status}, 耗时: {duration*1000:.2f}ms")
         return result
+
+    def _estimate_single_bolt_status(self, data: np.ndarray) -> int:
+        """
+        估算单个螺栓的状态等级
+
+        用于根因分析时为每个螺栓提供状态参考。
+
+        Args:
+            data: 螺栓预紧力数据
+
+        Returns:
+            int: 状态代码 0-4
+        """
+        try:
+            if len(data) < 10:
+                return 0
+
+            mean_val = np.mean(data)
+            std_val = np.std(data)
+            cv = std_val / (mean_val + 1e-6)
+
+            nominal = config.get('preload.nominal', 600)
+            deviation = abs(mean_val - nominal) / nominal
+
+            status_code = 0
+            if deviation > 0.30 or cv > 0.15:
+                status_code = 3
+            elif deviation > 0.20 or cv > 0.10:
+                status_code = 2
+            elif deviation > 0.10 or cv > 0.05:
+                status_code = 1
+            else:
+                status_code = 0
+
+            return status_code
+        except Exception:
+            return 0
 
     # ---------- 风险评估（独立接口） ----------
 
@@ -725,12 +835,17 @@ class PredictionOrchestrator:
                 if not bolt_series:
                     continue
 
-                multi_bolt_data = [np.array(v) for v in bolt_series.values()]
+                bolt_data_dict = {
+                    str(bid): np.array(data)
+                    for bid, data in bolt_series.items()
+                }
 
                 self.predict_flange(
                     flange_id=flange_id,
-                    multi_bolt_data=multi_bolt_data,
+                    multi_bolt_data=[],
+                    bolt_data_dict=bolt_data_dict,
                     save_to_db=True,
+                    enable_correlation_analysis=True,
                 )
                 success_count += 1
             except Exception as e:

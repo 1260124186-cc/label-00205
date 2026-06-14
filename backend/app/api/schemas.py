@@ -124,6 +124,94 @@ class FlangePredictionRequest(BaseModel):
         }
 
 
+class CausalGraphNodeSchema(BaseModel):
+    """因果图节点"""
+    id: str
+    index: int
+    in_degree: int
+    out_degree: int
+    total_degree: int
+    centrality: float
+
+
+class CausalGraphEdgeSchema(BaseModel):
+    """因果图边"""
+    source: str
+    target: str
+    source_idx: int
+    target_idx: int
+    weight: float
+    correlation: float
+    p_value: Optional[float] = None
+    f_stat: Optional[float] = None
+    lag: Optional[int] = None
+    type: str
+
+
+class CausalGraphSchema(BaseModel):
+    """因果图"""
+    nodes: List[CausalGraphNodeSchema]
+    edges: List[CausalGraphEdgeSchema]
+    adjacency_matrix: List[List[float]]
+    edge_weights: List[List[float]]
+    bolt_ids: List[str]
+
+
+class LeadingBoltSchema(BaseModel):
+    """领先螺栓信息"""
+    bolt_id: str
+    index: int
+    leading_score: float
+    out_degree: int
+    in_degree: int
+    net_degree: int
+    out_strength: float
+    in_strength: float
+    net_strength: float
+    trend_leadership: float
+    is_leading: bool
+
+
+class PropagationPathSchema(BaseModel):
+    """传播路径"""
+    path: List[str]
+    path_indices: List[int]
+    depth: int
+    total_weight: float
+    avg_weight: float
+
+
+class PropagationPathsSchema(BaseModel):
+    """传播路径分析结果"""
+    source_bolt: str
+    source_idx: int
+    paths: List[PropagationPathSchema]
+    total_path_count: int
+    reachable_bolts: List[str]
+    propagation_distance: Dict[str, Optional[int]]
+    max_depth: int
+
+
+class RootCauseBoltSchema(BaseModel):
+    """根因螺栓信息"""
+    bolt_id: str
+    index: int
+    root_cause_score: float
+    status_code: int
+    health_index: float
+    is_abnormal: bool
+
+
+class RootCauseAnalysisSchema(BaseModel):
+    """根因分析结果"""
+    root_cause_bolt: Optional[RootCauseBoltSchema] = None
+    root_cause_ranking: List[RootCauseBoltSchema]
+    abnormal_bolts: List[str]
+    is_unbalanced_loosening: bool
+    total_bolts: int
+    abnormal_count: int
+
+
 class FlangePredictionResponse(BaseModel):
     """法兰面预测响应"""
     flange_id: str
@@ -137,6 +225,12 @@ class FlangePredictionResponse(BaseModel):
     diagnosis: str
     recommendations: List[str]
     prediction_time: datetime
+    correlation_matrix: Optional[List[List[float]]] = None
+    causal_graph: Optional[CausalGraphSchema] = None
+    leading_bolts: Optional[List[LeadingBoltSchema]] = None
+    propagation_paths: Optional[PropagationPathsSchema] = None
+    root_cause_analysis: Optional[RootCauseAnalysisSchema] = None
+    root_cause_measures: Optional[str] = None
 
 
 # ==================== 风险评估 ====================

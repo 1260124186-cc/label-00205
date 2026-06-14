@@ -218,13 +218,25 @@ class PredictionRepository:
         """
         try:
             with get_db() as db:
+                recommendations = result.get('recommendations', [])
+                root_cause_measures = result.get('root_cause_measures', '')
+
+                all_measures = list(recommendations) if recommendations else []
+                if root_cause_measures and root_cause_measures not in all_measures:
+                    all_measures.append(root_cause_measures)
+
+                rec_measures_str = '; '.join(all_measures) if all_measures else ''
+
+                if len(rec_measures_str) > 1000:
+                    rec_measures_str = rec_measures_str[:997] + '...'
+
                 prediction = AbnormalPrediction(
                     flm_id=flange_id,
                     node_type='法兰面',
                     year_month=datetime.now().strftime('%Y%m'),
                     pw_type=result['status'],
                     confidence=result['confidence'],
-                    rec_measures=', '.join(result['recommendations']),
+                    rec_measures=rec_measures_str,
                     create_time=datetime.now()
                 )
                 db.add(prediction)
