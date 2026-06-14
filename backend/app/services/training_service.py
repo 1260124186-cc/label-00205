@@ -28,6 +28,7 @@ from app.models.bolt_lstm import BoltLSTMModel
 from app.models.flange_attention import FlangeAttentionModel
 from app.services.preprocessing import DataPreprocessor
 from app.services.feature_engineering import FeatureEngineer
+from app.api.validators import get_validator, ValidationMode, format_validation_errors
 from app.utils.config import config
 from app.utils.database import get_db, BoltData
 
@@ -142,6 +143,39 @@ class TrainingService:
         
         # 获取训练数据
         data, labels = self._load_bolt_training_data(bolt_id)
+        
+        # 数据校验（宽松模式，允许自动修正）
+        validator = get_validator()
+        validation_result = validator.validate_training_data(
+            data=data,
+            labels=labels,
+            min_samples=100,
+            mode=ValidationMode.LENIENT
+        )
+        
+        if not validation_result.is_valid:
+            logger.warning(
+                f"训练数据校验失败: {bolt_id}, "
+                f"错误数: {len(validation_result.errors)}, "
+                f"警告数: {len(validation_result.warnings)}"
+            )
+            for err in validation_result.errors:
+                logger.warning(f"  {err.code}: {err.message}")
+            
+            error_info = format_validation_errors(validation_result)
+            return {
+                'status': 'failed',
+                'message': '训练数据校验失败',
+                'validation_errors': error_info
+            }
+        
+        # 记录校验警告
+        if validation_result.warnings:
+            logger.info(
+                f"训练数据校验警告 ({bolt_id}): {len(validation_result.warnings)} 条警告"
+            )
+            for warn in validation_result.warnings:
+                logger.info(f"  警告: {warn}")
         
         if len(data) < 100:
             logger.warning(f"训练数据不足: {bolt_id}")

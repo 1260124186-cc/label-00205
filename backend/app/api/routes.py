@@ -122,6 +122,12 @@ from app.api.schemas import (
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
+from app.api.validators import (
+    DataValidator,
+    ValidationMode,
+    format_validation_errors,
+    get_validator,
+)
 from app.utils.config import config
 from app import __version__
 
@@ -244,7 +250,10 @@ async def health_check():
     tags=["预测"],
     summary="螺栓状态预测"
 )
-async def predict_bolt(request: BoltPredictionRequest):
+async def predict_bolt(
+    request: BoltPredictionRequest,
+    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式")
+):
     """
     预测单个螺栓的状态
 
@@ -256,33 +265,49 @@ async def predict_bolt(request: BoltPredictionRequest):
     - 2: 检查级预警
     - 3: 紧急级预警
     - 4: 故障
+
+    校验模式:
+    - strict: 严格模式，数据不合规直接拒绝
+    - lenient: 宽松模式，自动截断/填充数据
     """
     try:
         service = get_prediction_service()
+        validator = get_validator()
 
         # 获取螺栓ID（支持中文字段名）
         bolt_id = getattr(request, '螺栓id', None) or request.bolt_id
 
-        # 解析输入数据
-        timestamps = []
-        values = []
+        # 确定校验模式
+        mode = ValidationMode.LENIENT if validation_mode.lower() == 'lenient' else ValidationMode.STRICT
 
-        for item in request.data:
-            if len(item) >= 2:
-                timestamps.append(item[0])
-                values.append(float(item[1]))
+        # 数据校验
+        validation_result = validator.validate_bolt_prediction(
+            bolt_id=bolt_id,
+            data=request.data,
+            mode=mode
+        )
 
-        if len(values) == 0:
-            raise HTTPException(status_code=400, detail="数据为空")
+        if not validation_result.is_valid:
+            error_response = format_validation_errors(validation_result)
+            raise HTTPException(
+                status_code=400,
+                detail=error_response
+            )
+
+        # 使用校验清洗后的数据
+        cleaned = validation_result.cleaned_data
+        values = cleaned['values']
+        timestamps = cleaned['timestamps']
 
         # 执行预测
         result = service.predict_bolt(
             bolt_id=bolt_id,
-            data=np.array(values),
+            data=values,
             timestamps=timestamps
         )
 
-        return BoltPredictionResponse(
+        # 添加校验信息到响应头
+        response = BoltPredictionResponse(
             bolt_id=bolt_id,
             status=result['status'],
             status_code=result['status_code'],
@@ -294,6 +319,10 @@ async def predict_bolt(request: BoltPredictionRequest):
             prediction_time=datetime.now()
         )
 
+        return response
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"螺栓预测失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -307,31 +336,46 @@ async def predict_bolt(request: BoltPredictionRequest):
     tags=["预测"],
     summary="法兰面状态预测"
 )
-async def predict_flange(request: FlangePredictionRequest):
+async def predict_flange(
+    request: FlangePredictionRequest,
+    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式")
+):
     """
     预测法兰面的整体状态
 
     基于法兰面上所有螺栓的预紧力数据，预测法兰面状态。
+
+    校验模式:
+    - strict: 严格模式，数据不合规直接拒绝
+    - lenient: 宽松模式，自动截断/填充数据
     """
     try:
         service = get_prediction_service()
+        validator = get_validator()
 
         # 获取法兰面ID
         flange_id = getattr(request, '法兰面id', None) or request.flange_id
 
-        # 解析多螺栓数据
-        multi_bolt_data = []
+        # 确定校验模式
+        mode = ValidationMode.LENIENT if validation_mode.lower() == 'lenient' else ValidationMode.STRICT
 
-        for bolt_data in request.data:
-            values = []
-            for item in bolt_data:
-                if len(item) >= 2:
-                    values.append(float(item[1]))
-            if values:
-                multi_bolt_data.append(np.array(values))
+        # 数据校验
+        validation_result = validator.validate_flange_prediction(
+            flange_id=flange_id,
+            data=request.data,
+            mode=mode
+        )
 
-        if len(multi_bolt_data) == 0:
-            raise HTTPException(status_code=400, detail="数据为空")
+        if not validation_result.is_valid:
+            error_response = format_validation_errors(validation_result)
+            raise HTTPException(
+                status_code=400,
+                detail=error_response
+            )
+
+        # 使用校验清洗后的数据
+        cleaned = validation_result.cleaned_data
+        multi_bolt_data = cleaned['all_values']
 
         # 执行预测
         result = service.predict_flange(
@@ -353,6 +397,8 @@ async def predict_flange(request: FlangePredictionRequest):
             prediction_time=datetime.now()
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"法兰面预测失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -366,29 +412,50 @@ async def predict_flange(request: FlangePredictionRequest):
     tags=["风险评估"],
     summary="风险评估"
 )
-async def assess_risk(request: RiskAssessmentRequest):
+async def assess_risk(
+    request: RiskAssessmentRequest,
+    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式")
+):
     """
     评估节点（螺栓或法兰面）的风险
 
     返回风险评分(1-10)和风险等级(低/中/高)。
+
+    校验模式:
+    - strict: 严格模式，数据不合规直接拒绝
+    - lenient: 宽松模式，自动截断/填充数据
     """
     try:
         service = get_prediction_service()
+        validator = get_validator()
 
-        # 解析数据
-        values = []
-        for item in request.data:
-            if len(item) >= 2:
-                values.append(float(item[1]))
+        # 确定校验模式
+        mode = ValidationMode.LENIENT if validation_mode.lower() == 'lenient' else ValidationMode.STRICT
 
-        if len(values) == 0:
-            raise HTTPException(status_code=400, detail="数据为空")
+        # 数据校验
+        validation_result = validator.validate_risk_assessment(
+            node_id=request.node_id,
+            node_type=request.node_type,
+            data=request.data,
+            mode=mode
+        )
+
+        if not validation_result.is_valid:
+            error_response = format_validation_errors(validation_result)
+            raise HTTPException(
+                status_code=400,
+                detail=error_response
+            )
+
+        # 使用校验清洗后的数据
+        cleaned = validation_result.cleaned_data
+        values = cleaned['values']
 
         # 执行评估
         result = service.assess_risk(
             node_id=request.node_id,
             node_type=request.node_type,
-            data=np.array(values)
+            data=values
         )
 
         return RiskAssessmentResponse(
@@ -402,6 +469,8 @@ async def assess_risk(request: RiskAssessmentRequest):
             confidence=result['confidence']
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"风险评估失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
