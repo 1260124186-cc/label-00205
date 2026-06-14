@@ -18,7 +18,14 @@ import type {
   ModelVersion,
   TrainingSession,
   EpochMetrics,
-  TrainingStatus
+  TrainingStatus,
+  AlertRule,
+  AlertRuleStatus,
+  AlertRuleCondition,
+  ThresholdPreset,
+  ThresholdItem,
+  CronTask,
+  CronTaskStatus
 } from '@/types'
 
 const collectorNames = ['一号采集器', '二号采集器', '三号采集器', '四号采集器', '五号采集器']
@@ -915,4 +922,487 @@ export function mockCompareVersions(
       v2: v2.config
     }
   }
+}
+
+// ==================== 配置中心 Mock 数据 ====================
+
+let mockAlertRules: AlertRule[] | null = null
+let mockThresholdPresets: ThresholdPreset[] | null = null
+let mockCronTasks: CronTask[] | null = null
+
+const ruleTemplates = [
+  { name: '预紧力低于阈值预警', desc: '当螺栓当前预紧力低于标称值的85%时触发预警', strategy: 1 as AlertStrategy, level: 2 as AlertLevel, nodeType: 'bolt' as const },
+  { name: '高风险评分预警', desc: '当风险评分超过7时触发紧急预警', strategy: 2 as AlertStrategy, level: 3 as AlertLevel, nodeType: 'both' as const },
+  { name: '健康指数下降预警', desc: '当健康指数低于60时触发检查级预警', strategy: 1 as AlertStrategy, level: 2 as AlertLevel, nodeType: 'bolt' as const },
+  { name: '预紧力骤降预警', desc: '当预紧力低于标称值70%时触发紧急预警', strategy: 2 as AlertStrategy, level: 3 as AlertLevel, nodeType: 'bolt' as const },
+  { name: '法兰面综合风险预警', desc: '当法兰面风险评分高于6时触发关注级预警', strategy: 1 as AlertStrategy, level: 1 as AlertLevel, nodeType: 'flange' as const },
+  { name: '置信度异常预警', desc: '当模型预测置信度低于0.7时触发关注级预警', strategy: 1 as AlertStrategy, level: 1 as AlertLevel, nodeType: 'both' as const },
+  { name: '状态码异常预警', desc: '当状态码达到检查级(2)以上时触发预警', strategy: 2 as AlertStrategy, level: 2 as AlertLevel, nodeType: 'both' as const },
+  { name: '预紧力严重偏离预警', desc: '当预紧力偏离标称值30%以上时触发故障级预警', strategy: 2 as AlertStrategy, level: 4 as AlertLevel, nodeType: 'bolt' as const }
+]
+
+function generateMockAlertRules(): AlertRule[] {
+  const rules: AlertRule[] = []
+  const now = Date.now()
+
+  for (let i = 0; i < ruleTemplates.length; i++) {
+    const tpl = ruleTemplates[i]
+    const statusRoll = Math.random()
+    const status: AlertRuleStatus = statusRoll < 0.5 ? 'active' : statusRoll < 0.8 ? 'inactive' : 'draft'
+    const conditions: AlertRuleCondition[] = []
+
+    if (tpl.name.includes('预紧力')) {
+      conditions.push({
+        field: 'current_preload',
+        operator: tpl.level >= 3 ? 'lt' : 'lte',
+        value: tpl.level >= 3 ? 300 : 350
+      })
+      if (tpl.level >= 3) {
+        conditions.push({
+          field: 'preload_ratio',
+          operator: 'lt',
+          value: 0.7
+        })
+      }
+    } else if (tpl.name.includes('风险')) {
+      conditions.push({
+        field: 'risk_score',
+        operator: 'gte',
+        value: tpl.level >= 3 ? 7 : 6
+      })
+    } else if (tpl.name.includes('健康')) {
+      conditions.push({
+        field: 'health_index',
+        operator: 'lt',
+        value: 60
+      })
+    } else if (tpl.name.includes('置信度')) {
+      conditions.push({
+        field: 'confidence',
+        operator: 'lt',
+        value: 0.7
+      })
+    } else if (tpl.name.includes('状态码')) {
+      conditions.push({
+        field: 'status_code',
+        operator: 'gte',
+        value: 2
+      })
+    }
+
+    const daysAgo = Math.floor(Math.random() * 30)
+    rules.push({
+      id: i + 1,
+      name: tpl.name,
+      description: tpl.desc,
+      strategy_type: tpl.strategy,
+      alert_level: tpl.level,
+      conditions,
+      logic_operator: conditions.length > 1 ? 'and' : 'and',
+      node_type: tpl.nodeType,
+      silence_minutes: [30, 60, 120, 240][Math.floor(Math.random() * 4)],
+      upgrade_enabled: Math.random() < 0.5,
+      upgrade_interval_minutes: [60, 120, 180][Math.floor(Math.random() * 3)],
+      status,
+      trigger_count: status === 'active' ? Math.floor(Math.random() * 200) + 10 : 0,
+      last_trigger_time: status === 'active'
+        ? new Date(now - Math.random() * 2 * 24 * 60 * 60 * 1000).toISOString()
+        : null,
+      create_time: new Date(now - daysAgo * 24 * 60 * 60 * 1000).toISOString(),
+      update_time: new Date(now - Math.random() * daysAgo * 24 * 60 * 60 * 1000).toISOString()
+    })
+  }
+
+  return rules
+}
+
+export function getMockAlertRules(): AlertRule[] {
+  if (!mockAlertRules) {
+    mockAlertRules = generateMockAlertRules()
+  }
+  return mockAlertRules
+}
+
+export function mockCreateAlertRule(data: import('@/types').AlertRuleCreateRequest): AlertRule {
+  if (!mockAlertRules) mockAlertRules = generateMockAlertRules()
+  const rule: AlertRule = {
+    id: Math.max(0, ...mockAlertRules.map(r => r.id)) + 1,
+    name: data.name,
+    description: data.description || '',
+    strategy_type: data.strategy_type,
+    alert_level: data.alert_level,
+    conditions: data.conditions,
+    logic_operator: data.logic_operator || 'and',
+    node_type: data.node_type || 'both',
+    silence_minutes: data.silence_minutes || 60,
+    upgrade_enabled: data.upgrade_enabled || false,
+    upgrade_interval_minutes: data.upgrade_interval_minutes || 120,
+    status: data.status || 'draft',
+    trigger_count: 0,
+    last_trigger_time: null,
+    create_time: new Date().toISOString(),
+    update_time: new Date().toISOString()
+  }
+  mockAlertRules.unshift(rule)
+  return rule
+}
+
+export function mockUpdateAlertRule(id: number, data: import('@/types').AlertRuleUpdateRequest): AlertRule | null {
+  if (!mockAlertRules) mockAlertRules = generateMockAlertRules()
+  const idx = mockAlertRules.findIndex(r => r.id === id)
+  if (idx < 0) return null
+  const updated = { ...mockAlertRules[idx], ...data, update_time: new Date().toISOString() }
+  mockAlertRules[idx] = updated
+  return updated
+}
+
+export function mockDeleteAlertRule(id: number): boolean {
+  if (!mockAlertRules) mockAlertRules = generateMockAlertRules()
+  const idx = mockAlertRules.findIndex(r => r.id === id)
+  if (idx < 0) return false
+  mockAlertRules.splice(idx, 1)
+  return true
+}
+
+export function mockToggleAlertRule(id: number): AlertRule | null {
+  if (!mockAlertRules) mockAlertRules = generateMockAlertRules()
+  const rule = mockAlertRules.find(r => r.id === id)
+  if (!rule) return null
+  rule.status = rule.status === 'active' ? 'inactive' : 'active'
+  rule.update_time = new Date().toISOString()
+  return rule
+}
+
+function generateMockThresholdPresets(): ThresholdPreset[] {
+  const now = Date.now()
+
+  const defaultPreset: ThresholdPreset = {
+    id: 1,
+    name: '默认阈值方案',
+    description: '系统默认的预警阈值配置，适用于常规螺栓预紧力监控',
+    is_default: true,
+    thresholds: [
+      { level: 1, field: 'preload_ratio', operator: 'lt', value: 0.9, color: '#eab308' },
+      { level: 2, field: 'preload_ratio', operator: 'lt', value: 0.85, color: '#f97316' },
+      { level: 3, field: 'preload_ratio', operator: 'lt', value: 0.75, color: '#ef4444' },
+      { level: 4, field: 'preload_ratio', operator: 'lt', value: 0.65, color: '#7f1d1d' },
+      { level: 1, field: 'risk_score', operator: 'gte', value: 4, color: '#eab308' },
+      { level: 2, field: 'risk_score', operator: 'gte', value: 6, color: '#f97316' },
+      { level: 3, field: 'risk_score', operator: 'gte', value: 8, color: '#ef4444' },
+      { level: 4, field: 'risk_score', operator: 'gte', value: 9.5, color: '#7f1d1d' },
+      { level: 1, field: 'health_index', operator: 'lt', value: 70, color: '#eab308' },
+      { level: 2, field: 'health_index', operator: 'lt', value: 50, color: '#f97316' },
+      { level: 3, field: 'health_index', operator: 'lt', value: 30, color: '#ef4444' },
+      { level: 4, field: 'health_index', operator: 'lt', value: 15, color: '#7f1d1d' }
+    ],
+    create_time: new Date(now - 60 * 24 * 60 * 60 * 1000).toISOString(),
+    update_time: new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString()
+  }
+
+  const strictPreset: ThresholdPreset = {
+    id: 2,
+    name: '严格阈值方案',
+    description: '更严格的预警阈值配置，适用于高安全等级要求的场景',
+    is_default: false,
+    thresholds: [
+      { level: 1, field: 'preload_ratio', operator: 'lt', value: 0.93, color: '#eab308' },
+      { level: 2, field: 'preload_ratio', operator: 'lt', value: 0.88, color: '#f97316' },
+      { level: 3, field: 'preload_ratio', operator: 'lt', value: 0.80, color: '#ef4444' },
+      { level: 4, field: 'preload_ratio', operator: 'lt', value: 0.70, color: '#7f1d1d' },
+      { level: 1, field: 'risk_score', operator: 'gte', value: 3, color: '#eab308' },
+      { level: 2, field: 'risk_score', operator: 'gte', value: 5, color: '#f97316' },
+      { level: 3, field: 'risk_score', operator: 'gte', value: 7, color: '#ef4444' },
+      { level: 4, field: 'risk_score', operator: 'gte', value: 9, color: '#7f1d1d' },
+      { level: 1, field: 'health_index', operator: 'lt', value: 80, color: '#eab308' },
+      { level: 2, field: 'health_index', operator: 'lt', value: 60, color: '#f97316' },
+      { level: 3, field: 'health_index', operator: 'lt', value: 40, color: '#ef4444' },
+      { level: 4, field: 'health_index', operator: 'lt', value: 20, color: '#7f1d1d' }
+    ],
+    create_time: new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    update_time: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString()
+  }
+
+  const relaxedPreset: ThresholdPreset = {
+    id: 3,
+    name: '宽松阈值方案',
+    description: '较宽松的预警阈值配置，适用于低风险容忍度的场景',
+    is_default: false,
+    thresholds: [
+      { level: 1, field: 'preload_ratio', operator: 'lt', value: 0.85, color: '#eab308' },
+      { level: 2, field: 'preload_ratio', operator: 'lt', value: 0.75, color: '#f97316' },
+      { level: 3, field: 'preload_ratio', operator: 'lt', value: 0.65, color: '#ef4444' },
+      { level: 4, field: 'preload_ratio', operator: 'lt', value: 0.55, color: '#7f1d1d' },
+      { level: 1, field: 'risk_score', operator: 'gte', value: 5, color: '#eab308' },
+      { level: 2, field: 'risk_score', operator: 'gte', value: 7, color: '#f97316' },
+      { level: 3, field: 'risk_score', operator: 'gte', value: 8.5, color: '#ef4444' },
+      { level: 4, field: 'risk_score', operator: 'gte', value: 9.8, color: '#7f1d1d' }
+    ],
+    create_time: new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString(),
+    update_time: new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString()
+  }
+
+  return [defaultPreset, strictPreset, relaxedPreset]
+}
+
+export function getMockThresholdPresets(): ThresholdPreset[] {
+  if (!mockThresholdPresets) {
+    mockThresholdPresets = generateMockThresholdPresets()
+  }
+  return mockThresholdPresets
+}
+
+export function mockCreateThresholdPreset(data: import('@/types').ThresholdPresetCreateRequest): ThresholdPreset {
+  if (!mockThresholdPresets) mockThresholdPresets = generateMockThresholdPresets()
+  const preset: ThresholdPreset = {
+    id: Math.max(0, ...mockThresholdPresets.map(p => p.id)) + 1,
+    name: data.name,
+    description: data.description || '',
+    is_default: data.is_default || false,
+    thresholds: data.thresholds,
+    create_time: new Date().toISOString(),
+    update_time: new Date().toISOString()
+  }
+  mockThresholdPresets.push(preset)
+  return preset
+}
+
+export function mockUpdateThresholdPreset(id: number, data: import('@/types').ThresholdPresetUpdateRequest): ThresholdPreset | null {
+  if (!mockThresholdPresets) mockThresholdPresets = generateMockThresholdPresets()
+  const idx = mockThresholdPresets.findIndex(p => p.id === id)
+  if (idx < 0) return null
+  const updated = { ...mockThresholdPresets[idx], ...data, update_time: new Date().toISOString() }
+  mockThresholdPresets[idx] = updated
+  return updated
+}
+
+export function mockDeleteThresholdPreset(id: number): boolean {
+  if (!mockThresholdPresets) mockThresholdPresets = generateMockThresholdPresets()
+  const idx = mockThresholdPresets.findIndex(p => p.id === id)
+  if (idx < 0) return false
+  mockThresholdPresets.splice(idx, 1)
+  return true
+}
+
+export function mockSetDefaultPreset(id: number): ThresholdPreset | null {
+  if (!mockThresholdPresets) mockThresholdPresets = generateMockThresholdPresets()
+  const target = mockThresholdPresets.find(p => p.id === id)
+  if (!target) return null
+  for (const p of mockThresholdPresets) {
+    p.is_default = p.id === id
+  }
+  target.update_time = new Date().toISOString()
+  return target
+}
+
+function cronToHuman(expr: string): string {
+  const parts = expr.split(' ')
+  if (parts.length !== 5) return expr
+  const [min, hour, day, month, weekday] = parts
+  if (min === '*/5' && hour === '*') return '每5分钟'
+  if (min === '*/10' && hour === '*') return '每10分钟'
+  if (min === '*/15' && hour === '*') return '每15分钟'
+  if (min === '*/30' && hour === '*') return '每30分钟'
+  if (min === '0' && hour === '*') return '每小时'
+  if (min === '0' && hour === '*/2') return '每2小时'
+  if (min === '0' && hour === '*/4') return '每4小时'
+  if (min === '0' && hour === '*/6') return '每6小时'
+  if (min === '0' && hour === '8') return '每天08:00'
+  if (min === '0' && hour === '9') return '每天09:00'
+  if (min === '30' && hour === '8') return '每天08:30'
+  if (min === '0' && hour === '0') return '每天00:00'
+  if (min === '0' && hour === '0' && weekday === '1') return '每周一00:00'
+  if (min === '0' && hour === '2' && day === '1') return '每月1日02:00'
+  return expr
+}
+
+function generateMockCronTasks(): CronTask[] {
+  const now = Date.now()
+  const tasks: CronTask[] = [
+    {
+      id: 1,
+      name: '实时数据采集',
+      description: '从采集器获取螺栓预紧力实时数据',
+      task_type: 'data_collect',
+      cron_expression: '*/5 * * * *',
+      cron_human: '每5分钟',
+      status: 'running',
+      last_run_time: new Date(now - 3 * 60 * 1000).toISOString(),
+      next_run_time: new Date(now + 2 * 60 * 1000).toISOString(),
+      last_run_duration_ms: 1200,
+      run_count: 12580,
+      error_count: 3,
+      last_error: null,
+      config: { collector_ids: ['COL001', 'COL002', 'COL003'], timeout_seconds: 30 },
+      create_time: new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString(),
+      update_time: new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString()
+    },
+    {
+      id: 2,
+      name: '模型预测推理',
+      description: '定时运行模型推理，更新螺栓状态预测',
+      task_type: 'alert_check',
+      cron_expression: '*/10 * * * *',
+      cron_human: '每10分钟',
+      status: 'running',
+      last_run_time: new Date(now - 7 * 60 * 1000).toISOString(),
+      next_run_time: new Date(now + 3 * 60 * 1000).toISOString(),
+      last_run_duration_ms: 8500,
+      run_count: 6280,
+      error_count: 12,
+      last_error: null,
+      config: { model_type: 'bolt', batch_size: 64, use_gpu: true },
+      create_time: new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString(),
+      update_time: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString()
+    },
+    {
+      id: 3,
+      name: '预警规则检测',
+      description: '检测预警规则并生成预警事件',
+      task_type: 'alert_check',
+      cron_expression: '*/5 * * * *',
+      cron_human: '每5分钟',
+      status: 'running',
+      last_run_time: new Date(now - 2 * 60 * 1000).toISOString(),
+      next_run_time: new Date(now + 3 * 60 * 1000).toISOString(),
+      last_run_duration_ms: 3200,
+      run_count: 12580,
+      error_count: 5,
+      last_error: null,
+      config: { check_all_rules: true, max_alerts_per_run: 50 },
+      create_time: new Date(now - 60 * 24 * 60 * 60 * 1000).toISOString(),
+      update_time: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString()
+    },
+    {
+      id: 4,
+      name: '每日巡检报告',
+      description: '生成每日螺栓预紧力巡检报告',
+      task_type: 'report_generate',
+      cron_expression: '0 8 * * *',
+      cron_human: '每天08:00',
+      status: 'running',
+      last_run_time: new Date(now - 16 * 60 * 60 * 1000).toISOString(),
+      next_run_time: new Date(now + 8 * 60 * 60 * 1000).toISOString(),
+      last_run_duration_ms: 15000,
+      run_count: 90,
+      error_count: 2,
+      last_error: null,
+      config: { report_type: 'daily', include_charts: true, recipients: ['admin@company.com'] },
+      create_time: new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString(),
+      update_time: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString()
+    },
+    {
+      id: 5,
+      name: '模型自动训练',
+      description: '每周自动训练模型，保持模型精度',
+      task_type: 'model_train',
+      cron_expression: '0 2 * * 1',
+      cron_human: '每周一02:00',
+      status: 'stopped',
+      last_run_time: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
+      next_run_time: null,
+      last_run_duration_ms: 180000,
+      run_count: 12,
+      error_count: 1,
+      last_error: null,
+      config: { epochs: 30, learning_rate: 0.001, auto_activate: false },
+      create_time: new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString(),
+      update_time: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString()
+    },
+    {
+      id: 6,
+      name: '历史数据归档',
+      description: '归档超过90天的历史监控数据',
+      task_type: 'data_cleanup',
+      cron_expression: '0 0 1 * *',
+      cron_human: '每月1日00:00',
+      status: 'stopped',
+      last_run_time: new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString(),
+      next_run_time: null,
+      last_run_duration_ms: 45000,
+      run_count: 3,
+      error_count: 0,
+      last_error: null,
+      config: { archive_after_days: 90, compress: true },
+      create_time: new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString(),
+      update_time: new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString()
+    }
+  ]
+
+  return tasks
+}
+
+export function getMockCronTasks(): CronTask[] {
+  if (!mockCronTasks) {
+    mockCronTasks = generateMockCronTasks()
+  }
+  return mockCronTasks
+}
+
+export function mockCreateCronTask(data: import('@/types').CronTaskCreateRequest): CronTask {
+  if (!mockCronTasks) mockCronTasks = generateMockCronTasks()
+  const task: CronTask = {
+    id: Math.max(0, ...mockCronTasks.map(t => t.id)) + 1,
+    name: data.name,
+    description: data.description || '',
+    task_type: data.task_type,
+    cron_expression: data.cron_expression,
+    cron_human: cronToHuman(data.cron_expression),
+    status: 'stopped',
+    last_run_time: null,
+    next_run_time: null,
+    last_run_duration_ms: null,
+    run_count: 0,
+    error_count: 0,
+    last_error: null,
+    config: data.config || {},
+    create_time: new Date().toISOString(),
+    update_time: new Date().toISOString()
+  }
+  mockCronTasks.push(task)
+  return task
+}
+
+export function mockUpdateCronTask(id: number, data: import('@/types').CronTaskUpdateRequest): CronTask | null {
+  if (!mockCronTasks) mockCronTasks = generateMockCronTasks()
+  const idx = mockCronTasks.findIndex(t => t.id === id)
+  if (idx < 0) return null
+  const updated = { ...mockCronTasks[idx], ...data, update_time: new Date().toISOString() }
+  if (data.cron_expression) {
+    updated.cron_human = cronToHuman(data.cron_expression)
+  }
+  mockCronTasks[idx] = updated
+  return updated
+}
+
+export function mockDeleteCronTask(id: number): boolean {
+  if (!mockCronTasks) mockCronTasks = generateMockCronTasks()
+  const idx = mockCronTasks.findIndex(t => t.id === id)
+  if (idx < 0) return false
+  mockCronTasks.splice(idx, 1)
+  return true
+}
+
+export function mockToggleCronTask(id: number): CronTask | null {
+  if (!mockCronTasks) mockCronTasks = generateMockCronTasks()
+  const task = mockCronTasks.find(t => t.id === id)
+  if (!task) return null
+  task.status = task.status === 'running' ? 'stopped' : 'running'
+  task.update_time = new Date().toISOString()
+  if (task.status === 'running') {
+    task.next_run_time = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+  } else {
+    task.next_run_time = null
+  }
+  return task
+}
+
+export function mockRunCronTaskNow(id: number): CronTask | null {
+  if (!mockCronTasks) mockCronTasks = generateMockCronTasks()
+  const task = mockCronTasks.find(t => t.id === id)
+  if (!task) return null
+  task.last_run_time = new Date().toISOString()
+  task.last_run_duration_ms = Math.floor(Math.random() * 10000) + 500
+  task.run_count++
+  task.update_time = new Date().toISOString()
+  return task
 }

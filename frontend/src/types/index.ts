@@ -430,3 +430,207 @@ export interface ModelListResponse {
   total: number
   models: ModelItem[]
 }
+
+// ==================== 配置中心相关类型 ====================
+
+export type AlertRuleStatus = 'active' | 'inactive' | 'draft'
+
+export const AlertRuleStatusMap: Record<AlertRuleStatus, string> = {
+  active: '已启用',
+  inactive: '已停用',
+  draft: '草稿'
+}
+
+export const AlertRuleStatusColorMap: Record<AlertRuleStatus, string> = {
+  active: '#22c55e',
+  inactive: '#64748b',
+  draft: '#eab308'
+}
+
+export interface AlertRuleCondition {
+  field: string
+  operator: 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq' | 'between'
+  value: number | string
+  value2?: number
+}
+
+export const ConditionOperatorMap: Record<string, string> = {
+  gt: '大于',
+  gte: '大于等于',
+  lt: '小于',
+  lte: '小于等于',
+  eq: '等于',
+  neq: '不等于',
+  between: '介于'
+}
+
+export const ConditionFieldMap: Record<string, string> = {
+  current_preload: '当前预紧力',
+  nominal_preload: '标称预紧力',
+  preload_ratio: '预紧力比率',
+  risk_score: '风险评分',
+  confidence: '置信度',
+  health_index: '健康指数',
+  status_code: '状态码'
+}
+
+export interface AlertRule {
+  id: number
+  name: string
+  description: string
+  strategy_type: AlertStrategy
+  alert_level: AlertLevel
+  conditions: AlertRuleCondition[]
+  logic_operator: 'and' | 'or'
+  node_type: 'bolt' | 'flange' | 'both'
+  silence_minutes: number
+  upgrade_enabled: boolean
+  upgrade_interval_minutes: number
+  status: AlertRuleStatus
+  trigger_count: number
+  last_trigger_time: string | null
+  create_time: string
+  update_time: string
+}
+
+export interface AlertRuleCreateRequest {
+  name: string
+  description?: string
+  strategy_type: AlertStrategy
+  alert_level: AlertLevel
+  conditions: AlertRuleCondition[]
+  logic_operator?: 'and' | 'or'
+  node_type?: 'bolt' | 'flange' | 'both'
+  silence_minutes?: number
+  upgrade_enabled?: boolean
+  upgrade_interval_minutes?: number
+  status?: AlertRuleStatus
+}
+
+export interface AlertRuleUpdateRequest extends Partial<AlertRuleCreateRequest> {}
+
+export interface ThresholdPreset {
+  id: number
+  name: string
+  description: string
+  is_default: boolean
+  thresholds: ThresholdItem[]
+  create_time: string
+  update_time: string
+}
+
+export interface ThresholdItem {
+  level: AlertLevel
+  field: string
+  operator: 'gt' | 'gte' | 'lt' | 'lte' | 'eq'
+  value: number
+  color: string
+}
+
+export interface ThresholdPresetCreateRequest {
+  name: string
+  description?: string
+  is_default?: boolean
+  thresholds: ThresholdItem[]
+}
+
+export interface ThresholdPresetUpdateRequest extends Partial<ThresholdPresetCreateRequest> {}
+
+export type CronTaskStatus = 'running' | 'stopped' | 'error'
+
+export const CronTaskStatusMap: Record<CronTaskStatus, string> = {
+  running: '运行中',
+  stopped: '已停止',
+  error: '异常'
+}
+
+export const CronTaskStatusColorMap: Record<CronTaskStatus, string> = {
+  running: '#22c55e',
+  stopped: '#64748b',
+  error: '#ef4444'
+}
+
+export interface CronTask {
+  id: number
+  name: string
+  description: string
+  task_type: 'data_collect' | 'model_train' | 'alert_check' | 'report_generate' | 'data_cleanup'
+  cron_expression: string
+  cron_human: string
+  status: CronTaskStatus
+  last_run_time: string | null
+  next_run_time: string | null
+  last_run_duration_ms: number | null
+  run_count: number
+  error_count: number
+  last_error: string | null
+  config: Record<string, unknown>
+  create_time: string
+  update_time: string
+}
+
+export const CronTaskTypeMap: Record<string, string> = {
+  data_collect: '数据采集',
+  model_train: '模型训练',
+  alert_check: '预警检测',
+  report_generate: '报告生成',
+  data_cleanup: '数据清理'
+}
+
+export const CronTaskTypeColorMap: Record<string, string> = {
+  data_collect: '#3b82f6',
+  model_train: '#8b5cf6',
+  alert_check: '#f97316',
+  report_generate: '#22c55e',
+  data_cleanup: '#64748b'
+}
+
+export interface CronTaskCreateRequest {
+  name: string
+  description?: string
+  task_type: CronTask['task_type']
+  cron_expression: string
+  config?: Record<string, unknown>
+}
+
+export interface CronTaskUpdateRequest extends Partial<CronTaskCreateRequest> {}
+
+export interface WarningStrategyConfig {
+  strategy_type: AlertStrategy
+  strategy_1_confidence_threshold: number
+  strategy_1_false_positive_threshold: number
+  strategy_2_confidence_threshold: number
+  strategy_2_false_negative_threshold: number
+}
+
+export interface ThresholdConfig {
+  high_risk_threshold: number
+  medium_risk_threshold: number
+  min_normal_preload: number
+  max_normal_preload: number
+  warning_deviation: number
+  critical_deviation: number
+  auto_create_work_order_level: AlertLevel
+  default_upgrade_minutes: number
+}
+
+export interface ScheduledJob {
+  id: string
+  name: string
+  enabled: boolean
+  cron: string
+  next_run: string | null
+  description?: string
+}
+
+export interface SchedulerJobUpdateRequest {
+  enabled?: boolean
+  cron?: string
+}
+
+export interface ConfigCenterResponse {
+  warning_strategy: WarningStrategyConfig
+  thresholds: ThresholdConfig
+  scheduled_jobs: ScheduledJob[]
+  updated_at: string
+}

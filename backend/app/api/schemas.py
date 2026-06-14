@@ -2289,3 +2289,65 @@ class TrainingStatusResponse(BaseModel):
     is_training: bool
     current_session: Optional[TrainingSessionSchema] = None
     recent_sessions: List[TrainingSessionSchema] = Field(default_factory=list)
+
+
+# ============================================================
+# 配置中心模块
+# ============================================================
+
+# ---------- 预警策略配置 ----------
+
+class WarningStrategyConfigSchema(BaseModel):
+    """预警策略配置"""
+    strategy_type: int = Field(..., ge=1, le=2, description="策略类型: 1=应报尽报, 2=精准报警")
+    strategy_1_confidence_threshold: float = Field(0.7, ge=0, le=1, description="策略1置信度阈值")
+    strategy_1_false_positive_threshold: float = Field(0.05, ge=0, le=1, description="策略1误报率阈值")
+    strategy_2_confidence_threshold: float = Field(0.95, ge=0, le=1, description="策略2置信度阈值")
+    strategy_2_false_negative_threshold: float = Field(0.10, ge=0, le=1, description="策略2漏报率阈值")
+
+
+# ---------- 阈值配置 ----------
+
+class ThresholdConfigSchema(BaseModel):
+    """预警阈值配置"""
+    high_risk_threshold: int = Field(3, ge=1, le=10, description="高风险阈值")
+    medium_risk_threshold: int = Field(7, ge=1, le=10, description="中风险阈值")
+    min_normal_preload: float = Field(400, ge=0, description="正常预紧力最小值")
+    max_normal_preload: float = Field(800, ge=0, description="正常预紧力最大值")
+    warning_deviation: float = Field(0.1, ge=0, le=1, description="预警偏差比例")
+    critical_deviation: float = Field(0.2, ge=0, le=1, description="紧急偏差比例")
+    auto_create_work_order_level: int = Field(3, ge=1, le=4, description="自动创建工单的最低告警级别")
+    default_upgrade_minutes: int = Field(30, ge=0, description="默认未处理升级时间（分钟）")
+
+
+# ---------- 调度任务 ----------
+
+class ScheduledJobSchema(BaseModel):
+    """调度任务信息"""
+    id: str = Field(..., description="任务ID")
+    name: str = Field(..., description="任务名称")
+    enabled: bool = Field(..., description="是否启用")
+    cron: str = Field(..., description="Cron表达式")
+    next_run: Optional[datetime] = Field(None, description="下次执行时间")
+    description: Optional[str] = Field(None, description="任务描述")
+
+
+class SchedulerJobUpdateRequest(BaseModel):
+    """调度任务更新请求"""
+    enabled: Optional[bool] = Field(None, description="是否启用")
+    cron: Optional[str] = Field(None, description="Cron表达式")
+
+
+class SchedulerTriggerRequest(BaseModel):
+    """手动触发调度任务请求"""
+    job_id: str = Field(..., description="任务ID")
+
+
+# ---------- 配置中心整体响应 ----------
+
+class ConfigCenterResponse(BaseModel):
+    """配置中心整体响应"""
+    warning_strategy: WarningStrategyConfigSchema
+    thresholds: ThresholdConfigSchema
+    scheduled_jobs: List[ScheduledJobSchema]
+    updated_at: datetime

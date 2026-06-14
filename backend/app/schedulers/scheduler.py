@@ -322,6 +322,50 @@ class TaskScheduler:
             return True
         return False
 
+    def update_job_cron(self, job_id: str, cron: str) -> bool:
+        """
+        更新指定任务的 Cron 表达式
+        """
+        try:
+            from apscheduler.triggers.cron import CronTrigger
+            job = self.scheduler.get_job(job_id)
+            if job:
+                job.reschedule(CronTrigger.from_crontab(cron))
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"更新任务Cron失败: {e}")
+            return False
+
+    def enable_job(self, job_id: str) -> bool:
+        """
+        启用指定任务
+        """
+        job = self.scheduler.get_job(job_id)
+        if job:
+            job.resume()
+            return True
+        return False
+
+    def disable_job(self, job_id: str) -> bool:
+        """
+        禁用指定任务
+        """
+        job = self.scheduler.get_job(job_id)
+        if job:
+            job.pause()
+            return True
+        return False
+
+    def is_job_enabled(self, job_id: str) -> Optional[bool]:
+        """
+        检查任务是否启用
+        """
+        job = self.scheduler.get_job(job_id)
+        if job:
+            return job.next_run_time is not None
+        return None
+
 
 # 全局调度器实例
 scheduler = TaskScheduler()

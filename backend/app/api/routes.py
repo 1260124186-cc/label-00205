@@ -114,6 +114,9 @@ from app.api.schemas import (
     ModelVersionListResponse, ModelVersionActivateRequest,
     ModelVersionCompareRequest, ModelVersionCompareResponse,
     TrainingSessionListResponse, TrainingStatusResponse,
+    WarningStrategyConfigSchema, ThresholdConfigSchema,
+    ScheduledJobSchema, SchedulerJobUpdateRequest,
+    SchedulerTriggerRequest, ConfigCenterResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -6356,4 +6359,328 @@ async def list_all_models():
         }
     except Exception as e:
         logger.error(f"获取模型列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 配置中心 ====================
+
+def _get_config_manager():
+    from app.core.config_manager import ConfigManager
+    return ConfigManager()
+
+
+def _get_scheduler():
+    from app.schedulers.scheduler import scheduler
+    return scheduler
+
+
+@router.get(
+    "/config/center",
+    response_model=ConfigCenterResponse,
+    tags=["配置中心"],
+    summary="获取所有配置中心数据"
+)
+async def get_config_center():
+    """获取预警策略、阈值、调度任务的所有配置"""
+    try:
+        cm = _get_config_manager()
+        sched = _get_scheduler()
+
+        # 预警策略配置
+        strategy_type = cm.get('warning_strategy.strategy_type', 1)
+        warning_strategy = {
+            'strategy_type': strategy_type,
+            'strategy_1_confidence_threshold': cm.get(
+                'warning_strategy.strategy_1.confidence_threshold', 0.7
+            ),
+            'strategy_1_false_positive_threshold': cm.get(
+                'warning_strategy.strategy_1.false_positive_threshold', 0.05
+            ),
+            'strategy_2_confidence_threshold': cm.get(
+                'warning_strategy.strategy_2.confidence_threshold', 0.95
+            ),
+            'strategy_2_false_negative_threshold': cm.get(
+                'warning_strategy.strategy_2.false_negative_threshold', 0.10
+            ),
+        }
+
+        # 阈值配置
+        thresholds = {
+            'high_risk_threshold': cm.get('risk_assessment.high_risk_threshold', 3),
+            'medium_risk_threshold': cm.get('risk_assessment.medium_risk_threshold', 7),
+            'min_normal_preload': cm.get('risk_assessment.preload_thresholds.min_normal', 400),
+            'max_normal_preload': cm.get('risk_assessment.preload_thresholds.max_normal', 800),
+            'warning_deviation': cm.get('risk_assessment.preload_thresholds.warning_deviation', 0.1),
+            'critical_deviation': cm.get('risk_assessment.preload_thresholds.critical_deviation', 0.2),
+            'auto_create_work_order_level': cm.get('alert.auto_create_work_order_level', 3),
+            'default_upgrade_minutes': cm.get('alert.default_upgrade_minutes', 30),
+        }
+
+        # 调度任务
+        scheduled_jobs = []
+        job_keys = [
+            ('training_job', '模型训练任务'),
+            ('prediction_job', '预测任务'),
+            ('monthly_prediction_job', '月度预测任务'),
+            ('alert_upgrade_job', '告警自动升级任务'),
+            ('audit_cleanup_job', '审计过期记录清理任务'),
+        ]
+        for job_id, job_name in job_keys:
+            job_cron = cm.get(f'scheduler.{job_id}.cron', '')
+            job_enabled = cm.get(f'scheduler.{job_id}.enabled', True)
+            next_run = None
+            try:
+                if sched.is_running:
+                    jobs = sched.get_jobs()
+                    for j in jobs:
+                        if j['id'] == job_id:
+                            next_run = j['next_run']
+                            break
+            except Exception:
+                pass
+            scheduled_jobs.append({
+                'id': job_id,
+                'name': job_name,
+                'enabled': job_enabled,
+                'cron': job_cron,
+                'next_run': next_run,
+                'description': job_name,
+            })
+
+        return {
+            'warning_strategy': warning_strategy,
+            'thresholds': thresholds,
+            'scheduled_jobs': scheduled_jobs,
+            'updated_at': datetime.now(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取配置中心数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/config/warning-strategy",
+    response_model=WarningStrategyConfigSchema,
+    tags=["配置中心"],
+    summary="更新预警策略配置"
+)
+async def update_warning_strategy(request: WarningStrategyConfigSchema):
+    """更新预警策略配置（策略类型、阈值等）"""
+    try:
+        cm = _get_config_manager()
+
+        updates = {
+            'warning_strategy.strategy_type': request.strategy_type,
+            'warning_strategy.strategy_1.confidence_threshold':
+                request.strategy_1_confidence_threshold,
+            'warning_strategy.strategy_1.false_positive_threshold':
+                request.strategy_1_false_positive_threshold,
+            'warning_strategy.strategy_2.confidence_threshold':
+                request.strategy_2_confidence_threshold,
+            'warning_strategy.strategy_2.false_negative_threshold':
+                request.strategy_2_false_negative_threshold,
+        }
+        cm.batch_update(updates)
+        cm.save()
+
+        return request
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新预警策略失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/config/thresholds",
+    response_model=ThresholdConfigSchema,
+    tags=["配置中心"],
+    summary="更新阈值配置"
+)
+async def update_thresholds(request: ThresholdConfigSchema):
+    """更新风险阈值、预紧力阈值、偏差比例等"""
+    try:
+        cm = _get_config_manager()
+
+        updates = {
+            'risk_assessment.high_risk_threshold': request.high_risk_threshold,
+            'risk_assessment.medium_risk_threshold': request.medium_risk_threshold,
+            'risk_assessment.preload_thresholds.min_normal': request.min_normal_preload,
+            'risk_assessment.preload_thresholds.max_normal': request.max_normal_preload,
+            'risk_assessment.preload_thresholds.warning_deviation': request.warning_deviation,
+            'risk_assessment.preload_thresholds.critical_deviation': request.critical_deviation,
+            'alert.auto_create_work_order_level': request.auto_create_work_order_level,
+            'alert.default_upgrade_minutes': request.default_upgrade_minutes,
+        }
+        cm.batch_update(updates)
+        cm.save()
+
+        return request
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新阈值配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/config/scheduler/jobs",
+    response_model=List[ScheduledJobSchema],
+    tags=["配置中心"],
+    summary="获取调度任务列表"
+)
+async def list_scheduler_jobs():
+    """获取所有调度任务的配置和运行状态"""
+    try:
+        cm = _get_config_manager()
+        sched = _get_scheduler()
+
+        job_keys = [
+            ('training_job', '模型训练任务'),
+            ('prediction_job', '预测任务'),
+            ('monthly_prediction_job', '月度预测任务'),
+            ('alert_upgrade_job', '告警自动升级任务'),
+            ('audit_cleanup_job', '审计过期记录清理任务'),
+        ]
+        jobs = []
+        for job_id, job_name in job_keys:
+            job_cron = cm.get(f'scheduler.{job_id}.cron', '')
+            job_enabled = cm.get(f'scheduler.{job_id}.enabled', True)
+            next_run = None
+            try:
+                if sched.is_running:
+                    sched_jobs = sched.get_jobs()
+                    for j in sched_jobs:
+                        if j['id'] == job_id:
+                            next_run = j['next_run']
+                            break
+            except Exception:
+                pass
+            jobs.append({
+                'id': job_id,
+                'name': job_name,
+                'enabled': job_enabled,
+                'cron': job_cron,
+                'next_run': next_run,
+                'description': job_name,
+            })
+
+        return jobs
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取调度任务列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/config/scheduler/jobs/{job_id}",
+    response_model=ScheduledJobSchema,
+    tags=["配置中心"],
+    summary="更新调度任务配置"
+)
+async def update_scheduler_job(job_id: str, request: SchedulerJobUpdateRequest):
+    """更新指定任务的 Cron 表达式或启用/禁用状态"""
+    try:
+        cm = _get_config_manager()
+        sched = _get_scheduler()
+
+        valid_jobs = [
+            'training_job', 'prediction_job', 'monthly_prediction_job',
+            'alert_upgrade_job', 'audit_cleanup_job'
+        ]
+        if job_id not in valid_jobs:
+            raise HTTPException(status_code=404, detail=f"任务 {job_id} 不存在")
+
+        job_names = {
+            'training_job': '模型训练任务',
+            'prediction_job': '预测任务',
+            'monthly_prediction_job': '月度预测任务',
+            'alert_upgrade_job': '告警自动升级任务',
+            'audit_cleanup_job': '审计过期记录清理任务',
+        }
+
+        if request.cron is not None:
+            cm.set(f'scheduler.{job_id}.cron', request.cron, validate=False)
+            try:
+                if sched.is_running:
+                    sched.update_job_cron(job_id, request.cron)
+            except Exception as cron_err:
+                logger.warning(f"更新运行中调度器失败: {cron_err}")
+
+        if request.enabled is not None:
+            cm.set(f'scheduler.{job_id}.enabled', request.enabled, validate=False)
+            try:
+                if sched.is_running:
+                    if request.enabled:
+                        sched.enable_job(job_id)
+                    else:
+                        sched.disable_job(job_id)
+            except Exception as enable_err:
+                logger.warning(f"更新运行中调度器状态失败: {enable_err}")
+
+        cm.save()
+
+        job_cron = cm.get(f'scheduler.{job_id}.cron', '')
+        job_enabled = cm.get(f'scheduler.{job_id}.enabled', True)
+        next_run = None
+        try:
+            if sched.is_running:
+                sched_jobs = sched.get_jobs()
+                for j in sched_jobs:
+                    if j['id'] == job_id:
+                        next_run = j['next_run']
+                        break
+        except Exception:
+            pass
+
+        return {
+            'id': job_id,
+            'name': job_names[job_id],
+            'enabled': job_enabled,
+            'cron': job_cron,
+            'next_run': next_run,
+            'description': job_names[job_id],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新调度任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/config/scheduler/jobs/{job_id}/trigger",
+    tags=["配置中心"],
+    summary="手动触发调度任务"
+)
+async def trigger_scheduler_job(job_id: str):
+    """立即执行指定的调度任务"""
+    try:
+        valid_jobs = [
+            'training_job', 'prediction_job', 'monthly_prediction_job',
+            'alert_upgrade_job', 'audit_cleanup_job'
+        ]
+        if job_id not in valid_jobs:
+            raise HTTPException(status_code=404, detail=f"任务 {job_id} 不存在")
+
+        sched = _get_scheduler()
+        if not sched.is_running:
+            raise HTTPException(status_code=503, detail="调度器未启动")
+
+        success = sched.run_job_now(job_id)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"任务 {job_id} 未在调度器中注册")
+
+        return {
+            'job_id': job_id,
+            'status': 'triggered',
+            'message': f'任务 {job_id} 已触发执行',
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"触发调度任务失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
