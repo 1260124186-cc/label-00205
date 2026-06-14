@@ -282,3 +282,151 @@ export interface TrendAnalysisData {
   forecast: ProphetForecast[]
   status_predictions: StatusPrediction[]
 }
+
+// ==================== 模型管理相关类型 ====================
+
+export type TrainingStatus = 'pending' | 'running' | 'completed' | 'failed' | 'stopped'
+
+export const TrainingStatusMap: Record<TrainingStatus, string> = {
+  pending: '等待中',
+  running: '训练中',
+  completed: '已完成',
+  failed: '失败',
+  stopped: '已停止'
+}
+
+export const TrainingStatusColorMap: Record<TrainingStatus, string> = {
+  pending: '#eab308',
+  running: '#3b82f6',
+  completed: '#22c55e',
+  failed: '#ef4444',
+  stopped: '#64748b'
+}
+
+export interface EpochMetrics {
+  epoch: number
+  train_loss: number
+  val_loss: number | null
+  train_acc: number | null
+  val_acc: number | null
+  learning_rate: number | null
+  duration_seconds: number
+  timestamp: string
+}
+
+export interface TrainingSession {
+  session_id: string
+  model_id: string
+  model_type: string
+  status: TrainingStatus
+  start_time: string | null
+  end_time: string | null
+  total_epochs: number
+  current_epoch: number
+  best_metrics: Record<string, number>
+  metrics_history: EpochMetrics[]
+  config: Record<string, unknown>
+  error_message: string | null
+}
+
+export interface ModelVersion {
+  version: string
+  model_id: string
+  model_type: string
+  created_at: string
+  file_path: string
+  file_hash: string
+  metrics: Record<string, number>
+  config: Record<string, unknown>
+  is_active: boolean
+  description: string
+}
+
+export interface ModelEntry {
+  model_id: string
+  model_type: string
+  display_name: string
+  is_trained: boolean
+  active_version: string | null
+  total_versions: number
+  last_training_time: string | null
+  training_status: TrainingStatus | null
+  best_val_acc: number | null
+  description: string
+}
+
+export interface TrainingTriggerRequest {
+  model_type: string
+  model_id?: string | null
+  force_retrain?: boolean
+  epochs?: number
+  learning_rate?: number
+  batch_size?: number
+}
+
+export interface TrainingTriggerResponse {
+  session_id: string
+  model_type: string
+  model_id: string | null
+  status: TrainingStatus
+  message: string
+}
+
+export interface VersionCompareResult {
+  model_id: string
+  version1: string
+  version2: string
+  metrics_comparison: Record<string, {
+    v1: number
+    v2: number
+    diff: number
+    improved: boolean
+  }>
+  config_diff: {
+    v1: Record<string, unknown>
+    v2: Record<string, unknown>
+  }
+}
+
+export interface ModelVersionListResponse {
+  model_id: string
+  model_type: string
+  versions: ModelVersion[]
+}
+
+export interface ModelVersionActivateRequest {
+  version: string
+}
+
+export interface ModelVersionCompareRequest {
+  version1: string
+  version2: string
+}
+
+export interface ModelVersionCompareResponse extends VersionCompareResult {}
+
+export interface TrainingSessionListResponse {
+  total: number
+  items: TrainingSession[]
+}
+
+export interface TrainingStatusResponse {
+  is_training: boolean
+  current_session: TrainingSession | null
+  recent_sessions: TrainingSession[]
+}
+
+export interface ModelItem {
+  model_id: string
+  model_type: string
+  version_count: number
+  active_version: string | null
+  latest_version: string
+  latest_metrics: Record<string, number>
+  last_updated: string
+}
+
+export interface ModelListResponse {
+  total: number
+  models: ModelItem[]
+}

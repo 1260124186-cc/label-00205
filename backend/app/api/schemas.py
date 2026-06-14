@@ -2203,3 +2203,89 @@ class StreamEventSchema(BaseModel):
     data: Dict[str, Any] = {}
     source: str = "stream"
     metadata: Dict[str, Any] = {}
+
+
+# ============================================================
+# 模型管理模块
+# ============================================================
+
+class EpochMetricsSchema(BaseModel):
+    """Epoch指标"""
+    epoch: int
+    train_loss: float
+    val_loss: Optional[float] = None
+    train_acc: Optional[float] = None
+    val_acc: Optional[float] = None
+    learning_rate: Optional[float] = None
+    duration_seconds: float = 0
+    timestamp: str
+
+
+class TrainingSessionSchema(BaseModel):
+    """训练会话信息"""
+    session_id: str
+    model_id: str
+    model_type: str
+    status: str
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    total_epochs: int = 0
+    current_epoch: int = 0
+    best_metrics: Dict[str, float] = Field(default_factory=dict)
+    metrics_history: List[EpochMetricsSchema] = Field(default_factory=list)
+    config: Dict[str, Any] = Field(default_factory=dict)
+    error_message: Optional[str] = None
+
+
+class ModelVersionSchema(BaseModel):
+    """模型版本信息"""
+    version: str
+    model_id: str
+    model_type: str
+    created_at: datetime
+    file_path: str
+    file_hash: str
+    metrics: Dict[str, float] = Field(default_factory=dict)
+    config: Dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = False
+    description: str = ""
+
+
+class ModelVersionListResponse(BaseModel):
+    """模型版本列表响应"""
+    model_id: str
+    model_type: str
+    versions: List[ModelVersionSchema]
+
+
+class ModelVersionActivateRequest(BaseModel):
+    """激活/回滚模型版本请求"""
+    version: str = Field(..., description="目标版本号")
+
+
+class ModelVersionCompareRequest(BaseModel):
+    """模型版本对比请求"""
+    version1: str
+    version2: str
+
+
+class ModelVersionCompareResponse(BaseModel):
+    """模型版本对比响应"""
+    model_id: str
+    version1: str
+    version2: str
+    metrics_comparison: Dict[str, Any]
+    config_diff: Dict[str, Any]
+
+
+class TrainingSessionListResponse(BaseModel):
+    """训练会话列表响应"""
+    total: int
+    items: List[TrainingSessionSchema]
+
+
+class TrainingStatusResponse(BaseModel):
+    """训练状态响应"""
+    is_training: bool
+    current_session: Optional[TrainingSessionSchema] = None
+    recent_sessions: List[TrainingSessionSchema] = Field(default_factory=list)

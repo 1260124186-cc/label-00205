@@ -51,6 +51,18 @@
             </svg>
             趋势分析
           </button>
+          <button
+            class="nav-tab"
+            :class="{ active: currentView === 'model' }"
+            @click="currentView = 'model'"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+              <path d="M2 17l10 5 10-5"></path>
+              <path d="M2 12l10 5 10-5"></path>
+            </svg>
+            模型管理
+          </button>
         </nav>
         <div class="realtime-status" :class="{ active: autoRefresh }" v-if="currentView === 'monitoring'">
           <span class="status-dot"></span>
@@ -97,7 +109,7 @@
       </div>
     </header>
 
-    <main class="app-main" :class="{ 'app-main-full': currentView === 'alert' || currentView === 'trend' }">
+    <main class="app-main" :class="{ 'app-main-full': currentView === 'alert' || currentView === 'trend' || currentView === 'model' }">
       <template v-if="currentView === 'monitoring'">
         <aside class="sidebar-left">
           <FilterPanel
@@ -155,6 +167,8 @@
         :bolts="topologyData?.bolts || []"
         :preselected-bolt-id="selectedBolt?.bolt_id || null"
       />
+
+      <ModelManagement v-else-if="currentView === 'model'" />
     </main>
   </div>
 </template>
@@ -167,11 +181,12 @@ import FlangeTopology from '@/components/FlangeTopology.vue'
 import DetailPanel from '@/components/DetailPanel.vue'
 import AlertCenter from '@/components/AlertCenter.vue'
 import TrendAnalysis from '@/components/TrendAnalysis.vue'
+import ModelManagement from '@/components/ModelManagement.vue'
 import { fetchTopology, fetchCollectors, fetchPositions } from '@/api/monitoring'
 import { fetchAlertStats } from '@/api/alert'
 import type { TopologyData, FilterOptions, Flange, Bolt } from '@/types'
 
-const currentView = ref<'monitoring' | 'alert' | 'trend'>('monitoring')
+const currentView = ref<'monitoring' | 'alert' | 'trend' | 'model'>('monitoring')
 
 const topologyData = ref<TopologyData | null>(null)
 const autoRefresh = ref(true)

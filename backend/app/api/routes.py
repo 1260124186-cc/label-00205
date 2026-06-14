@@ -110,6 +110,10 @@ from app.api.schemas import (
     StreamWindowStatusResponse, StreamEngineStatusResponse,
     StreamModeSwitchResponse, StreamConfigResponse,
     StreamEventSchema,
+    EpochMetricsSchema, TrainingSessionSchema, ModelVersionSchema,
+    ModelVersionListResponse, ModelVersionActivateRequest,
+    ModelVersionCompareRequest, ModelVersionCompareResponse,
+    TrainingSessionListResponse, TrainingStatusResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -6032,4 +6036,324 @@ async def clear_all_stream_windows():
 
     except Exception as e:
         logger.error(f"清空所有窗口失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 模型管理模块
+# ============================================================
+
+def _get_training_monitor():
+    from app.core.training_monitor import TrainingMonitor
+    return TrainingMonitor()
+
+
+def _model_version_to_dict(v) -> Dict[str, Any]:
+    return {
+        'version': v.version,
+        'model_id': v.model_id,
+        'model_type': v.model_type,
+        'created_at': v.created_at,
+        'file_path': v.file_path,
+        'file_hash': v.file_hash,
+        'metrics': v.metrics,
+        'config': v.config,
+        'is_active': v.is_active,
+        'description': v.description,
+    }
+
+
+def _training_session_to_dict(s) -> Dict[str, Any]:
+    metrics_history = []
+    for m in s.metrics_history:
+        if hasattr(m, 'to_dict'):
+            metrics_history.append(m.to_dict())
+        else:
+            metrics_history.append({
+                'epoch': m.epoch,
+                'train_loss': m.train_loss,
+                'val_loss': m.val_loss,
+                'train_acc': m.train_acc,
+                'val_acc': m.val_acc,
+                'learning_rate': m.learning_rate,
+                'duration_seconds': m.duration_seconds,
+                'timestamp': m.timestamp,
+            })
+    return {
+        'session_id': s.session_id,
+        'model_id': s.model_id,
+        'model_type': s.model_type,
+        'status': s.status.value if hasattr(s.status, 'value') else s.status,
+        'start_time': s.start_time,
+        'end_time': s.end_time,
+        'total_epochs': s.total_epochs,
+        'current_epoch': s.current_epoch,
+        'best_metrics': s.best_metrics,
+        'metrics_history': metrics_history,
+        'config': s.config,
+        'error_message': s.error_message,
+    }
+
+
+@router.get(
+    "/model/versions/{model_type}/{model_id}",
+    response_model=ModelVersionListResponse,
+    tags=["模型管理"],
+    summary="获取模型版本列表"
+)
+async def get_model_versions(model_type: str, model_id: str):
+    """获取指定模型的所有版本列表"""
+    try:
+        version_manager = _get_version_manager()
+        versions = version_manager.get_all_versions(model_id)
+
+        if not versions:
+            return {
+                'model_id': model_id,
+                'model_type': model_type,
+                'versions': []
+            }
+
+        version_dicts = [_model_version_to_dict(v) for v in reversed(versions)]
+
+        return {
+            'model_id': model_id,
+            'model_type': model_type,
+            'versions': version_dicts,
+        }
+    except Exception as e:
+        logger.error(f"获取模型版本列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model/versions/{model_type}/{model_id}/active",
+    response_model=ModelVersionSchema,
+    tags=["模型管理"],
+    summary="获取当前活动版本"
+)
+async def get_active_model_version(model_type: str, model_id: str):
+    """获取当前激活的模型版本"""
+    try:
+        version_manager = _get_version_manager()
+        active_version = version_manager.get_version(model_id)
+
+        if active_version is None:
+            raise HTTPException(status_code=404, detail="未找到活动版本")
+
+        return _model_version_to_dict(active_version)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取活动版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/model/versions/{model_type}/{model_id}/activate",
+    response_model=ModelVersionSchema,
+    tags=["模型管理"],
+    summary="激活/回滚模型版本"
+)
+async def activate_model_version(
+    model_type: str,
+    model_id: str,
+    request: ModelVersionActivateRequest
+):
+    """激活指定版本（用于回滚或切换版本）"""
+    try:
+        version_manager = _get_version_manager()
+
+        target_version = version_manager.get_version(model_id, request.version)
+        if target_version is None:
+            raise HTTPException(status_code=404, detail="版本不存在")
+
+        result = version_manager.rollback(model_id, request.version)
+        if result is None:
+            raise HTTPException(status_code=500, detail="版本激活失败")
+
+        return _model_version_to_dict(result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"激活版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/model/versions/{model_type}/{model_id}/compare",
+    response_model=ModelVersionCompareResponse,
+    tags=["模型管理"],
+    summary="对比两个模型版本"
+)
+async def compare_model_versions(
+    model_type: str,
+    model_id: str,
+    request: ModelVersionCompareRequest
+):
+    """对比两个模型版本的指标差异"""
+    try:
+        version_manager = _get_version_manager()
+
+        result = version_manager.compare_versions(
+            model_id,
+            request.version1,
+            request.version2
+        )
+
+        if 'error' in result:
+            raise HTTPException(status_code=404, detail=result['error'])
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"版本对比失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/model/versions/{model_type}/{model_id}/{version}",
+    tags=["模型管理"],
+    summary="删除模型版本"
+)
+async def delete_model_version(model_type: str, model_id: str, version: str):
+    """删除指定的模型版本（不能删除活动版本）"""
+    try:
+        version_manager = _get_version_manager()
+
+        success = version_manager.delete_version(model_id, version)
+        if not success:
+            raise HTTPException(status_code=400, detail="删除失败，可能是活动版本或版本不存在")
+
+        return {
+            'success': True,
+            'message': f'版本 {version} 已删除',
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model/training/status",
+    response_model=TrainingStatusResponse,
+    tags=["模型管理"],
+    summary="获取训练状态"
+)
+async def get_training_status():
+    """获取当前训练状态和最近的训练会话"""
+    try:
+        monitor = _get_training_monitor()
+        recent_sessions = monitor.get_recent_sessions(10)
+
+        current_session = None
+        is_training = False
+
+        if monitor.current_session is not None:
+            current_session = _training_session_to_dict(monitor.current_session)
+            is_training = True
+
+        session_dicts = [
+            _training_session_to_dict(s) for s in recent_sessions
+        ]
+
+        return {
+            'is_training': is_training,
+            'current_session': current_session,
+            'recent_sessions': session_dicts,
+        }
+    except Exception as e:
+        logger.error(f"获取训练状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model/training/sessions",
+    response_model=TrainingSessionListResponse,
+    tags=["模型管理"],
+    summary="获取训练会话列表"
+)
+async def list_training_sessions(
+    limit: int = Query(20, ge=1, le=100, description="返回数量限制"),
+):
+    """获取历史训练会话列表"""
+    try:
+        monitor = _get_training_monitor()
+        sessions = monitor.get_recent_sessions(limit)
+
+        session_dicts = [
+            _training_session_to_dict(s) for s in sessions
+        ]
+
+        return {
+            'total': len(session_dicts),
+            'items': session_dicts,
+        }
+    except Exception as e:
+        logger.error(f"获取训练会话列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model/training/sessions/{session_id}",
+    response_model=TrainingSessionSchema,
+    tags=["模型管理"],
+    summary="获取训练会话详情"
+)
+async def get_training_session(session_id: str):
+    """获取指定训练会话的详细信息，包含训练曲线数据"""
+    try:
+        monitor = _get_training_monitor()
+        session = monitor.load_session(session_id)
+
+        if session is None:
+            raise HTTPException(status_code=404, detail="训练会话不存在")
+
+        return _training_session_to_dict(session)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取训练会话详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model/list",
+    tags=["模型管理"],
+    summary="获取所有模型列表"
+)
+async def list_all_models():
+    """获取系统中所有的模型列表"""
+    try:
+        version_manager = _get_version_manager()
+
+        models = []
+        for model_id, versions in version_manager._versions.items():
+            if versions:
+                active_version = None
+                for v in versions:
+                    if v.is_active:
+                        active_version = v.version
+                        break
+
+                latest = versions[-1]
+                models.append({
+                    'model_id': model_id,
+                    'model_type': latest.model_type,
+                    'version_count': len(versions),
+                    'active_version': active_version,
+                    'latest_version': latest.version,
+                    'latest_metrics': latest.metrics,
+                    'last_updated': latest.created_at,
+                })
+
+        return {
+            'total': len(models),
+            'models': models,
+        }
+    except Exception as e:
+        logger.error(f"获取模型列表失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
