@@ -254,3 +254,31 @@ export const WorkOrderStatusMap: Record<string, string> = {
   resolved: '已解决',
   closed: '已关闭'
 }
+
+export interface PreloadTrendPoint {
+  timestamp: string
+  value: number
+}
+
+export interface ProphetForecast {
+  ds: string
+  yhat: number
+  yhat_lower: number
+  yhat_upper: number
+  trend: number
+}
+
+export interface StatusPrediction {
+  timestamp: string
+  predicted_status: StatusCode
+  confidence: number
+  risk_level: 'low' | 'medium' | 'high'
+}
+
+export interface TrendAnalysisData {
+  bolt_id: string
+  nominal_preload: number
+  history: PreloadTrendPoint[]
+  forecast: ProphetForecast[]
+  status_predictions: StatusPrediction[]
+}

@@ -9,7 +9,11 @@ import type {
   AlertEvent,
   AlertStatus,
   AlertLevel,
-  AlertStrategy
+  AlertStrategy,
+  PreloadTrendPoint,
+  ProphetForecast,
+  StatusPrediction,
+  TrendAnalysisData
 } from '@/types'
 
 const collectorNames = ['一号采集器', '二号采集器', '三号采集器', '四号采集器', '五号采集器']
@@ -404,4 +408,96 @@ export function generateMockAlerts(count = 30): AlertEvent[] {
   }
 
   return alerts
+}
+
+export function generateMockTrendData(boltId: string, nominalPreload: number): TrendAnalysisData {
+  const now = Date.now()
+  const oneDayMs = 24 * 60 * 60 * 1000
+  const historyDays = 60
+  const forecastDays = 30
+
+  const history: PreloadTrendPoint[] = []
+  let currentValue = nominalPreload * (0.92 + Math.random() * 0.12)
+  const driftPerDay = nominalPreload * (Math.random() < 0.3 ? -0.003 : -0.001)
+
+  for (let i = historyDays; i >= 0; i--) {
+    const ts = new Date(now - i * oneDayMs)
+    const noise = (Math.random() - 0.5) * nominalPreload * 0.03
+    const seasonal = Math.sin((i / 30) * Math.PI * 2) * nominalPreload * 0.01
+    currentValue = currentValue + driftPerDay + noise + seasonal
+    currentValue = Math.max(nominalPreload * 0.5, Math.min(nominalPreload * 1.2, currentValue))
+
+    history.push({
+      timestamp: ts.toISOString(),
+      value: Math.round(currentValue * 100) / 100
+    })
+  }
+
+  const lastValue = history[history.length - 1].value
+  const forecast: ProphetForecast[] = []
+  let yhat = lastValue
+  const forecastDrift = driftPerDay * 1.2
+  const uncertaintyBase = nominalPreload * 0.02
+
+  for (let i = 1; i <= forecastDays; i++) {
+    const ts = new Date(now + i * oneDayMs)
+    yhat = yhat + forecastDrift + (Math.random() - 0.5) * nominalPreload * 0.005
+    yhat = Math.max(nominalPreload * 0.4, yhat)
+    const uncertainty = uncertaintyBase * (1 + i * 0.08)
+
+    forecast.push({
+      ds: ts.toISOString(),
+      yhat: Math.round(yhat * 100) / 100,
+      yhat_lower: Math.round((yhat - uncertainty) * 100) / 100,
+      yhat_upper: Math.round((yhat + uncertainty) * 100) / 100,
+      trend: Math.round((lastValue + forecastDrift * i) * 100) / 100
+    })
+  }
+
+  const statusPredictions: StatusPrediction[] = []
+  const thresholdNormal = nominalPreload * 0.9
+  const thresholdAttention = nominalPreload * 0.85
+  const thresholdCheck = nominalPreload * 0.8
+  const thresholdEmergency = nominalPreload * 0.7
+
+  for (let i = 1; i <= forecastDays; i += 3) {
+    const ts = new Date(now + i * oneDayMs)
+    const fc = forecast[i - 1]
+    let predictedStatus: StatusCode = 0
+    let riskLevel: 'low' | 'medium' | 'high' = 'low'
+
+    if (fc.yhat >= thresholdNormal) {
+      predictedStatus = 0
+      riskLevel = 'low'
+    } else if (fc.yhat >= thresholdAttention) {
+      predictedStatus = 1
+      riskLevel = 'low'
+    } else if (fc.yhat >= thresholdCheck) {
+      predictedStatus = 2
+      riskLevel = 'medium'
+    } else if (fc.yhat >= thresholdEmergency) {
+      predictedStatus = 3
+      riskLevel = 'high'
+    } else {
+      predictedStatus = 4
+      riskLevel = 'high'
+    }
+
+    const confidence = Math.max(0.5, Math.min(0.99, 0.85 - i * 0.01 + Math.random() * 0.1))
+
+    statusPredictions.push({
+      timestamp: ts.toISOString(),
+      predicted_status: predictedStatus,
+      confidence: Math.round(confidence * 10000) / 10000,
+      risk_level: riskLevel
+    })
+  }
+
+  return {
+    bolt_id: boltId,
+    nominal_preload: nominalPreload,
+    history,
+    forecast,
+    status_predictions: statusPredictions
+  }
 }

@@ -41,6 +41,16 @@
             预警中心
             <span v-if="alertStats.pending > 0" class="alert-badge">{{ alertStats.pending }}</span>
           </button>
+          <button
+            class="nav-tab"
+            :class="{ active: currentView === 'trend' }"
+            @click="currentView = 'trend'"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+            趋势分析
+          </button>
         </nav>
         <div class="realtime-status" :class="{ active: autoRefresh }" v-if="currentView === 'monitoring'">
           <span class="status-dot"></span>
@@ -87,7 +97,7 @@
       </div>
     </header>
 
-    <main class="app-main">
+    <main class="app-main" :class="{ 'app-main-full': currentView === 'alert' || currentView === 'trend' }">
       <template v-if="currentView === 'monitoring'">
         <aside class="sidebar-left">
           <FilterPanel
@@ -138,24 +148,30 @@
         </aside>
       </template>
 
-      <AlertCenter v-else />
+      <AlertCenter v-else-if="currentView === 'alert'" />
+
+      <TrendAnalysis
+        v-else-if="currentView === 'trend'"
+        :bolts="topologyData?.bolts || []"
+        :preselected-bolt-id="selectedBolt?.bolt_id || null"
+      />
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import FilterPanel from '@/components/FilterPanel.vue'
 import StatsPanel from '@/components/StatsPanel.vue'
 import FlangeTopology from '@/components/FlangeTopology.vue'
 import DetailPanel from '@/components/DetailPanel.vue'
 import AlertCenter from '@/components/AlertCenter.vue'
+import TrendAnalysis from '@/components/TrendAnalysis.vue'
 import { fetchTopology, fetchCollectors, fetchPositions } from '@/api/monitoring'
 import { fetchAlertStats } from '@/api/alert'
-import { StatusCode } from '@/types'
 import type { TopologyData, FilterOptions, Flange, Bolt } from '@/types'
 
-const currentView = ref<'monitoring' | 'alert'>('monitoring')
+const currentView = ref<'monitoring' | 'alert' | 'trend'>('monitoring')
 
 const topologyData = ref<TopologyData | null>(null)
 const autoRefresh = ref(true)
@@ -567,6 +583,11 @@ body {
   padding: 16px;
   overflow: hidden;
   min-height: 0;
+}
+
+.app-main-full {
+  grid-template-columns: 1fr;
+  padding: 0;
 }
 
 .sidebar-left {

@@ -1,6 +1,6 @@
 import axios from 'axios'
-import type { TopologyData } from '@/types'
-import { getMockTopology, refreshMockStatus } from '@/mock/data'
+import type { TopologyData, TrendAnalysisData } from '@/types'
+import { getMockTopology, refreshMockStatus, generateMockTrendData } from '@/mock/data'
 
 const USE_MOCK = true
 
@@ -62,5 +62,24 @@ export async function fetchPositions(collectorId?: string): Promise<{ position: 
   } catch (err) {
     console.error(err)
     return []
+  }
+}
+
+const trendCache = new Map<string, TrendAnalysisData>()
+
+export async function fetchTrendAnalysis(boltId: string, nominalPreload: number): Promise<TrendAnalysisData> {
+  if (USE_MOCK) {
+    if (!trendCache.has(boltId)) {
+      trendCache.set(boltId, generateMockTrendData(boltId, nominalPreload))
+    }
+    return Promise.resolve(JSON.parse(JSON.stringify(trendCache.get(boltId)!)))
+  }
+
+  try {
+    const res = await api.get<TrendAnalysisData>(`/monitoring/bolts/${boltId}/trend`)
+    return res.data
+  } catch (err) {
+    console.error('获取趋势分析数据失败:', err)
+    return generateMockTrendData(boltId, nominalPreload)
   }
 }
