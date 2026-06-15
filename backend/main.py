@@ -186,6 +186,31 @@ def create_app() -> FastAPI:
     
     # 注册路由
     app.include_router(router, prefix="/api/v1")
+
+    from app.api.schemas import HealthResponse, HealthComponentStatus
+    from app import __version__
+
+    @app.get("/health", response_model=HealthResponse, tags=["系统"], summary="健康检查（公开免鉴权）")
+    async def health_check():
+        from app.services.health_check_service import get_health_check_service
+        health_service = get_health_check_service()
+        components = health_service.check_all()
+        all_healthy = all(
+            comp.get('status') == 'healthy'
+            for comp in components.values()
+        )
+        component_status = {}
+        for name, comp in components.items():
+            component_status[name] = HealthComponentStatus(
+                status=comp.get('status', 'unknown'),
+                message=comp.get('message')
+            )
+        return HealthResponse(
+            status="healthy" if all_healthy else "unhealthy",
+            version=__version__,
+            timestamp=datetime.now(),
+            components=component_status
+        )
     
     # Prometheus metrics 端点
     @app.get("/metrics", tags=["监控"])

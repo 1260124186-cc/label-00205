@@ -473,6 +473,27 @@ PREPARE alterIfNotExists FROM @preparedStatement;
 EXECUTE alterIfNotExists;
 DEALLOCATE PREPARE alterIfNotExists;
 
+-- ============================================================
+-- API审计日志表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_api_audit_logs (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    key_id VARCHAR(50) COMMENT 'API密钥ID',
+    key_name VARCHAR(200) COMMENT '密钥名称',
+    method VARCHAR(10) COMMENT 'HTTP方法 GET/POST/PUT/DELETE',
+    path VARCHAR(500) COMMENT '请求路径',
+    status_code INT COMMENT '响应状态码',
+    client_ip VARCHAR(50) COMMENT '客户端IP',
+    request_id VARCHAR(64) COMMENT '请求ID',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_api_audit_key (key_id),
+    INDEX idx_api_audit_path (path),
+    INDEX idx_api_audit_status (status_code),
+    INDEX idx_api_audit_time (create_time),
+    INDEX idx_api_audit_method (method)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='API审计日志表';
+
 -- 显示创建的表
 SHOW TABLES;
 

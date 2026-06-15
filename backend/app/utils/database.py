@@ -1085,6 +1085,29 @@ class KnowledgeCaseReview(Base):
     )
 
 
+class APIAuditLog(Base):
+    __tablename__ = 'sc_api_audit_logs'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    key_id = Column(String(50), comment='API密钥ID')
+    key_name = Column(String(200), comment='密钥名称')
+    method = Column(String(10), comment='HTTP方法 GET/POST/PUT/DELETE')
+    path = Column(String(500), comment='请求路径')
+    status_code = Column(Integer, comment='响应状态码')
+    client_ip = Column(String(50), comment='客户端IP')
+    request_id = Column(String(64), comment='请求ID')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_api_audit_key', 'key_id'),
+        Index('idx_api_audit_path', 'path'),
+        Index('idx_api_audit_status', 'status_code'),
+        Index('idx_api_audit_time', 'create_time'),
+        Index('idx_api_audit_method', 'method'),
+    )
+
+
 # ============================================================
 # 数字孪生与健康度评分模块 ORM 模型
 # ============================================================

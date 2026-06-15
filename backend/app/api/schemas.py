@@ -3026,3 +3026,77 @@ class AnomalyWarningImpactResponse(BaseModel):
     anomaly_count: int = Field(0, description="时间窗口内的异常数")
     threshold: int = Field(0, description="异常数阈值")
     window_minutes: int = Field(0, description="时间窗口（分钟）")
+
+
+# ==================== API密钥管理与审计日志 ====================
+
+class APIKeyCreateRequest(BaseModel):
+    name: str = Field(..., description="密钥名称", min_length=1, max_length=200)
+    permissions: List[str] = Field(default=["read"], description="权限列表: read/write/admin")
+    rate_limit: int = Field(default=1000, ge=1, le=100000, description="每小时请求限制")
+    expires_hours: Optional[int] = Field(None, description="有效期（小时），None表示永不过期")
+
+
+class APIKeyCreateResponse(BaseModel):
+    key: str = Field(..., description="生成的API密钥（仅创建时返回完整密钥）")
+    key_id: str = Field(..., description="密钥ID")
+    name: str = Field(..., description="密钥名称")
+    permissions: List[str] = Field(default=["read"], description="权限列表")
+    rate_limit: int = Field(default=1000, description="速率限制")
+    expires_at: Optional[datetime] = Field(None, description="过期时间")
+    created_at: str = Field(..., description="创建时间")
+
+
+class APIKeyInfoResponse(BaseModel):
+    key_id: str = Field(..., description="密钥ID")
+    key_preview: str = Field(..., description="密钥预览（前8后4位）")
+    name: str = Field(..., description="密钥名称")
+    permissions: List[str] = Field(default=["read"], description="权限列表")
+    rate_limit: int = Field(default=1000, description="速率限制")
+    is_expired: bool = Field(False, description="是否已过期")
+    expires_at: Optional[datetime] = Field(None, description="过期时间")
+    created_at: Optional[str] = Field(None, description="创建时间")
+
+
+class APIKeyListResponse(BaseModel):
+    total: int = Field(..., description="总数")
+    items: List[APIKeyInfoResponse] = Field(default=[], description="密钥列表")
+
+
+class APIKeyRotateResponse(BaseModel):
+    old_key_id: str = Field(..., description="旧密钥ID")
+    new_key: str = Field(..., description="新密钥（仅轮换时返回完整密钥）")
+    new_key_id: str = Field(..., description="新密钥ID")
+    old_key_grace_expires: datetime = Field(..., description="旧密钥宽限期截止时间")
+    permissions: List[str] = Field(default=["read"], description="权限列表（继承旧密钥）")
+    rate_limit: int = Field(default=1000, description="速率限制")
+
+
+class APIKeyRevokeResponse(BaseModel):
+    key_id: str = Field(..., description="被吊销的密钥ID")
+    revoked: bool = Field(True, description="是否成功吊销")
+
+
+class APIAuditLogResponse(BaseModel):
+    id: int
+    key_id: str = Field("", description="API密钥ID")
+    key_name: str = Field("", description="密钥名称")
+    method: str = Field("", description="HTTP方法")
+    path: str = Field("", description="请求路径")
+    status_code: int = Field(0, description="响应状态码")
+    client_ip: str = Field("", description="客户端IP")
+    request_id: str = Field("", description="请求ID")
+    extra_info: Dict[str, Any] = Field(default={}, description="扩展信息")
+    create_time: datetime
+
+
+class APIAuditLogListResponse(BaseModel):
+    total: int = Field(..., description="总数")
+    items: List[APIAuditLogResponse] = Field(default=[], description="审计日志列表")
+
+
+class RateLimitStatusResponse(BaseModel):
+    key_id: str = Field(..., description="密钥ID")
+    limit: int = Field(..., description="速率限制（请求/小时）")
+    remaining: int = Field(..., description="剩余请求次数")
+    used: int = Field(..., description="已使用请求次数")

@@ -25,7 +25,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends, Request
 from loguru import logger
 
-from app.api.auth import get_tenant_context, revoke_tenant_token
+from app.api.auth import get_tenant_context, revoke_tenant_token, verify_api_key, require_permission, api_key_manager, per_key_rate_limiter, audit_logger, APIKeyManager
 
 from app.api.schemas import (
     HealthResponse, HealthComponentStatus, ErrorResponse,
@@ -138,6 +138,11 @@ from app.api.schemas import (
     AnomalyBatchConfirmRequest, AnomalyBatchFalsePositiveRequest,
     AnomalyBatchResultResponse, AnomalyStatisticsResponse,
     AnomalyWarningImpactResponse,
+    APIKeyCreateRequest, APIKeyCreateResponse,
+    APIKeyInfoResponse, APIKeyListResponse,
+    APIKeyRotateResponse, APIKeyRevokeResponse,
+    APIAuditLogResponse, APIAuditLogListResponse,
+    RateLimitStatusResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -155,7 +160,7 @@ from app import __version__
 
 
 # 创建路由器
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verify_api_key)])
 
 # 服务实例
 prediction_service = None
@@ -226,42 +231,6 @@ def get_federated_client(client_id: str):
         federated_clients[client_id] = FederatedClient(client_id, client_config)
 
     return federated_clients[client_id]
-
-
-# ==================== 健康检查 ====================
-
-@router.get("/health", response_model=HealthResponse, tags=["系统"])
-async def health_check():
-    """
-    健康检查接口
-
-    返回服务状态和版本信息，以及各组件的详细健康状态。
-    """
-    from app.services.health_check_service import get_health_check_service
-
-    health_service = get_health_check_service()
-    components = health_service.check_all()
-
-    # 判断整体状态
-    all_healthy = all(
-        comp.get('status') == 'healthy'
-        for comp in components.values()
-    )
-
-    # 构建组件状态
-    component_status = {}
-    for name, comp in components.items():
-        component_status[name] = HealthComponentStatus(
-            status=comp.get('status', 'unknown'),
-            message=comp.get('message')
-        )
-
-    return HealthResponse(
-        status="healthy" if all_healthy else "unhealthy",
-        version=__version__,
-        timestamp=datetime.now(),
-        components=component_status
-    )
 
 
 # ==================== 螺栓预测 ====================
@@ -8172,4 +8141,188 @@ async def check_anomaly_warning_impact(
         raise
     except Exception as e:
         logger.error(f"检查异常对预警影响失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== API密钥管理 ====================
+
+@router.post(
+    "/auth/keys",
+    response_model=APIKeyCreateResponse,
+    tags=["API密钥管理"],
+    summary="创建API密钥",
+    dependencies=[Depends(require_permission("admin"))],
+)
+async def create_api_key(request: APIKeyCreateRequest):
+    try:
+        key, key_id = api_key_manager.add_key(
+            name=request.name,
+            permissions=request.permissions,
+            rate_limit=request.rate_limit,
+            expires_hours=request.expires_hours,
+        )
+        key_info = api_key_manager._key_info[key_id]
+        return APIKeyCreateResponse(
+            key=key,
+            key_id=key_id,
+            name=request.name,
+            permissions=request.permissions,
+            rate_limit=request.rate_limit,
+            expires_at=key_info.get("expires_at"),
+            created_at=str(key_info.get("created_at", "")),
+        )
+    except Exception as e:
+        logger.error(f"创建API密钥失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/auth/keys",
+    response_model=APIKeyListResponse,
+    tags=["API密钥管理"],
+    summary="列出所有API密钥",
+    dependencies=[Depends(require_permission("admin"))],
+)
+async def list_api_keys():
+    try:
+        keys = api_key_manager.list_keys()
+        items = []
+        for k in keys:
+            items.append(APIKeyInfoResponse(
+                key_id=k["key_id"],
+                key_preview=k["key_preview"],
+                name=k["name"],
+                permissions=k["permissions"],
+                rate_limit=k["rate_limit"],
+                is_expired=k.get("is_expired", False),
+                expires_at=k.get("expires_at"),
+                created_at=str(k.get("created_at", "")),
+            ))
+        return APIKeyListResponse(total=len(items), items=items)
+    except Exception as e:
+        logger.error(f"列出API密钥失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/auth/keys/{key_id}/rotate",
+    response_model=APIKeyRotateResponse,
+    tags=["API密钥管理"],
+    summary="轮换API密钥",
+    dependencies=[Depends(require_permission("admin"))],
+)
+async def rotate_api_key(key_id: str):
+    try:
+        result = api_key_manager.rotate_key(key_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="密钥不存在")
+        return APIKeyRotateResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"轮换API密钥失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/auth/keys/{key_id}",
+    response_model=APIKeyRevokeResponse,
+    tags=["API密钥管理"],
+    summary="吊销API密钥",
+    dependencies=[Depends(require_permission("admin"))],
+)
+async def revoke_api_key(key_id: str):
+    try:
+        success = api_key_manager.revoke_key(key_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="密钥不存在")
+        return APIKeyRevokeResponse(key_id=key_id, revoked=True)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"吊销API密钥失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/auth/keys/{key_id}/rate-limit",
+    response_model=RateLimitStatusResponse,
+    tags=["API密钥管理"],
+    summary="查询密钥限流状态",
+    dependencies=[Depends(require_permission("admin"))],
+)
+async def get_rate_limit_status(key_id: str):
+    try:
+        limit = api_key_manager.get_key_rate_limit(key_id)
+        if limit is None:
+            raise HTTPException(status_code=404, detail="密钥不存在")
+        status = per_key_rate_limiter.get_status(key_id, limit)
+        return RateLimitStatusResponse(
+            key_id=key_id,
+            limit=limit,
+            remaining=status["remaining"],
+            used=status["used"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询限流状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== API审计日志 ====================
+
+@router.get(
+    "/auth/audit-logs",
+    response_model=APIAuditLogListResponse,
+    tags=["API审计日志"],
+    summary="查询API审计日志",
+    dependencies=[Depends(require_permission("admin"))],
+)
+async def query_audit_logs(
+    key_id: Optional[str] = Query(None, description="按密钥ID过滤"),
+    path: Optional[str] = Query(None, description="按路径过滤"),
+    method: Optional[str] = Query(None, description="按HTTP方法过滤"),
+    start_time: Optional[datetime] = Query(None, description="开始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    try:
+        audit_logger.flush()
+        logs, total = audit_logger.query_logs(
+            key_id=key_id,
+            path=path,
+            method=method,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            offset=offset,
+        )
+        items = []
+        for log in logs:
+            extra = {}
+            if hasattr(log, "extra_info") and log.extra_info:
+                import json
+                try:
+                    extra = json.loads(log.extra_info)
+                except Exception:
+                    extra = {}
+            items.append(APIAuditLogResponse(
+                id=log.id,
+                key_id=log.key_id or "",
+                key_name=log.key_name or "",
+                method=log.method or "",
+                path=log.path or "",
+                status_code=log.status_code or 0,
+                client_ip=log.client_ip or "",
+                request_id=log.request_id or "",
+                extra_info=extra,
+                create_time=log.create_time,
+            ))
+        return APIAuditLogListResponse(total=total, items=items)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询审计日志失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

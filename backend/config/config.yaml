@@ -163,13 +163,22 @@ hardware:
 
 # API认证配置
 auth:
-  enabled: false              # 是否启用认证
-  master_key: ""              # 主密钥（留空则禁用）
-  api_keys: []                # API密钥列表
-  # - key: "your-api-key"
-  #   name: "client-name"
-  #   permissions: ["read", "write"]
-  #   rate_limit: 1000
+  enabled: true
+  master_key: "sk-master-change-me-in-production"
+  default_rate_limit: 1000
+  api_keys:
+    - key: "sk-read-demo-key-001"
+      name: "只读查询客户端"
+      permissions: ["read"]
+      rate_limit: 1000
+    - key: "sk-write-demo-key-002"
+      name: "读写客户端"
+      permissions: ["read", "write"]
+      rate_limit: 2000
+    - key: "sk-admin-demo-key-003"
+      name: "管理员客户端"
+      permissions: ["read", "write", "admin"]
+      rate_limit: 5000
 
 # 大模型配置
 llm:
