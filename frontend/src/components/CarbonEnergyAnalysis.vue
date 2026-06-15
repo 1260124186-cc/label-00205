@@ -512,6 +512,8 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, h } from 'vue'
 import {
+  buildCarbonNodesFromTopology,
+  invalidateCarbonNodesCache,
   fetchCarbonMonthlyRanking,
   fetchHICarbonDualView,
   fetchESGReport,
@@ -519,6 +521,7 @@ import {
   updateCarbonModelConfig,
   downloadCSV,
 } from '@/api/carbon'
+import type { CarbonNodeInput } from '@/api/carbon'
 import {
   CarbonRiskLevelMap,
   CarbonRiskLevelColorMap,
@@ -567,6 +570,8 @@ const tabOptions: Array<{ value: TabValue; label: string; icon: any }> = [
 
 const activeTab = ref<TabValue>('ranking')
 const loading = ref(false)
+const nodesReady = ref(false)
+const carbonNodes = ref<CarbonNodeInput[]>([])
 
 const rankingReport = reactive<Partial<CarbonMonthlyRankingResponse>>({
   report_month: '',
@@ -631,27 +636,45 @@ function nodeTypeLabel(t: string): string {
   return map[t] || t
 }
 
-async function loadRanking() {
+async function ensureNodes(forceRefresh = false): Promise<CarbonNodeInput[]> {
+  if (nodesReady.value && carbonNodes.value.length > 0 && !forceRefresh) {
+    return carbonNodes.value
+  }
   try {
-    const data = await fetchCarbonMonthlyRanking({ nodes: [], top_n: 15 })
+    const nodes = await buildCarbonNodesFromTopology(forceRefresh)
+    carbonNodes.value = nodes
+    nodesReady.value = true
+    return nodes
+  } catch (e) {
+    console.error('构建碳排节点数据失败:', e)
+    return []
+  }
+}
+
+async function loadRanking(forceRefresh = false) {
+  try {
+    const nodes = await ensureNodes(forceRefresh)
+    const data = await fetchCarbonMonthlyRanking({ nodes, top_n: 15 })
     Object.assign(rankingReport, data)
   } catch (e) {
     console.error('加载月度排行失败:', e)
   }
 }
 
-async function loadDualView() {
+async function loadDualView(forceRefresh = false) {
   try {
-    const data = await fetchHICarbonDualView({ nodes: [] })
+    const nodes = await ensureNodes(forceRefresh)
+    const data = await fetchHICarbonDualView({ nodes })
     Object.assign(dualView, data)
   } catch (e) {
     console.error('加载HI并列视图失败:', e)
   }
 }
 
-async function loadESGReport() {
+async function loadESGReport(forceRefresh = false) {
   try {
-    const data = await fetchESGReport({ nodes: [], format: 'json', include_methodology: true, top_n: 5 })
+    const nodes = await ensureNodes(forceRefresh)
+    const data = await fetchESGReport({ nodes, format: 'json', include_methodology: true, top_n: 5 })
     Object.assign(esgReport, data)
   } catch (e) {
     console.error('加载ESG报表失败:', e)
@@ -669,7 +692,11 @@ async function loadConfig() {
 
 async function refreshAll() {
   loading.value = true
+  invalidateCarbonNodesCache()
+  nodesReady.value = false
+  carbonNodes.value = []
   try {
+    await ensureNodes(true)
     await Promise.all([loadRanking(), loadDualView(), loadESGReport()])
   } finally {
     loading.value = false
@@ -710,7 +737,8 @@ function exportJSON() {
 
 async function exportCSV() {
   try {
-    const data = await fetchESGReport({ nodes: [], format: 'csv', include_methodology: true, top_n: 10 })
+    const nodes = await ensureNodes()
+    const data = await fetchESGReport({ nodes, format: 'csv', include_methodology: true, top_n: 10 })
     const csv = data.csv_content || ''
     downloadCSV(csv, `esg-carbon-report-${data.report_period || 'latest'}.csv`)
   } catch (e) {
