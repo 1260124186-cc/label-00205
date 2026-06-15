@@ -268,6 +268,11 @@ class FlangeAttentionNetwork(nn.Module):
         output_classes: int = 5,
         enable_cross_channel_attention: bool = True,
         channel_attention_heads: int = 4,
+        bolt_level_feature_dim: int = 0,
+        global_feature_dim: int = 0,
+        feature_mode: str = "auxiliary",
+        tabular_hidden: Optional[List[int]] = None,
+        fusion_mode: str = "concat",
     ):
         """
         初始化法兰面网络
@@ -281,12 +286,23 @@ class FlangeAttentionNetwork(nn.Module):
             output_classes: 输出类别数
             enable_cross_channel_attention: 是否启用螺栓内部的跨通道Attention（多变量时 True）
             channel_attention_heads: 跨通道Attention头数
+            bolt_level_feature_dim: 每螺栓特征维度（>0 表示启用每螺栓特征）
+            global_feature_dim: 全局特征维度（如法兰整体统计特征）
+            feature_mode: 特征输入模式 auxiliary/tabular/concat
+            tabular_hidden: Tabular分支隐藏层列表（仅 tabular 模式使用）
+            fusion_mode: 融合方式 concat/attention
         """
         super(FlangeAttentionNetwork, self).__init__()
 
         self.max_bolts = max_bolts
         self.feature_dim = feature_dim
-        self.input_dim = input_dim  # 持久化供加载时使用
+        self.input_dim = input_dim
+        self.lstm_units = lstm_units
+        self.bolt_level_feature_dim = bolt_level_feature_dim
+        self.global_feature_dim = global_feature_dim
+        self.feature_mode = feature_mode
+        self.fusion_mode = fusion_mode
+        self.tabular_hidden = tabular_hidden
 
         # 螺栓特征提取器（支持跨通道 Attention）
         self.bolt_extractor = BoltFeatureExtractor(
@@ -312,8 +328,83 @@ class FlangeAttentionNetwork(nn.Module):
             bidirectional=True
         )
 
+        # ============ 特征工程相关层 ============
+        # 聚合后的 bolt 特征维度（mean 池化）
+        self.bolt_aggregated_dim = bolt_level_feature_dim
+        # 总辅助特征维度（非 tabular 模式下拼接）
+        self.total_aux_dim = self.bolt_aggregated_dim + global_feature_dim
+
+        # Tabular 分支（仅 tabular 模式使用，为 bolt_feat 和 global_feat 分别创建）
+        self.bolt_tabular_branch: Optional[nn.Sequential] = None
+        self.global_tabular_branch: Optional[nn.Sequential] = None
+        self.bolt_tabular_out_dim = 0
+        self.global_tabular_out_dim = 0
+
+        has_bolt_feat = bolt_level_feature_dim > 0
+        has_global_feat = global_feature_dim > 0
+        has_any_feat = has_bolt_feat or has_global_feat
+
+        if feature_mode == "tabular" and has_any_feat:
+            tabular_hidden = tabular_hidden or [64, 32]
+            dropout_rate = 0.2
+
+            if has_bolt_feat:
+                prev_dim = bolt_level_feature_dim
+                bolt_layers = []
+                for hidden in tabular_hidden:
+                    bolt_layers.append(nn.Linear(prev_dim, hidden))
+                    bolt_layers.append(nn.ReLU())
+                    bolt_layers.append(nn.Dropout(dropout_rate))
+                    prev_dim = hidden
+                self.bolt_tabular_branch = nn.Sequential(*bolt_layers)
+                self.bolt_tabular_out_dim = prev_dim
+
+            if has_global_feat:
+                prev_dim = global_feature_dim
+                global_layers = []
+                for hidden in tabular_hidden:
+                    global_layers.append(nn.Linear(prev_dim, hidden))
+                    global_layers.append(nn.ReLU())
+                    global_layers.append(nn.Dropout(dropout_rate))
+                    prev_dim = hidden
+                self.global_tabular_branch = nn.Sequential(*global_layers)
+                self.global_tabular_out_dim = prev_dim
+
+        # ============ 融合后的维度计算 ============
+        lstm_hidden_dim = lstm_units * 2
+
+        if has_any_feat:
+            if feature_mode == "auxiliary":
+                fused_dim = lstm_hidden_dim + self.total_aux_dim
+            elif feature_mode == "tabular":
+                fused_dim = lstm_hidden_dim + self.bolt_tabular_out_dim + self.global_tabular_out_dim
+            elif feature_mode == "concat":
+                fused_dim = lstm_hidden_dim + self.total_aux_dim
+            else:
+                fused_dim = lstm_hidden_dim
+        else:
+            fused_dim = lstm_hidden_dim
+
+        # ============ 注意力融合（可选） ============
+        self.attention_layer: Optional[nn.Sequential] = None
+        if (
+            fusion_mode == "attention"
+            and feature_mode in ("auxiliary", "tabular")
+            and has_any_feat
+        ):
+            if feature_mode == "auxiliary":
+                feat_dim_for_att = self.total_aux_dim
+            else:
+                feat_dim_for_att = self.bolt_tabular_out_dim + self.global_tabular_out_dim
+            self.attention_layer = nn.Sequential(
+                nn.Linear(lstm_hidden_dim + feat_dim_for_att, 64),
+                nn.Tanh(),
+                nn.Linear(64, 2),
+                nn.Softmax(dim=-1),
+            )
+
         # 分类层
-        self.fc = nn.Linear(lstm_units * 2, 64)
+        self.fc = nn.Linear(fused_dim, 64)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.2)
         self.output = nn.Linear(64, output_classes)
@@ -321,7 +412,9 @@ class FlangeAttentionNetwork(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        bolt_mask: Optional[torch.Tensor] = None
+        bolt_mask: Optional[torch.Tensor] = None,
+        bolt_features: Optional[torch.Tensor] = None,
+        global_features: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向传播
@@ -329,38 +422,98 @@ class FlangeAttentionNetwork(nn.Module):
         Args:
             x: 输入张量，形状为 (batch_size, num_bolts, seq_len, input_dim)
             bolt_mask: 螺栓掩码，用于处理不同数量的螺栓
+            bolt_features: 每螺栓特征 (batch, num_bolts, bolt_level_feature_dim)
+            global_features: 全局特征 (batch, global_feature_dim)
 
         Returns:
             Tuple: (分类输出, 螺栓级注意力权重)
         """
         batch_size, num_bolts, seq_len, input_dim = x.size()
 
-        # 提取每个螺栓的特征
-        bolt_features = []
+        # 提取每个螺栓的时序特征
+        seq_bolt_features = []
         per_bolt_channel_attn = []
         for i in range(num_bolts):
             bolt_seq = x[:, i, :, :]  # (batch_size, seq_len, input_dim)
             features = self.bolt_extractor(bolt_seq)  # (batch_size, feature_dim)
-            bolt_features.append(features)
+            seq_bolt_features.append(features)
 
             ch_attn = self.bolt_extractor.get_last_channel_attention()
             if ch_attn is not None:
                 per_bolt_channel_attn.append(ch_attn)
 
-        # 堆叠螺栓特征
-        bolt_features = torch.stack(bolt_features, dim=1)  # (batch_size, num_bolts, feature_dim)
+        # 堆叠螺栓时序特征
+        seq_bolt_features = torch.stack(seq_bolt_features, dim=1)  # (batch_size, num_bolts, feature_dim)
 
         # 螺栓级自注意力机制
-        attended_features, attention_weights = self.attention(bolt_features, bolt_mask)
+        attended_features, attention_weights = self.attention(seq_bolt_features, bolt_mask)
 
         # LSTM处理
         lstm_out, (h_n, _) = self.lstm(attended_features)
 
         # 取最后隐藏状态
-        hidden = torch.cat((h_n[-2, :, :], h_n[-1, :, :]), dim=1)
+        hidden = torch.cat((h_n[-2, :, :], h_n[-1, :, :]), dim=1)  # (batch, lstm_units*2)
+
+        # ============ 特征融合 ============
+        has_any_feat = (bolt_features is not None and self.bolt_level_feature_dim > 0) or \
+                       (global_features is not None and self.global_feature_dim > 0)
+
+        if has_any_feat:
+            # 聚合 bolt_features: (batch, num_bolts, bolt_dim) -> (batch, bolt_dim) via mean pooling
+            bolt_feat_aggregated = None
+            if bolt_features is not None and self.bolt_level_feature_dim > 0:
+                bolt_feat_aggregated = bolt_features.mean(dim=1)  # (batch, bolt_level_feature_dim)
+
+            if self.feature_mode in ("auxiliary", "concat"):
+                # 直接拼接 LSTM hidden + bolt_feat_aggregated + global_features
+                parts = [hidden]
+                if bolt_feat_aggregated is not None:
+                    parts.append(bolt_feat_aggregated)
+                if global_features is not None and self.global_feature_dim > 0:
+                    parts.append(global_features)
+
+                if len(parts) > 1:
+                    if self.fusion_mode == "attention" and self.attention_layer is not None:
+                        combined = torch.cat(parts, dim=-1)
+                        att_weights = self.attention_layer(combined)
+                        w_lstm = att_weights[:, 0:1]
+                        w_feat = att_weights[:, 1:2]
+                        feat_concat = torch.cat(parts[1:], dim=-1)
+                        fused = w_lstm * hidden + w_feat * feat_concat
+                    else:
+                        fused = torch.cat(parts, dim=-1)
+                else:
+                    fused = hidden
+
+            elif self.feature_mode == "tabular":
+                # Tabular 分支 + LSTM
+                parts = [hidden]
+                if bolt_feat_aggregated is not None and self.bolt_tabular_branch is not None:
+                    bolt_tab_out = self.bolt_tabular_branch(bolt_feat_aggregated)
+                    parts.append(bolt_tab_out)
+                if global_features is not None and self.global_tabular_branch is not None and self.global_feature_dim > 0:
+                    global_tab_out = self.global_tabular_branch(global_features)
+                    parts.append(global_tab_out)
+
+                if len(parts) > 1:
+                    if self.fusion_mode == "attention" and self.attention_layer is not None:
+                        combined = torch.cat(parts, dim=-1)
+                        att_weights = self.attention_layer(combined)
+                        w_lstm = att_weights[:, 0:1]
+                        w_tab = att_weights[:, 1:2]
+                        tab_concat = torch.cat(parts[1:], dim=-1)
+                        fused = w_lstm * hidden + w_tab * tab_concat
+                    else:
+                        fused = torch.cat(parts, dim=-1)
+                else:
+                    fused = hidden
+            else:
+                fused = hidden
+        else:
+            fused = hidden
 
         # 分类
-        fc_out = self.relu(self.fc(hidden))
+        fc_out = self.relu(self.fc(fused))
         fc_out = self.dropout(fc_out)
         output = self.output(fc_out)
 
@@ -393,6 +546,8 @@ class FlangeAttentionModel:
         self,
         flange_id: Optional[str] = None,
         input_dim: Optional[int] = None,
+        feature_dim: int = 0,
+        global_feature_dim: int = 0,
     ):
         """
         初始化法兰面预测模型
@@ -400,16 +555,41 @@ class FlangeAttentionModel:
         Args:
             flange_id: 法兰面ID
             input_dim: 输入通道维度（None 则从配置读取，默认为 2）
+            feature_dim: 每螺栓特征维度（0=不使用特征工程）
+            global_feature_dim: 全局特征维度（0=不使用全局特征）
         """
         self.flange_id = flange_id
         self.device = get_device()
         self.model_config = config.get('model.flange_attention', {})
         self.training_config = config.get('model.training', {})
+        fe_cfg = config.get('feature_engineering', {})
 
         # input_dim 优先级: 参数 → 配置 → 默认 2
         if input_dim is None:
             input_dim = int(self.model_config.get('input_dim', 2))
         self.input_dim = input_dim
+
+        # 特征工程配置
+        self.bolt_level_feature_dim = feature_dim
+        self.global_feature_dim = global_feature_dim
+        self.feature_enabled = fe_cfg.get('enabled', True) and (feature_dim > 0 or global_feature_dim > 0)
+
+        if self.feature_enabled:
+            self.bolt_level_feature_dim = feature_dim
+            self.global_feature_dim = global_feature_dim
+            self.feature_mode = fe_cfg.get('input_mode', 'auxiliary')
+            self.fusion_mode = fe_cfg.get('fusion_mode', 'concat')
+            self.tabular_hidden = fe_cfg.get('tabular_branch.hidden_units', [64, 32])
+        else:
+            self.bolt_level_feature_dim = 0
+            self.global_feature_dim = 0
+            self.feature_mode = 'auxiliary'
+            self.fusion_mode = 'concat'
+            self.tabular_hidden = None
+
+        self._feature_scaler_state = None
+        self._bolt_feature_scaler_state = None
+        self._global_feature_scaler_state = None
 
         # 创建网络（input_dim 完全参数化）
         self.model = FlangeAttentionNetwork(
@@ -421,6 +601,11 @@ class FlangeAttentionModel:
             output_classes=self.model_config.get('output_classes', 5),
             enable_cross_channel_attention=self.model_config.get('enable_cross_channel_attention', True),
             channel_attention_heads=self.model_config.get('channel_attention_heads', 4),
+            bolt_level_feature_dim=self.bolt_level_feature_dim,
+            global_feature_dim=self.global_feature_dim,
+            feature_mode=self.feature_mode,
+            tabular_hidden=self.tabular_hidden,
+            fusion_mode=self.fusion_mode,
         ).to(self.device)
 
         self.is_trained = False
@@ -430,7 +615,10 @@ class FlangeAttentionModel:
 
         logger.info(
             f"法兰面注意力模型初始化完成: flange_id={flange_id}, "
-            f"input_dim={input_dim}, cross_channel_attn={input_dim > 2}"
+            f"input_dim={input_dim}, cross_channel_attn={input_dim > 2}, "
+            f"bolt_feat_dim={self.bolt_level_feature_dim}, "
+            f"global_feat_dim={self.global_feature_dim}, "
+            f"mode={self.feature_mode}"
         )
     
     def analyze_bolt_correlations(self, bolt_data: Dict[str, np.ndarray]) -> np.ndarray:
@@ -474,9 +662,11 @@ class FlangeAttentionModel:
         labels: Optional[np.ndarray] = None,
         sequence_length: int = 100,
         input_dim: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        bolt_features_list: Optional[List[np.ndarray]] = None,
+        global_features: Optional[np.ndarray] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        准备多螺栓数据（支持多通道 input_dim 动态适配）
+        准备多螺栓数据（支持多通道 input_dim 动态适配 + 特征工程）
 
         Args:
             multi_bolt_data: 多螺栓数据列表，每个元素为单个螺栓的时序数据
@@ -485,9 +675,11 @@ class FlangeAttentionModel:
             labels: 标签数据
             sequence_length: 序列长度
             input_dim: 强制指定输入维度，默认使用模型的 self.input_dim
+            bolt_features_list: 每个螺栓的特征列表 [(bolt_level_feature_dim,), ...]
+            global_features: 全局特征 (global_feature_dim,)
 
         Returns:
-            Tuple: (输入张量, 标签张量, 螺栓掩码)
+            Tuple: (输入张量, 标签张量, 螺栓掩码, 螺栓特征张量或None, 全局特征张量或None)
         """
         max_bolts = self.model_config.get('max_bolts', 20)
         n_bolts = len(multi_bolt_data)
@@ -551,11 +743,49 @@ class FlangeAttentionModel:
         mask[:n_bolts] = True
         mask = mask.to(self.device)
 
+        # ============ 处理 bolt_features_list ============
+        bolt_feat_tensor = None
+        if bolt_features_list is not None and self.bolt_level_feature_dim > 0:
+            bolt_feats = []
+            for i, bf in enumerate(bolt_features_list[:max_bolts]):
+                bf = np.asarray(bf, dtype=np.float32)
+                if bf.ndim == 0:
+                    bf = bf.reshape(1)
+                if bf.shape[0] < self.bolt_level_feature_dim:
+                    padded = np.zeros(self.bolt_level_feature_dim, dtype=np.float32)
+                    padded[:bf.shape[0]] = bf
+                    bf = padded
+                elif bf.shape[0] > self.bolt_level_feature_dim:
+                    bf = bf[:self.bolt_level_feature_dim]
+                bolt_feats.append(bf)
+
+            # 填充不足的螺栓特征
+            while len(bolt_feats) < max_bolts:
+                bolt_feats.append(np.zeros(self.bolt_level_feature_dim, dtype=np.float32))
+
+            bolt_feat_tensor = torch.FloatTensor(np.array(bolt_feats, dtype=np.float32)).unsqueeze(0)
+            bolt_feat_tensor = bolt_feat_tensor.to(self.device)
+
+        # ============ 处理 global_features ============
+        global_feat_tensor = None
+        if global_features is not None and self.global_feature_dim > 0:
+            gf = np.asarray(global_features, dtype=np.float32)
+            if gf.ndim == 0:
+                gf = gf.reshape(1)
+            if gf.shape[0] < self.global_feature_dim:
+                padded = np.zeros(self.global_feature_dim, dtype=np.float32)
+                padded[:gf.shape[0]] = gf
+                gf = padded
+            elif gf.shape[0] > self.global_feature_dim:
+                gf = gf[:self.global_feature_dim]
+
+            global_feat_tensor = torch.FloatTensor(gf.reshape(1, -1)).to(self.device)
+
         if labels is not None:
             y = torch.LongTensor(labels).to(self.device)
-            return X, y, mask
+            return X, y, mask, bolt_feat_tensor, global_feat_tensor
 
-        return X, None, mask
+        return X, None, mask, bolt_feat_tensor, global_feat_tensor
     
     def train(
         self,
@@ -567,10 +797,14 @@ class FlangeAttentionModel:
         batch_size: Optional[int] = None,
         learning_rate: Optional[float] = None,
         class_weights: Optional[np.ndarray] = None,
-        training_config: Optional[Dict[str, Any]] = None
+        training_config: Optional[Dict[str, Any]] = None,
+        train_bolt_features: Optional[List[List[np.ndarray]]] = None,
+        train_global_features: Optional[List[np.ndarray]] = None,
+        val_bolt_features: Optional[List[List[np.ndarray]]] = None,
+        val_global_features: Optional[List[np.ndarray]] = None,
     ) -> Dict[str, Any]:
         """
-        增强版训练方法
+        增强版训练方法（支持特征工程输入）
 
         支持：
         - 可配置早停机制（patience/min_delta/mode）
@@ -578,6 +812,7 @@ class FlangeAttentionModel:
         - 类别不平衡处理（加权损失 + 过采样 WeightedRandomSampler）
         - 增量训练（冻结指定层，fine-tune）
         - 完整评估指标（精确率/召回率/F1/混淆矩阵）
+        - 特征工程辅助输入（bolt_features / global_features）
 
         Args:
             train_data: 训练数据，列表的列表，外层是样本，内层是螺栓
@@ -594,6 +829,10 @@ class FlangeAttentionModel:
                 - class_imbalance: {strategy: weighted_loss/oversampling/none, oversampling_ratio}
                 - incremental: {enabled, freeze_layers: [layer_names]}
                 - focal_loss: {enabled, gamma, alpha}
+            train_bolt_features: 训练集每螺栓特征列表 [[bolt_feat, ...], ...]
+            train_global_features: 训练集全局特征列表 [global_feat, ...]
+            val_bolt_features: 验证集每螺栓特征列表
+            val_global_features: 验证集全局特征列表
 
         Returns:
             Dict: 包含训练历史和完整评估指标
@@ -631,21 +870,59 @@ class FlangeAttentionModel:
 
         all_X = []
         all_masks = []
-        for sample in train_data:
-            X, _, mask = self.prepare_data(sample, sequence_length=sequence_length)
+        all_bolt_feats = []
+        all_global_feats = []
+        for idx, sample in enumerate(train_data):
+            bf = train_bolt_features[idx] if train_bolt_features is not None else None
+            gf = train_global_features[idx] if train_global_features is not None else None
+            X, _, mask, bolt_feat, global_feat = self.prepare_data(
+                sample, sequence_length=sequence_length,
+                bolt_features_list=bf, global_features=gf
+            )
             all_X.append(X.squeeze(0))
             all_masks.append(mask)
+            if bolt_feat is not None:
+                all_bolt_feats.append(bolt_feat.squeeze(0))
+            if global_feat is not None:
+                all_global_feats.append(global_feat.squeeze(0))
 
         X_train = torch.stack(all_X).to(self.device)
         y_train = torch.LongTensor(train_labels).to(self.device)
 
+        bolt_feat_train = None
+        if all_bolt_feats and len(all_bolt_feats) == len(all_X):
+            bolt_feat_train = torch.stack(all_bolt_feats).to(self.device)
+
+        global_feat_train = None
+        if all_global_feats and len(all_global_feats) == len(all_X):
+            global_feat_train = torch.stack(all_global_feats).to(self.device)
+
         if val_data is not None and val_labels is not None:
             all_val_X = []
-            for sample in val_data:
-                X, _, _ = self.prepare_data(sample, sequence_length=sequence_length)
+            all_val_bolt_feats = []
+            all_val_global_feats = []
+            for idx, sample in enumerate(val_data):
+                bf = val_bolt_features[idx] if val_bolt_features is not None else None
+                gf = val_global_features[idx] if val_global_features is not None else None
+                X, _, _, bolt_feat, global_feat = self.prepare_data(
+                    sample, sequence_length=sequence_length,
+                    bolt_features_list=bf, global_features=gf
+                )
                 all_val_X.append(X.squeeze(0))
+                if bolt_feat is not None:
+                    all_val_bolt_feats.append(bolt_feat.squeeze(0))
+                if global_feat is not None:
+                    all_val_global_feats.append(global_feat.squeeze(0))
             X_val = torch.stack(all_val_X).to(self.device)
             y_val = torch.LongTensor(val_labels).to(self.device)
+
+            bolt_feat_val = None
+            if all_val_bolt_feats and len(all_val_bolt_feats) == len(all_val_X):
+                bolt_feat_val = torch.stack(all_val_bolt_feats).to(self.device)
+
+            global_feat_val = None
+            if all_val_global_feats and len(all_val_global_feats) == len(all_val_X):
+                global_feat_val = torch.stack(all_val_global_feats).to(self.device)
         else:
             val_split = self.training_config.get('validation_split', 0.2)
             val_size = max(1, int(len(X_train) * val_split))
@@ -653,6 +930,12 @@ class FlangeAttentionModel:
             y_val = y_train[-val_size:]
             X_train = X_train[:-val_size]
             y_train = y_train[:-val_size]
+
+            bolt_feat_val = bolt_feat_train[-val_size:] if bolt_feat_train is not None else None
+            bolt_feat_train = bolt_feat_train[:-val_size] if bolt_feat_train is not None else None
+
+            global_feat_val = global_feat_train[-val_size:] if global_feat_train is not None else None
+            global_feat_train = global_feat_train[:-val_size] if global_feat_train is not None else None
 
         if inc_enabled and freeze_layers:
             self._freeze_layers(freeze_layers)
@@ -745,7 +1028,10 @@ class FlangeAttentionModel:
         val_class_distribution = dict(Counter(y_val.cpu().numpy().tolist()))
         logger.info(f"训练集类别分布: {class_distribution}")
         logger.info(f"验证集类别分布: {val_class_distribution}")
-        logger.info(f"开始训练: epochs={epochs}, batch_size={batch_size}, lr={learning_rate}")
+        logger.info(
+            f"开始训练: epochs={epochs}, batch_size={batch_size}, lr={learning_rate}, "
+            f"bolt_feat_dim={self.bolt_level_feature_dim}, global_feat_dim={self.global_feature_dim}"
+        )
 
         for epoch in range(epochs):
             epoch_start = time.time()
@@ -754,9 +1040,34 @@ class FlangeAttentionModel:
             train_correct = 0
             train_total = 0
 
-            for batch_X, batch_y in train_loader:
+            for batch_idx, (batch_X, batch_y) in enumerate(train_loader):
                 optimizer.zero_grad()
-                outputs, _ = self.model(batch_X)
+
+                # 获取当前批次的 bolt/global features
+                batch_bolt_feat = None
+                batch_global_feat = None
+
+                if bolt_feat_train is not None:
+                    if sampler is not None:
+                        batch_bolt_feat = bolt_feat_train[:len(batch_X)]
+                    else:
+                        start = batch_idx * batch_size
+                        end = min(start + batch_size, len(X_train))
+                        batch_bolt_feat = bolt_feat_train[start:end]
+
+                if global_feat_train is not None:
+                    if sampler is not None:
+                        batch_global_feat = global_feat_train[:len(batch_X)]
+                    else:
+                        start = batch_idx * batch_size
+                        end = min(start + batch_size, len(X_train))
+                        batch_global_feat = global_feat_train[start:end]
+
+                outputs, _ = self.model(
+                    batch_X,
+                    bolt_features=batch_bolt_feat,
+                    global_features=batch_global_feat
+                )
                 loss = criterion(outputs, batch_y)
                 loss.backward()
                 optimizer.step()
@@ -771,7 +1082,11 @@ class FlangeAttentionModel:
 
             self.model.eval()
             with torch.no_grad():
-                val_outputs, _ = self.model(X_val)
+                val_outputs, _ = self.model(
+                    X_val,
+                    bolt_features=bolt_feat_val,
+                    global_features=global_feat_val
+                )
                 val_loss = criterion(val_outputs, y_val).item()
                 _, val_predicted = torch.max(val_outputs.data, 1)
                 val_acc = (val_predicted == y_val).sum().item() / max(1, len(y_val))
@@ -992,34 +1307,47 @@ class FlangeAttentionModel:
     def predict(
         self,
         multi_bolt_data: List[np.ndarray],
-        return_attention: bool = False
+        return_attention: bool = False,
+        bolt_features: Optional[List[np.ndarray]] = None,
+        global_features: Optional[np.ndarray] = None,
     ) -> Tuple[int, float, Optional[np.ndarray]]:
         """
-        预测法兰面状态
-        
+        预测法兰面状态（支持特征工程辅助输入）
+
         Args:
             multi_bolt_data: 多螺栓数据列表
             return_attention: 是否返回注意力权重
-            
+            bolt_features: 每螺栓特征列表 [(bolt_level_feature_dim,), ...]
+            global_features: 全局特征 (global_feature_dim,)
+
         Returns:
             Tuple: (预测类别, 置信度, 注意力权重或None)
         """
         self.model.eval()
-        
+
         sequence_length = self.model_config.get('sequence_length', 100)
-        X, _, mask = self.prepare_data(multi_bolt_data, sequence_length=sequence_length)
-        
+        X, _, mask, bolt_feat_tensor, global_feat_tensor = self.prepare_data(
+            multi_bolt_data,
+            sequence_length=sequence_length,
+            bolt_features_list=bolt_features,
+            global_features=global_features
+        )
+
         with torch.no_grad():
-            outputs, attention_weights = self.model(X)
+            outputs, attention_weights = self.model(
+                X,
+                bolt_features=bolt_feat_tensor,
+                global_features=global_feat_tensor
+            )
             probabilities = torch.softmax(outputs, dim=1)
-            
+
             prob = probabilities[0].cpu().numpy()
             predicted_class = int(torch.argmax(probabilities[0]).item())
             confidence = float(prob[predicted_class])
-        
+
         if return_attention:
             return predicted_class, confidence, attention_weights.cpu().numpy()
-        
+
         return predicted_class, confidence, None
     
     def get_status_label(self, class_id: int) -> str:
@@ -1038,19 +1366,32 @@ class FlangeAttentionModel:
         }
         return recommendations.get(class_id, "请联系技术人员评估。")
     
-    def save(self, path: Optional[str] = None) -> str:
-        """保存模型"""
+    def save(self, path: Optional[str] = None, **kwargs) -> str:
+        """
+        保存模型（支持附加特征工程信息）
+
+        Args:
+            path: 保存路径，可选
+            **kwargs: 附加数据，例如：
+                - bolt_feature_names: 螺栓特征名称列表
+                - global_feature_names: 全局特征名称列表
+                - bolt_feature_scaler_state: 螺栓特征标准化器状态
+                - global_feature_scaler_state: 全局特征标准化器状态
+
+        Returns:
+            str: 实际保存路径
+        """
         if path is None:
             save_dir = Path(config.get('model.save_path', './trained_models'))
             save_dir.mkdir(parents=True, exist_ok=True)
-            
+
             if self.flange_id:
                 filename = f"flange_attention_{self.flange_id}.pt"
             else:
                 filename = "flange_attention_default.pt"
-            
+
             path = str(save_dir / filename)
-        
+
         save_data = {
             'model_state_dict': self.model.state_dict(),
             'model_config': self.model_config,
@@ -1058,21 +1399,86 @@ class FlangeAttentionModel:
             'is_trained': self.is_trained,
             'correlation_matrix': self.correlation_matrix,
             'bolt_ids': self.bolt_ids,
-            'training_history': self.training_history
+            'training_history': self.training_history,
+            'bolt_level_feature_dim': self.bolt_level_feature_dim,
+            'global_feature_dim': self.global_feature_dim,
+            'feature_mode': self.feature_mode,
+            'fusion_mode': self.fusion_mode,
+            'tabular_hidden': self.tabular_hidden,
+            'feature_enabled': self.feature_enabled,
+            'input_dim': self.input_dim,
+            'bolt_feature_scaler_state': kwargs.get('bolt_feature_scaler_state', self._bolt_feature_scaler_state),
+            'global_feature_scaler_state': kwargs.get('global_feature_scaler_state', self._global_feature_scaler_state),
+            'bolt_feature_names': kwargs.get('bolt_feature_names', None),
+            'global_feature_names': kwargs.get('global_feature_names', None),
         }
-        
+
         torch.save(save_data, path)
-        logger.info(f"法兰面模型已保存: {path}")
-        
+        logger.info(
+            f"法兰面模型已保存: {path}, "
+            f"bolt_feat_dim={self.bolt_level_feature_dim}, "
+            f"global_feat_dim={self.global_feature_dim}, "
+            f"mode={self.feature_mode}"
+        )
+
         return path
     
-    def load(self, path: str) -> None:
-        """加载模型"""
+    def load(self, path: str) -> Dict[str, Any]:
+        """
+        加载模型（返回特征工程元数据供上层使用）
+
+        Args:
+            path: 模型文件路径
+
+        Returns:
+            Dict: 包含 bolt_feature_names / global_feature_names / scaler_state 等元数据
+        """
         if not os.path.exists(path):
             raise FileNotFoundError(f"模型文件不存在: {path}")
-        
-        save_data = torch.load(path, map_location=self.device)
-        
+
+        save_data = torch.load(path, map_location=self.device, weights_only=False)
+
+        saved_bolt_dim = save_data.get('bolt_level_feature_dim', 0)
+        saved_global_dim = save_data.get('global_feature_dim', 0)
+        saved_input_dim = save_data.get('input_dim', self.input_dim)
+
+        need_rebuild = (
+            saved_bolt_dim != self.bolt_level_feature_dim
+            or saved_global_dim != self.global_feature_dim
+            or saved_input_dim != self.input_dim
+        )
+
+        if need_rebuild:
+            logger.info(
+                f"重建网络: 原 input_dim={self.input_dim}, bolt_dim={self.bolt_level_feature_dim}, "
+                f"global_dim={self.global_feature_dim}; "
+                f"加载模型 input_dim={saved_input_dim}, bolt_dim={saved_bolt_dim}, "
+                f"global_dim={saved_global_dim}"
+            )
+            self.input_dim = saved_input_dim
+            self.bolt_level_feature_dim = saved_bolt_dim
+            self.global_feature_dim = saved_global_dim
+            self.feature_mode = save_data.get('feature_mode', 'auxiliary')
+            self.fusion_mode = save_data.get('fusion_mode', 'concat')
+            self.tabular_hidden = save_data.get('tabular_hidden', [64, 32])
+            self.feature_enabled = (saved_bolt_dim > 0 or saved_global_dim > 0)
+
+            self.model = FlangeAttentionNetwork(
+                max_bolts=self.model_config.get('max_bolts', 20),
+                input_dim=self.input_dim,
+                feature_dim=32,
+                attention_heads=self.model_config.get('attention_heads', 8),
+                lstm_units=self.model_config.get('lstm_units', 64),
+                output_classes=self.model_config.get('output_classes', 5),
+                enable_cross_channel_attention=self.model_config.get('enable_cross_channel_attention', True),
+                channel_attention_heads=self.model_config.get('channel_attention_heads', 4),
+                bolt_level_feature_dim=self.bolt_level_feature_dim,
+                global_feature_dim=self.global_feature_dim,
+                feature_mode=self.feature_mode,
+                tabular_hidden=self.tabular_hidden,
+                fusion_mode=self.fusion_mode,
+            ).to(self.device)
+
         self.model.load_state_dict(save_data['model_state_dict'])
         self.model_config = save_data.get('model_config', self.model_config)
         self.flange_id = save_data.get('flange_id', self.flange_id)
@@ -1080,9 +1486,27 @@ class FlangeAttentionModel:
         self.correlation_matrix = save_data.get('correlation_matrix')
         self.bolt_ids = save_data.get('bolt_ids', [])
         self.training_history = save_data.get('training_history', [])
-        
+        self._bolt_feature_scaler_state = save_data.get('bolt_feature_scaler_state', None)
+        self._global_feature_scaler_state = save_data.get('global_feature_scaler_state', None)
+
         self.model.eval()
-        logger.info(f"法兰面模型已加载: {path}")
+        logger.info(
+            f"法兰面模型已加载: {path}, "
+            f"bolt_feat_dim={self.bolt_level_feature_dim}, "
+            f"global_feat_dim={self.global_feature_dim}, "
+            f"mode={self.feature_mode}"
+        )
+
+        return {
+            'bolt_feature_names': save_data.get('bolt_feature_names'),
+            'global_feature_names': save_data.get('global_feature_names'),
+            'bolt_feature_scaler_state': self._bolt_feature_scaler_state,
+            'global_feature_scaler_state': self._global_feature_scaler_state,
+            'bolt_level_feature_dim': self.bolt_level_feature_dim,
+            'global_feature_dim': self.global_feature_dim,
+            'feature_mode': self.feature_mode,
+            'input_dim': self.input_dim,
+        }
     
     def granger_causality_test(
         self,
@@ -1820,14 +2244,40 @@ class FlangeAttentionModel:
         return result
 
     @classmethod
-    def load_or_create(cls, flange_id: str) -> 'FlangeAttentionModel':
-        """加载已有模型或创建新模型"""
-        model = cls(flange_id=flange_id)
-        
+    def load_or_create(
+        cls,
+        flange_id: str,
+        feature_dim: int = 0,
+        global_feature_dim: int = 0,
+    ) -> 'FlangeAttentionModel':
+        """
+        加载已有模型或创建新模型
+
+        Args:
+            flange_id: 法兰面ID
+            feature_dim: 每螺栓特征维度（仅新建模型时使用）
+            global_feature_dim: 全局特征维度（仅新建模型时使用）
+
+        Returns:
+            FlangeAttentionModel: 模型实例
+        """
         save_dir = Path(config.get('model.save_path', './trained_models'))
         model_path = save_dir / f"flange_attention_{flange_id}.pt"
-        
+
         if model_path.exists():
-            model.load(str(model_path))
-        
+            model = cls(flange_id=flange_id, feature_dim=feature_dim, global_feature_dim=global_feature_dim)
+            metadata = model.load(str(model_path))
+            logger.info(
+                f"已加载法兰面模型: {flange_id}, "
+                f"bolt_feat_dim={metadata.get('bolt_level_feature_dim', 0)}, "
+                f"global_feat_dim={metadata.get('global_feature_dim', 0)}"
+            )
+            return model
+
+        model = cls(flange_id=flange_id, feature_dim=feature_dim, global_feature_dim=global_feature_dim)
+        logger.info(
+            f"创建新的法兰面模型: {flange_id}, "
+            f"bolt_feat_dim={feature_dim}, global_feat_dim={global_feature_dim}"
+        )
+
         return model

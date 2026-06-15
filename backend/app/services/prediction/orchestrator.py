@@ -501,15 +501,35 @@ class PredictionOrchestrator:
             smooth=True,
         )
 
-        # Step 2: 模型推断（模型未训练则规则兜底）
+        # Step 2: 加载模型
         model = self.get_bolt_model(bolt_id, version=version)
         model_version_str = version or 'unknown'
+
+        # Step 1.5: 特征工程（可选，配置开关控制）
+        fe_cfg = config.get('feature_engineering', {})
+        fe_enabled = fe_cfg.get('enabled', True)
+        feature_vector = None
+        if fe_enabled and model.is_trained:
+            try:
+                raw_feature = self.feature_engineer.extract_features(processed.data)
+                if raw_feature.size > 0:
+                    scaler_state = getattr(model, '_feature_scaler_state', None)
+                    if scaler_state is not None:
+                        self.feature_engineer.set_scaler_state(scaler_state)
+                    feature_vector = self.feature_engineer.transform_features(raw_feature)
+            except Exception as e:
+                logger.warning(f"螺栓 {bolt_id} 特征提取失败，跳过特征辅助: {e}")
+                feature_vector = None
+
+        # Step 2: 模型推断（模型未训练则规则兜底）
         if model.is_trained:
             if version is None:
                 model_version_str = self._get_model_version('bolt', bolt_id)
+
             original_status_code, confidence, probs = model.predict(
                 processed.data,
                 return_proba=True,
+                features=feature_vector,
             )
             model_type = 'lstm'
             prediction_source = 'lstm'
@@ -1502,15 +1522,54 @@ class PredictionOrchestrator:
             )
             processed_bolts.append(processed.data)
 
-        # Step 2: 模型推断（模型未训练则规则聚合兜底）
+        # Step 2: 加载模型
         model = self.get_flange_model(flange_id, version=version)
         model_version_str = version or 'unknown'
+
+        # Step 1.5: 特征工程（可选，配置开关控制）
+        fe_cfg = config.get('feature_engineering', {})
+        fe_enabled = fe_cfg.get('enabled', True)
+        bolt_features_list = None
+        global_feature_vec = None
+        if fe_enabled and model.is_trained:
+            try:
+                # 每螺栓特征
+                bolt_feats: List[np.ndarray] = []
+                bolt_scaler_state = getattr(model, '_bolt_feature_scaler_state', None)
+                if bolt_scaler_state is not None:
+                    self.feature_engineer.set_scaler_state(bolt_scaler_state)
+                for pdata in processed_bolts:
+                    raw_feat = self.feature_engineer.extract_features(pdata)
+                    if raw_feat.size > 0:
+                        bolt_feats.append(
+                            self.feature_engineer.transform_features(raw_feat)
+                        )
+                    else:
+                        bolt_feats.append(np.array([], dtype=np.float32))
+                bolt_features_list = bolt_feats if all(bf.size > 0 for bf in bolt_feats) else None
+
+                # 全局特征：所有螺栓拼接后整体提取
+                global_scaler_state = getattr(model, '_global_feature_scaler_state', None)
+                if global_scaler_state is not None:
+                    self.feature_engineer.set_scaler_state(global_scaler_state)
+                concatenated = np.concatenate(processed_bolts)
+                raw_global = self.feature_engineer.extract_features(concatenated)
+                if raw_global.size > 0:
+                    global_feature_vec = self.feature_engineer.transform_features(raw_global)
+            except Exception as e:
+                logger.warning(f"法兰面 {flange_id} 特征提取失败，跳过特征辅助: {e}")
+                bolt_features_list = None
+                global_feature_vec = None
+
+        # Step 2: 模型推断（模型未训练则规则聚合兜底）
         if model.is_trained:
             if version is None:
                 model_version_str = self._get_model_version('flange', flange_id)
             original_status_code, confidence, attention = model.predict(
                 processed_bolts,
                 return_attention=True,
+                bolt_features=bolt_features_list,
+                global_features=global_feature_vec,
             )
             model_type = 'attention'
         else:

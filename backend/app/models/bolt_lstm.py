@@ -57,10 +57,14 @@ FAULT_TYPES = {
 
 class LSTMNetwork(nn.Module):
     """
-    LSTM神经网络模型
-    
-    多层LSTM网络，用于时间序列分类。
-    
+    LSTM神经网络模型（支持特征工程辅助输入）
+
+    支持三种模式:
+    1. basic:       原始纯 LSTM 模式（无特征辅助）
+    2. auxiliary:   特征向量拼接到 LSTM 输出后（默认推荐）
+    3. tabular:     独立 Tabular MLP 分支，与 LSTM 高层融合
+    4. concat:      特征拼接到每个时间步输入
+
     Attributes:
         lstm1: 第一层LSTM
         dropout1: 第一层Dropout
@@ -69,7 +73,7 @@ class LSTMNetwork(nn.Module):
         fc: 全连接层
         output: 输出层
     """
-    
+
     def __init__(
         self,
         input_dim: int = 2,
@@ -77,73 +81,179 @@ class LSTMNetwork(nn.Module):
         lstm_units_2: int = 64,
         dropout_rate: float = 0.2,
         dense_units: int = 32,
-        output_classes: int = 5
+        output_classes: int = 5,
+        feature_dim: int = 0,
+        feature_mode: str = "auxiliary",
+        tabular_hidden: Optional[List[int]] = None,
+        fusion_mode: str = "concat",
     ):
         """
         初始化LSTM网络
-        
+
         Args:
-            input_dim: 输入特征维度
+            input_dim: 输入特征维度（时间步维度）
             lstm_units_1: 第一层LSTM单元数
             lstm_units_2: 第二层LSTM单元数
             dropout_rate: Dropout率
             dense_units: 全连接层单元数
             output_classes: 输出类别数
+            feature_dim: 辅助特征维度（0表示无特征工程）
+            feature_mode: 特征输入模式 basic/auxiliary/tabular/concat
+            tabular_hidden: Tabular分支隐藏层列表（仅 tabular 模式使用）
+            fusion_mode: 融合方式 concat/attention
         """
         super(LSTMNetwork, self).__init__()
-        
+
+        self.feature_dim = feature_dim
+        self.feature_mode = feature_mode
+        self.fusion_mode = fusion_mode
+        self.lstm_units_2 = lstm_units_2
+
+        # concat 模式：扩展 input_dim
+        if feature_mode == "concat" and feature_dim > 0:
+            lstm_input_dim = input_dim + feature_dim
+        else:
+            lstm_input_dim = input_dim
+
         # 第一层LSTM
         self.lstm1 = nn.LSTM(
-            input_size=input_dim,
+            input_size=lstm_input_dim,
             hidden_size=lstm_units_1,
             batch_first=True,
-            bidirectional=False
+            bidirectional=False,
         )
         self.dropout1 = nn.Dropout(dropout_rate)
-        
+
         # 第二层LSTM
         self.lstm2 = nn.LSTM(
             input_size=lstm_units_1,
             hidden_size=lstm_units_2,
             batch_first=True,
-            bidirectional=False
+            bidirectional=False,
         )
         self.dropout2 = nn.Dropout(dropout_rate)
-        
+
+        # ============ Tabular 分支（仅 tabular 模式） ============
+        self.tabular_branch: Optional[nn.Sequential] = None
+        self.tabular_out_dim = 0
+        if feature_mode == "tabular" and feature_dim > 0:
+            tabular_layers = []
+            prev_dim = feature_dim
+            tabular_hidden = tabular_hidden or [64, 32]
+            for hidden in tabular_hidden:
+                tabular_layers.append(nn.Linear(prev_dim, hidden))
+                tabular_layers.append(nn.ReLU())
+                tabular_layers.append(nn.Dropout(dropout_rate))
+                prev_dim = hidden
+            self.tabular_branch = nn.Sequential(*tabular_layers)
+            self.tabular_out_dim = prev_dim
+
+        # ============ 融合后的维度计算 ============
+        if feature_mode == "auxiliary" and feature_dim > 0:
+            fused_dim = lstm_units_2 + feature_dim
+        elif feature_mode == "tabular" and feature_dim > 0:
+            fused_dim = lstm_units_2 + self.tabular_out_dim
+        else:
+            fused_dim = lstm_units_2
+
+        # ============ 注意力融合（可选） ============
+        self.attention_layer: Optional[nn.Sequential] = None
+        if (
+            fusion_mode == "attention"
+            and feature_mode in ("auxiliary", "tabular")
+            and feature_dim > 0
+        ):
+            att_in = (
+                feature_dim if feature_mode == "auxiliary" else self.tabular_out_dim
+            )
+            self.attention_layer = nn.Sequential(
+                nn.Linear(lstm_units_2 + att_in, 64),
+                nn.Tanh(),
+                nn.Linear(64, 2),
+                nn.Softmax(dim=-1),
+            )
+
         # 全连接层
-        self.fc = nn.Linear(lstm_units_2, dense_units)
+        self.fc = nn.Linear(fused_dim, dense_units)
         self.relu = nn.ReLU()
-        
+
         # 输出层
         self.output = nn.Linear(dense_units, output_classes)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+    def forward(
+        self, x: torch.Tensor, features: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
         前向传播
-        
+
         Args:
             x: 输入张量，形状为 (batch_size, sequence_length, input_dim)
-            
+            features: 辅助特征向量 (batch_size, feature_dim)，可选
+
         Returns:
             torch.Tensor: 输出张量，形状为 (batch_size, output_classes)
         """
+        batch_size = x.size(0)
+
+        # concat 模式：在每个时间步拼接特征
+        if self.feature_mode == "concat" and self.feature_dim > 0:
+            if features is None:
+                features = torch.zeros(
+                    batch_size, self.feature_dim, dtype=x.dtype, device=x.device
+                )
+            seq_len = x.size(1)
+            feat_expanded = features.unsqueeze(1).expand(batch_size, seq_len, -1)
+            x = torch.cat([x, feat_expanded], dim=-1)
+
         # LSTM层1
         lstm_out1, _ = self.lstm1(x)
         lstm_out1 = self.dropout1(lstm_out1)
-        
+
         # LSTM层2
         lstm_out2, _ = self.lstm2(lstm_out1)
         lstm_out2 = self.dropout2(lstm_out2)
-        
+
         # 取最后一个时间步的输出
-        last_output = lstm_out2[:, -1, :]
-        
+        last_output = lstm_out2[:, -1, :]  # (batch, lstm_units_2)
+
+        # ============ 特征融合 ============
+        fused = last_output
+        if self.feature_dim > 0:
+            if features is None:
+                features = torch.zeros(
+                    batch_size, self.feature_dim, dtype=x.dtype, device=x.device
+                )
+            if self.feature_mode == "auxiliary":
+                # 直接拼接 LSTM 输出 + 特征
+                if self.fusion_mode == "attention" and self.attention_layer is not None:
+                    att_weights = self.attention_layer(
+                        torch.cat([last_output, features], dim=-1)
+                    )
+                    w_lstm = att_weights[:, 0:1]
+                    w_feat = att_weights[:, 1:2]
+                    fused = w_lstm * last_output + w_feat * features
+                else:
+                    fused = torch.cat([last_output, features], dim=-1)
+
+            elif self.feature_mode == "tabular":
+                # Tabular 分支 + LSTM
+                tab_feat = self.tabular_branch(features)
+                if self.fusion_mode == "attention" and self.attention_layer is not None:
+                    att_weights = self.attention_layer(
+                        torch.cat([last_output, tab_feat], dim=-1)
+                    )
+                    w_lstm = att_weights[:, 0:1]
+                    w_tab = att_weights[:, 1:2]
+                    fused = w_lstm * last_output + w_tab * tab_feat
+                else:
+                    fused = torch.cat([last_output, tab_feat], dim=-1)
+
         # 全连接层
-        fc_out = self.relu(self.fc(last_output))
-        
+        fc_out = self.relu(self.fc(fused))
+
         # 输出层
         output = self.output(fc_out)
-        
+
         return output
 
 
@@ -161,18 +271,27 @@ class BoltLSTMModel:
         is_trained: 是否已训练
     """
     
-    def __init__(self, bolt_id: Optional[str] = None):
+    def __init__(self, bolt_id: Optional[str] = None, feature_dim: int = 0):
         """
         初始化螺栓预测模型
-        
+
         Args:
             bolt_id: 螺栓ID，用于区分不同螺栓的模型
+            feature_dim: 特征工程特征维度（0=不使用特征工程）
         """
         self.bolt_id = bolt_id
         self.device = get_device()
         self.model_config = config.get('model.bolt_lstm', {})
         self.training_config = config.get('model.training', {})
-        
+        fe_cfg = config.get('feature_engineering', {})
+
+        # 特征工程配置
+        self.feature_enabled = fe_cfg.get('enabled', True) and feature_dim > 0
+        self.feature_dim = feature_dim if self.feature_enabled else 0
+        self.feature_mode = fe_cfg.get('input_mode', 'auxiliary') if self.feature_dim > 0 else 'basic'
+        self.fusion_mode = fe_cfg.get('fusion_mode', 'concat')
+        self.tabular_hidden = fe_cfg.get('tabular_branch.hidden_units', [64, 32])
+
         # 创建网络
         self.model = LSTMNetwork(
             input_dim=self.model_config.get('input_dim', 2),
@@ -180,64 +299,104 @@ class BoltLSTMModel:
             lstm_units_2=self.model_config.get('lstm_units_2', 64),
             dropout_rate=self.model_config.get('dropout_rate', 0.2),
             dense_units=self.model_config.get('dense_units', 32),
-            output_classes=self.model_config.get('output_classes', 5)
+            output_classes=self.model_config.get('output_classes', 5),
+            feature_dim=self.feature_dim,
+            feature_mode=self.feature_mode,
+            tabular_hidden=self.tabular_hidden,
+            fusion_mode=self.fusion_mode,
         ).to(self.device)
-        
+
         self.is_trained = False
         self.training_history = []
-        
-        logger.info(f"螺栓LSTM模型初始化完成: bolt_id={bolt_id}, device={self.device}")
-    
+        self._feature_scaler_state = None  # 保存特征标准化器状态
+
+        logger.info(
+            f"螺栓LSTM模型初始化完成: bolt_id={bolt_id}, device={self.device}, "
+            f"feature_dim={self.feature_dim}, mode={self.feature_mode}"
+        )
+
     def prepare_data(
-        self, 
-        data: np.ndarray, 
+        self,
+        data: np.ndarray,
         labels: Optional[np.ndarray] = None,
-        sequence_length: int = 100
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        sequence_length: int = 100,
+        features: Optional[np.ndarray] = None,
+    ) -> Tuple[Tuple[torch.Tensor, Optional[torch.Tensor]], Optional[torch.Tensor]]:
         """
-        准备训练/推理数据
-        
+        准备训练/推理数据（支持可选特征输入）
+
         将原始数据转换为模型输入格式。
-        
+
         Args:
             data: 原始数据，形状为 (n_samples, 2) 或 (n_samples,)
             labels: 标签数据，可选
             sequence_length: 序列长度
-            
+            features: 特征矩阵 (n_windows, feature_dim)，可选
+
         Returns:
-            Tuple: (输入张量, 标签张量或None)
+            Tuple: ((序列张量, 特征张量或None), 标签张量或None)
         """
         # 确保数据是2D的
         if data.ndim == 1:
-            # 添加时间索引作为第二个特征
             n = len(data)
-            time_index = np.arange(n) / n
+            time_index = np.arange(n) / max(n, 1)
             data = np.column_stack([data, time_index])
-        
+
         # 创建序列
         n_samples = len(data) - sequence_length + 1
-        
+
         if n_samples <= 0:
-            # 数据不足，进行填充
-            padded_data = np.zeros((sequence_length, data.shape[1]))
+            padded_data = np.zeros((sequence_length, data.shape[1]), dtype=np.float32)
             padded_data[-len(data):] = data
             sequences = padded_data.reshape(1, sequence_length, -1)
+            feat_tensor = None
+            if features is not None and features.ndim == 1:
+                feat_tensor = torch.FloatTensor(features.reshape(1, -1)).to(self.device)
+            elif features is not None and features.shape[0] > 0:
+                feat_tensor = torch.FloatTensor(features[0:1]).to(self.device)
         else:
-            sequences = np.zeros((n_samples, sequence_length, data.shape[1]))
+            sequences = np.zeros((n_samples, sequence_length, data.shape[1]), dtype=np.float32)
             for i in range(n_samples):
                 sequences[i] = data[i:i + sequence_length]
-        
+
+            feat_tensor = None
+            if features is not None:
+                if features.ndim == 1:
+                    # 单条特征向量：复制到所有窗口
+                    feat_tensor = torch.FloatTensor(
+                        np.tile(features.astype(np.float32), (n_samples, 1))
+                    ).to(self.device)
+                elif features.shape[0] == n_samples:
+                    feat_tensor = torch.FloatTensor(features.astype(np.float32)).to(self.device)
+                elif features.shape[0] >= n_samples:
+                    feat_tensor = torch.FloatTensor(
+                        features[-n_samples:].astype(np.float32)
+                    ).to(self.device)
+                elif features.shape[0] == 1 and n_samples > 1:
+                    feat_tensor = torch.FloatTensor(
+                        np.tile(features, (n_samples, 1)).astype(np.float32)
+                    ).to(self.device)
+                else:
+                    logger.warning(
+                        f"特征维度不匹配: features={features.shape[0]}, "
+                        f"expected={n_samples}, 使用最后一个特征填充"
+                    )
+                    if features.shape[0] > 0:
+                        last = features[-1:].astype(np.float32)
+                        feat_tensor = torch.FloatTensor(
+                            np.tile(last, (n_samples, 1))
+                        ).to(self.device)
+
         # 转换为张量
-        X = torch.FloatTensor(sequences).to(self.device)
-        
+        X_seq = torch.FloatTensor(sequences).to(self.device)
+
         if labels is not None:
-            # 调整标签以匹配序列数
             if len(labels) > n_samples:
                 labels = labels[-n_samples:]
             y = torch.LongTensor(labels).to(self.device)
-            return X, y
-        
-        return X, None
+            return (X_seq, feat_tensor), y
+
+        return (X_seq, feat_tensor), None
     
     def train(
         self,
@@ -249,10 +408,12 @@ class BoltLSTMModel:
         batch_size: Optional[int] = None,
         learning_rate: Optional[float] = None,
         class_weights: Optional[np.ndarray] = None,
-        training_config: Optional[Dict[str, Any]] = None
+        training_config: Optional[Dict[str, Any]] = None,
+        train_features: Optional[np.ndarray] = None,
+        val_features: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         """
-        增强版训练方法
+        增强版训练方法（支持特征工程输入）
 
         支持：
         - 可配置早停机制（patience/min_delta/mode）
@@ -260,6 +421,7 @@ class BoltLSTMModel:
         - 类别不平衡处理（加权损失 + 过采样 WeightedRandomSampler）
         - 增量训练（冻结指定层，fine-tune）
         - 完整评估指标（精确率/召回率/F1/混淆矩阵）
+        - 特征工程辅助输入（train_features / val_features）
 
         Args:
             train_data: 训练数据
@@ -270,12 +432,9 @@ class BoltLSTMModel:
             batch_size: 批次大小
             learning_rate: 学习率
             class_weights: 类别权重
-            training_config: 增强训练配置字典，包含：
-                - early_stopping: {enabled, patience, min_delta, mode}
-                - lr_scheduler: {type, ...params}
-                - class_imbalance: {strategy: weighted_loss/oversampling/none, oversampling_ratio}
-                - incremental: {enabled, freeze_layers: [layer_names]}
-                - focal_loss: {enabled, gamma, alpha}
+            training_config: 增强训练配置字典
+            train_features: 训练集特征矩阵 (n_windows, feature_dim)
+            val_features: 验证集特征矩阵 (n_val_windows, feature_dim)
 
         Returns:
             Dict: 包含训练历史和完整评估指标
@@ -310,17 +469,23 @@ class BoltLSTMModel:
         fl_alpha = fl_config.get('alpha', None)
 
         sequence_length = self.model_config.get('sequence_length', 100)
-        X_train, y_train = self.prepare_data(train_data, train_labels, sequence_length)
+        (X_train, feat_train), y_train = self.prepare_data(
+            train_data, train_labels, sequence_length, train_features
+        )
 
         if val_data is not None and val_labels is not None:
-            X_val, y_val = self.prepare_data(val_data, val_labels, sequence_length)
+            (X_val, feat_val), y_val = self.prepare_data(
+                val_data, val_labels, sequence_length, val_features
+            )
         else:
             val_split = self.training_config.get('validation_split', 0.2)
             val_size = max(1, int(len(X_train) * val_split))
             X_val = X_train[-val_size:]
             y_val = y_train[-val_size:]
+            feat_val = feat_train[-val_size:] if feat_train is not None else None
             X_train = X_train[:-val_size]
             y_train = y_train[:-val_size]
+            feat_train = feat_train[:-val_size] if feat_train is not None else None
 
         if inc_enabled and freeze_layers:
             self._freeze_layers(freeze_layers)
@@ -411,7 +576,10 @@ class BoltLSTMModel:
         val_class_distribution = dict(Counter(y_val.cpu().numpy().tolist()))
         logger.info(f"训练集类别分布: {class_distribution}")
         logger.info(f"验证集类别分布: {val_class_distribution}")
-        logger.info(f"开始训练: epochs={epochs}, batch_size={batch_size}, lr={learning_rate}")
+        logger.info(
+            f"开始训练: epochs={epochs}, batch_size={batch_size}, lr={learning_rate}, "
+            f"feature_dim={self.feature_dim}, mode={self.feature_mode}"
+        )
 
         for epoch in range(epochs):
             epoch_start = time.time()
@@ -420,9 +588,20 @@ class BoltLSTMModel:
             train_correct = 0
             train_total = 0
 
-            for batch_X, batch_y in train_loader:
+            for batch_idx, (batch_X, batch_y) in enumerate(train_loader):
                 optimizer.zero_grad()
-                outputs = self.model(batch_X)
+                batch_feat = None
+                if feat_train is not None:
+                    original_idx = torch.arange(
+                        batch_idx * batch_size,
+                        min((batch_idx + 1) * batch_size, len(X_train))
+                    )
+                    if sampler is not None:
+                        batch_feat = feat_train[:len(batch_X)]
+                    else:
+                        batch_feat = feat_train[original_idx]
+
+                outputs = self.model(batch_X, batch_feat)
                 loss = criterion(outputs, batch_y)
                 loss.backward()
                 optimizer.step()
@@ -439,7 +618,7 @@ class BoltLSTMModel:
             all_val_preds = []
             all_val_labels = []
             with torch.no_grad():
-                val_outputs = self.model(X_val)
+                val_outputs = self.model(X_val, feat_val)
                 val_loss = criterion(val_outputs, y_val).item()
                 _, val_predicted = torch.max(val_outputs.data, 1)
                 val_acc = (val_predicted == y_val).sum().item() / max(1, len(y_val))
@@ -661,53 +840,59 @@ class BoltLSTMModel:
     def predict(
         self, 
         data: np.ndarray,
-        return_proba: bool = False
+        return_proba: bool = False,
+        features: Optional[np.ndarray] = None,
     ) -> Tuple[int, float, Optional[np.ndarray]]:
         """
-        预测螺栓状态
-        
+        预测螺栓状态（支持特征工程辅助输入）
+
         Args:
             data: 输入数据，形状为 (sequence_length, 2) 或 (sequence_length,)
             return_proba: 是否返回概率分布
-            
+            features: 特征向量 (feature_dim,)，可选
+
         Returns:
             Tuple: (预测类别, 置信度, 概率分布或None)
         """
         self.model.eval()
-        
+
         sequence_length = self.model_config.get('sequence_length', 100)
-        X, _ = self.prepare_data(data, sequence_length=sequence_length)
-        
+        (X, feat), _ = self.prepare_data(
+            data, sequence_length=sequence_length, features=features
+        )
+
         with torch.no_grad():
-            outputs = self.model(X)
+            outputs = self.model(X, feat)
             probabilities = torch.softmax(outputs, dim=1)
-            
-            # 取最后一个序列的预测结果
+
             prob = probabilities[-1].cpu().numpy()
             predicted_class = int(torch.argmax(probabilities[-1]).item())
             confidence = float(prob[predicted_class])
-        
+
         if return_proba:
             return predicted_class, confidence, prob
-        
+
         return predicted_class, confidence, None
-    
+
     def predict_batch(
-        self, 
-        data_list: List[np.ndarray]
+        self,
+        data_list: List[np.ndarray],
+        features_list: Optional[List[np.ndarray]] = None,
     ) -> List[Tuple[int, float]]:
         """
-        批量预测
-        
+        批量预测（支持特征工程辅助输入）
+
         Args:
             data_list: 输入数据列表
-            
+            features_list: 对应特征向量列表 [(feature_dim,), ...]，可选
+
         Returns:
             List: 预测结果列表 [(类别, 置信度), ...]
         """
         results = []
-        for data in data_list:
-            pred_class, confidence, _ = self.predict(data)
+        for i, data in enumerate(data_list):
+            feat = features_list[i] if features_list is not None else None
+            pred_class, confidence, _ = self.predict(data, features=feat)
             results.append((pred_class, confidence))
         return results
     
@@ -749,81 +934,139 @@ class BoltLSTMModel:
         
         return base_rec
     
-    def save(self, path: Optional[str] = None) -> str:
+    def save(self, path: Optional[str] = None, **kwargs) -> str:
         """
-        保存模型
-        
+        保存模型（支持附加特征工程信息）
+
         Args:
             path: 保存路径，可选
-            
+            **kwargs: 附加数据，例如：
+                - feature_dim: 特征维度
+                - feature_names: 特征名称列表
+                - feature_scaler_state: StandardScaler 状态 (mean_, scale_)
+
         Returns:
             str: 实际保存路径
         """
         if path is None:
             save_dir = Path(config.get('model.save_path', './trained_models'))
             save_dir.mkdir(parents=True, exist_ok=True)
-            
+
             if self.bolt_id:
                 filename = f"bolt_lstm_{self.bolt_id}.pt"
             else:
                 filename = "bolt_lstm_default.pt"
-            
+
             path = str(save_dir / filename)
-        
+
         save_data = {
             'model_state_dict': self.model.state_dict(),
             'model_config': self.model_config,
             'bolt_id': self.bolt_id,
             'is_trained': self.is_trained,
-            'training_history': self.training_history
+            'training_history': self.training_history,
+            'feature_dim': self.feature_dim,
+            'feature_mode': self.feature_mode,
+            'fusion_mode': self.fusion_mode,
+            'tabular_hidden': self.tabular_hidden,
+            'feature_scaler_state': kwargs.get('feature_scaler_state', self._feature_scaler_state),
+            'feature_names': kwargs.get('feature_names', None),
         }
-        
+
         torch.save(save_data, path)
-        logger.info(f"模型已保存: {path}")
-        
+        logger.info(
+            f"模型已保存: {path}, feature_dim={self.feature_dim}, mode={self.feature_mode}"
+        )
+
         return path
-    
-    def load(self, path: str) -> None:
+
+    def load(self, path: str) -> Dict[str, Any]:
         """
-        加载模型
-        
+        加载模型（返回特征工程元数据供上层使用）
+
         Args:
             path: 模型文件路径
+
+        Returns:
+            Dict: 包含 feature_names / feature_scaler_state 等元数据
         """
         if not os.path.exists(path):
             raise FileNotFoundError(f"模型文件不存在: {path}")
-        
-        save_data = torch.load(path, map_location=self.device)
-        
+
+        save_data = torch.load(path, map_location=self.device, weights_only=False)
+
+        saved_feature_dim = save_data.get('feature_dim', 0)
+        if saved_feature_dim != self.feature_dim:
+            logger.info(
+                f"重建网络: 原 feature_dim={self.feature_dim}, "
+                f"加载模型 feature_dim={saved_feature_dim}"
+            )
+            self.feature_dim = saved_feature_dim
+            self.feature_mode = save_data.get('feature_mode', 'auxiliary')
+            self.fusion_mode = save_data.get('fusion_mode', 'concat')
+            self.tabular_hidden = save_data.get('tabular_hidden', [64, 32])
+            self.feature_enabled = saved_feature_dim > 0
+
+            self.model = LSTMNetwork(
+                input_dim=self.model_config.get('input_dim', 2),
+                lstm_units_1=self.model_config.get('lstm_units_1', 128),
+                lstm_units_2=self.model_config.get('lstm_units_2', 64),
+                dropout_rate=self.model_config.get('dropout_rate', 0.2),
+                dense_units=self.model_config.get('dense_units', 32),
+                output_classes=self.model_config.get('output_classes', 5),
+                feature_dim=self.feature_dim,
+                feature_mode=self.feature_mode,
+                tabular_hidden=self.tabular_hidden,
+                fusion_mode=self.fusion_mode,
+            ).to(self.device)
+
         self.model.load_state_dict(save_data['model_state_dict'])
         self.model_config = save_data.get('model_config', self.model_config)
         self.bolt_id = save_data.get('bolt_id', self.bolt_id)
         self.is_trained = save_data.get('is_trained', True)
         self.training_history = save_data.get('training_history', [])
-        
+        self._feature_scaler_state = save_data.get('feature_scaler_state', None)
+
         self.model.eval()
-        logger.info(f"模型已加载: {path}")
-    
+        logger.info(
+            f"模型已加载: {path}, feature_dim={self.feature_dim}, mode={self.feature_mode}"
+        )
+
+        return {
+            'feature_names': save_data.get('feature_names'),
+            'feature_scaler_state': self._feature_scaler_state,
+            'feature_dim': self.feature_dim,
+            'feature_mode': self.feature_mode,
+        }
+
     @classmethod
-    def load_or_create(cls, bolt_id: str) -> 'BoltLSTMModel':
+    def load_or_create(
+        cls,
+        bolt_id: str,
+        feature_dim: int = 0,
+    ) -> 'BoltLSTMModel':
         """
         加载已有模型或创建新模型
-        
+
         Args:
             bolt_id: 螺栓ID
-            
+            feature_dim: 特征维度（仅新建模型时使用）
+
         Returns:
             BoltLSTMModel: 模型实例
         """
-        model = cls(bolt_id=bolt_id)
-        
         save_dir = Path(config.get('model.save_path', './trained_models'))
         model_path = save_dir / f"bolt_lstm_{bolt_id}.pt"
-        
+
         if model_path.exists():
-            model.load(str(model_path))
-            logger.info(f"已加载螺栓模型: {bolt_id}")
-        else:
-            logger.info(f"创建新的螺栓模型: {bolt_id}")
-        
+            model = cls(bolt_id=bolt_id, feature_dim=feature_dim)
+            metadata = model.load(str(model_path))
+            logger.info(
+                f"已加载螺栓模型: {bolt_id}, feature_dim={metadata.get('feature_dim', 0)}"
+            )
+            return model
+
+        model = cls(bolt_id=bolt_id, feature_dim=feature_dim)
+        logger.info(f"创建新的螺栓模型: {bolt_id}, feature_dim={feature_dim}")
+
         return model

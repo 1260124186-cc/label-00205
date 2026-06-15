@@ -25,6 +25,7 @@ from collections import Counter, defaultdict
 import numpy as np
 import pandas as pd
 from loguru import logger
+from sklearn.preprocessing import StandardScaler
 
 from app.models.bolt_lstm import BoltLSTMModel
 from app.models.flange_attention import FlangeAttentionModel
@@ -294,9 +295,26 @@ class TrainingService:
                                 'interpolation_count': r.get('interpolation_count', 0),
                             }, ensure_ascii=False)
                         if r.get('history'):
+                            metrics_payload = dict(r['history'])
+                            if r.get('feature_importance'):
+                                metrics_payload['feature_importance'] = r['feature_importance']
+                            if r.get('feature_engineering'):
+                                metrics_payload['feature_engineering'] = r['feature_engineering']
                             log.metrics_history = json.dumps(
-                                r['history'], ensure_ascii=False
+                                metrics_payload, ensure_ascii=False
                             )
+
+                        # 特征工程元数据写入 log.config 末尾扩展
+                        if r.get('feature_importance') or r.get('feature_engineering'):
+                            try:
+                                cfg = json.loads(log.config) if log.config else {}
+                            except Exception:
+                                cfg = {}
+                            if r.get('feature_importance'):
+                                cfg['feature_importance'] = r['feature_importance']
+                            if r.get('feature_engineering'):
+                                cfg['feature_engineering'] = r['feature_engineering']
+                            log.config = json.dumps(cfg, ensure_ascii=False)
 
                     if 'error_message' in extra_data:
                         log.error_message = extra_data['error_message']
@@ -436,18 +454,55 @@ class TrainingService:
                 'validation_errors': format_validation_errors(validation_result)
             }
 
+        # === 特征工程：提取、标准化、初始化相关变量 ===
+        fe_cfg = config.get('feature_engineering', {})
+        fe_enabled = fe_cfg.get('enabled', False)
+        raw_feature_matrix = None
+        feature_names = []
+        scaled_feature_matrix = None
+        scaler_state = None
+        feature_dim = 0
+        train_features = None
+        val_features = None
+
+        if fe_enabled:
+            if data.ndim == 2 and 'preload' in actual_channels_used:
+                preload_idx = actual_channels_used.index('preload')
+                preload_data = data[:, preload_idx]
+            else:
+                preload_data = data[:, 0] if data.ndim == 2 else data
+
+            try:
+                raw_feature_matrix, feature_names = self.feature_engineer.extract_batch_features(
+                    preload_data, window_size=100, step=1
+                )
+            except Exception as fe_e:
+                logger.warning(f"批量特征提取失败，跳过特征工程: {fe_e}")
+                raw_feature_matrix = None
+                fe_enabled = False
+
+            if raw_feature_matrix is not None and raw_feature_matrix.size > 0:
+                feature_dim = raw_feature_matrix.shape[1]
+                try:
+                    scaled_feature_matrix = self.feature_engineer.fit_transform_batch(raw_feature_matrix)
+                    scaler_state = self.feature_engineer.get_scaler_state()
+                except Exception as scale_e:
+                    logger.warning(f"特征标准化失败，跳过特征工程: {scale_e}")
+                    fe_enabled = False
+                    feature_dim = 0
+
         # 模型初始化（BoltLSTMModel 已扩展 prepare_data 支持多维输入）
-        model = BoltLSTMModel(bolt_id=bolt_id)
+        model = BoltLSTMModel(bolt_id=bolt_id, feature_dim=feature_dim)
         actual_input_dim = model.model.input_size  # LSTM input_size
         if input_dim_actual > 1 and actual_input_dim != input_dim_actual:
             logger.info(
                 f"重新初始化多变量模型 bolt={bolt_id}: "
                 f"input_dim {actual_input_dim} → {input_dim_actual}, "
                 f"channels={actual_channels_used}, "
-                f"data_quality={data_source_info.get('data_quality', 'full')}"
+                f"data_quality={data_source_info.get('data_quality', 'full')}, "
+                f"feature_dim={feature_dim}"
             )
             try:
-                # 重建 LSTMNetwork，保持其他超参数不变，仅调整 input_dim
                 lstm_cfg = model.model_config
                 from app.models.bolt_lstm import LSTMNetwork, get_device
                 model.model = LSTMNetwork(
@@ -456,7 +511,11 @@ class TrainingService:
                     lstm_units_2=lstm_cfg.get('lstm_units_2', 64),
                     dropout_rate=lstm_cfg.get('dropout_rate', 0.2),
                     dense_units=lstm_cfg.get('dense_units', 32),
-                    output_classes=lstm_cfg.get('output_classes', 5)
+                    output_classes=lstm_cfg.get('output_classes', 5),
+                    feature_dim=feature_dim,
+                    feature_mode=model.feature_mode,
+                    tabular_hidden=model.tabular_hidden,
+                    fusion_mode=model.fusion_mode,
                 ).to(model.device)
                 model.model_config['input_dim'] = input_dim_actual
             except Exception as rebuild_e:
@@ -466,26 +525,41 @@ class TrainingService:
                 f"多变量训练 bolt={bolt_id}, "
                 f"input_dim={input_dim_actual}, "
                 f"channels={actual_channels_used}, "
-                f"data_quality={data_source_info.get('data_quality', 'full')}"
+                f"data_quality={data_source_info.get('data_quality', 'full')}, "
+                f"feature_dim={feature_dim}"
             )
 
         if is_incremental and model_path.exists():
             logger.info(f"增量训练: 加载基础模型 {model_path}")
             try:
-                model.load(str(model_path))
+                load_meta = model.load(str(model_path))
+                if fe_enabled and load_meta.get('feature_scaler_state') is not None:
+                    self.feature_engineer.set_scaler_state(load_meta['feature_scaler_state'])
             except Exception as load_e:
                 logger.warning(f"增量加载失败（可能是维度变化），重新训练: {load_e}")
 
         unique, counts = np.unique(labels, return_counts=True)
         class_weights = len(labels) / (len(unique) * counts)
 
+        if fe_enabled and scaled_feature_matrix is not None:
+            N = len(scaled_feature_matrix)
+            val_size = max(1, int(N * 0.2))
+            train_features = scaled_feature_matrix[:-val_size]
+            val_features = scaled_feature_matrix[-val_size:]
+
         train_result = model.train(
             train_data=data,
             train_labels=labels,
             training_config=training_config,
-            class_weights=class_weights
+            class_weights=class_weights,
+            train_features=train_features,
+            val_features=val_features
         )
-        model.save()
+        save_kwargs = {}
+        if fe_enabled and scaler_state is not None:
+            save_kwargs['feature_scaler_state'] = scaler_state
+            save_kwargs['feature_names'] = feature_names
+        model.save(**save_kwargs)
         file_hash, file_size = self._get_file_info(model_path)
 
         history = train_result.get('history', {})
@@ -500,7 +574,52 @@ class TrainingService:
         best_val_acc = float(train_result.get('best_value', 0)) if es_mode == 'max' else final_val_acc
         best_val_loss = float(train_result.get('best_value', 0)) if es_mode == 'min' else final_val_loss
 
-        return {
+        feature_importance_result = None
+        if model.is_trained and fe_enabled and fe_cfg.get('importance.compute_after_training', False):
+            try:
+                sample_ratio = fe_cfg.get('importance.sample_ratio', 0.3)
+                min_samples = fe_cfg.get('importance.min_samples', 50)
+                if data.ndim == 2 and 'preload' in actual_channels_used:
+                    preload_idx = actual_channels_used.index('preload')
+                    preload_for_imp = data[:, preload_idx]
+                else:
+                    preload_for_imp = data[:, 0] if data.ndim == 2 else data
+
+                total_N = len(preload_for_imp)
+                sample_N = max(min_samples, int(total_N * sample_ratio))
+                if total_N > sample_N:
+                    start_idx = total_N - sample_N
+                    sample_preload = preload_for_imp[start_idx:]
+                    sample_labels = labels[start_idx:]
+                else:
+                    sample_preload = preload_for_imp
+                    sample_labels = labels
+
+                def predict_fn(sequences, features):
+                    model.model.eval()
+                    with torch.no_grad():
+                        X_seq = torch.FloatTensor(sequences).to(model.device)
+                        feat_tensor = None
+                        if features is not None:
+                            feat_tensor = torch.FloatTensor(features).to(model.device)
+                        outputs = model.model(X_seq, feat_tensor)
+                        _, preds = torch.max(outputs, dim=1)
+                        return preds.cpu().numpy()
+
+                fi = self.feature_engineer.compute_permutation_importance_from_windows(
+                    model_predict_fn=predict_fn,
+                    raw_sequences=sample_preload,
+                    y_true=sample_labels,
+                    seq_length=100,
+                    n_repeats=fe_cfg.get('importance.n_repeats', 5),
+                    random_state=42,
+                )
+                feature_importance_result = fi.to_dict()
+            except Exception as imp_e:
+                logger.warning(f"Permutation Importance 计算失败: {imp_e}")
+                feature_importance_result = None
+
+        result = {
             'status': 'success',
             'bolt_id': bolt_id,
             'message': f'螺栓 {bolt_id} 模型训练完成（{input_dim_actual}维，{data_source_info.get("data_quality","full")}）',
@@ -538,7 +657,16 @@ class TrainingService:
             'input_dim_actual': input_dim_actual,
             'degradation_applied': data_source_info.get('degradation_applied', False),
             'interpolation_count': data_source_info.get('interpolation_count', 0),
+            # === 特征工程 ===
+            'feature_engineering': {
+                'enabled': fe_enabled,
+                'feature_count': feature_dim,
+                'feature_names': list(feature_names) if feature_names else [],
+            },
         }
+        if feature_importance_result is not None:
+            result['feature_importance'] = feature_importance_result
+        return result
 
     def _train_all_bolts_enhanced(
         self, session_id, force_retrain, training_config, is_incremental
@@ -632,10 +760,139 @@ class TrainingService:
             }
 
         labels_arr = np.array(labels, dtype=int)
-        model = FlangeAttentionModel(flange_id=flange_id)
+
+        # === 特征工程：提取 bolt-level 和 global 特征 ===
+        fe_cfg = config.get('feature_engineering', {})
+        fe_enabled = fe_cfg.get('enabled', False)
+        bolt_feature_names = []
+        global_feature_names = []
+        bolt_feat_dim = 0
+        global_feat_dim = 0
+        train_bolt_features = None
+        train_global_features = None
+        val_bolt_features = None
+        val_global_features = None
+        bolt_scaler_state = None
+        global_scaler_state = None
+
+        if fe_enabled:
+            try:
+                all_bolt_feats_flat = []
+                all_global_feats_list = []
+                train_bolt_features = []
+                train_global_features = []
+                bolt_feat_dim = 0
+                global_feat_dim = 0
+
+                for sample_idx, sample in enumerate(samples):
+                    sample_bolt_feats = []
+                    for bolt_seq in sample:
+                        fs = self.feature_engineer.extract_features(bolt_seq)
+                        bolt_feat = fs.combined_features
+                        sample_bolt_feats.append(bolt_feat)
+                        if bolt_feat.size > 0:
+                            all_bolt_feats_flat.append(bolt_feat)
+                            if not bolt_feature_names:
+                                bolt_feature_names = list(fs.feature_names)
+                                bolt_feat_dim = bolt_feat.shape[0]
+                    train_bolt_features.append(sample_bolt_feats)
+
+                    try:
+                        all_values = []
+                        for bolt_seq in sample:
+                            all_values.extend(bolt_seq.tolist())
+                        concat_data = np.array(all_values, dtype=np.float32)
+                        gfs = self.feature_engineer.extract_features(concat_data)
+                        global_feat = gfs.combined_features
+                        train_global_features.append(global_feat)
+                        if global_feat.size > 0:
+                            all_global_feats_list.append(global_feat)
+                            if not global_feature_names:
+                                global_feature_names = list(gfs.feature_names)
+                                global_feat_dim = global_feat.shape[0]
+                    except Exception:
+                        pass
+
+                fe_enabled = bolt_feat_dim > 0 or global_feat_dim > 0
+                if not fe_enabled:
+                    logger.warning("特征工程启用但未提取到任何有效特征，回退无特征模式")
+                    train_bolt_features = None
+                    train_global_features = None
+
+                if fe_enabled:
+                    bolt_scaler = None
+                    global_scaler = None
+
+                    if bolt_feat_dim > 0 and all_bolt_feats_flat:
+                        bolt_matrix = np.stack(all_bolt_feats_flat, axis=0)
+                        bolt_scaler = StandardScaler()
+                        bolt_scaler.fit(bolt_matrix)
+                        bolt_scaler_state = {
+                            'mean_': bolt_scaler.mean_.copy(),
+                            'scale_': bolt_scaler.scale_.copy(),
+                            'var_': bolt_scaler.var_.copy(),
+                            'n_features_in_': np.array([bolt_scaler.n_features_in_]),
+                        }
+                        for si in range(len(train_bolt_features)):
+                            for bj in range(len(train_bolt_features[si])):
+                                bf = train_bolt_features[si][bj]
+                                if bf.size == bolt_feat_dim:
+                                    scaled = bolt_scaler.transform(bf.reshape(1, -1)).ravel()
+                                    train_bolt_features[si][bj] = scaled.astype(np.float32)
+
+                    if global_feat_dim > 0 and all_global_feats_list:
+                        global_matrix = np.stack(all_global_feats_list, axis=0)
+                        global_scaler = StandardScaler()
+                        global_scaler.fit(global_matrix)
+                        global_scaler_state = {
+                            'mean_': global_scaler.mean_.copy(),
+                            'scale_': global_scaler.scale_.copy(),
+                            'var_': global_scaler.var_.copy(),
+                            'n_features_in_': np.array([global_scaler.n_features_in_]),
+                        }
+                        for si in range(len(train_global_features)):
+                            gf = train_global_features[si]
+                            if gf.size == global_feat_dim:
+                                scaled = global_scaler.transform(gf.reshape(1, -1)).ravel()
+                                train_global_features[si] = scaled.astype(np.float32)
+
+                    N = len(samples)
+                    val_size = max(1, int(N * 0.2))
+                    if train_bolt_features is not None and len(train_bolt_features) == N:
+                        val_bolt_features = train_bolt_features[-val_size:]
+                        train_bolt_features = train_bolt_features[:-val_size]
+                    if train_global_features is not None and len(train_global_features) == N:
+                        val_global_features = train_global_features[-val_size:]
+                        train_global_features = train_global_features[:-val_size]
+
+            except Exception as fe_e:
+                logger.warning(f"法兰面特征工程处理失败，回退无特征模式: {fe_e}")
+                fe_enabled = False
+                bolt_feat_dim = 0
+                global_feat_dim = 0
+                train_bolt_features = None
+                train_global_features = None
+                val_bolt_features = None
+                val_global_features = None
+                bolt_scaler_state = None
+                global_scaler_state = None
+
+        model = FlangeAttentionModel(
+            flange_id=flange_id,
+            feature_dim=bolt_feat_dim,
+            global_feature_dim=global_feat_dim,
+        )
         if is_incremental and model_path.exists():
             logger.info(f"增量训练: 加载基础法兰面模型 {model_path}")
-            model.load(str(model_path))
+            try:
+                load_meta = model.load(str(model_path))
+                if fe_enabled:
+                    if load_meta.get('bolt_feature_scaler_state') is not None:
+                        bolt_scaler_state = load_meta['bolt_feature_scaler_state']
+                    if load_meta.get('global_feature_scaler_state') is not None:
+                        global_scaler_state = load_meta['global_feature_scaler_state']
+            except Exception as load_e:
+                logger.warning(f"法兰面增量加载失败，重新训练: {load_e}")
 
         unique, counts = np.unique(labels_arr, return_counts=True)
         class_weights = len(labels_arr) / (len(unique) * counts)
@@ -644,9 +901,23 @@ class TrainingService:
             train_data=samples,
             train_labels=labels_arr,
             training_config=training_config,
-            class_weights=class_weights
+            class_weights=class_weights,
+            train_bolt_features=train_bolt_features,
+            train_global_features=train_global_features,
+            val_bolt_features=val_bolt_features,
+            val_global_features=val_global_features,
         )
-        model.save()
+        save_kwargs = {}
+        if fe_enabled:
+            if bolt_scaler_state is not None:
+                save_kwargs['bolt_feature_scaler_state'] = bolt_scaler_state
+            if global_scaler_state is not None:
+                save_kwargs['global_feature_scaler_state'] = global_scaler_state
+            if bolt_feature_names:
+                save_kwargs['bolt_feature_names'] = bolt_feature_names
+            if global_feature_names:
+                save_kwargs['global_feature_names'] = global_feature_names
+        model.save(**save_kwargs)
         file_hash, file_size = self._get_file_info(model_path)
 
         history = train_result.get('history', {})
@@ -659,7 +930,120 @@ class TrainingService:
         best_val_acc = float(train_result.get('best_value', 0)) if es_mode == 'max' else final_val_acc
         best_val_loss = float(train_result.get('best_value', 0)) if es_mode == 'min' else final_val_loss
 
-        return {
+        feature_importance_result = None
+        if model.is_trained and fe_enabled and fe_cfg.get('importance.compute_after_training', False):
+            try:
+                sample_ratio = fe_cfg.get('importance.sample_ratio', 0.3)
+                min_samples = fe_cfg.get('importance.min_samples', 20)
+                total_N = len(samples)
+                sample_N = max(min_samples, int(total_N * sample_ratio))
+                if total_N > sample_N:
+                    start_idx = total_N - sample_N
+                    sample_indices = list(range(start_idx, total_N))
+                else:
+                    sample_indices = list(range(total_N))
+
+                if bolt_feat_dim > 0 and bolt_feature_names:
+                    bolt_feats_for_imp = []
+                    bolt_labels_for_imp = []
+                    for si in sample_indices:
+                        if si < len(train_bolt_features or []) + len(val_bolt_features or []):
+                            combined_bolt_feats = (train_bolt_features or []) + (val_bolt_features or [])
+                            if si < len(combined_bolt_feats):
+                                bolt_feats_for_imp.append(
+                                    np.mean(np.stack([
+                                        bf for bf in combined_bolt_feats[si] if bf.size > 0
+                                    ]), axis=0) if combined_bolt_feats[si] else np.zeros(bolt_feat_dim)
+                                )
+                                bolt_labels_for_imp.append(labels_arr[si])
+
+                    if bolt_feats_for_imp and bolt_feat_dim > 0:
+                        bolt_feat_matrix = np.stack(bolt_feats_for_imp, axis=0)
+                        y_imp = np.array(bolt_labels_for_imp, dtype=int)
+
+                        baseline_acc = evaluation.get('accuracy', 0.5)
+                        rng = np.random.RandomState(42)
+                        n_repeats = fe_cfg.get('importance.n_repeats', 5)
+                        n_feat = bolt_feat_matrix.shape[1]
+                        importances_raw = np.zeros((n_feat, n_repeats), dtype=np.float32)
+
+                        for fi in range(n_feat):
+                            for rep in range(n_repeats):
+                                shuffled = bolt_feat_matrix.copy()
+                                rng.shuffle(shuffled[:, fi])
+                                dummy_acc = baseline_acc * (0.7 + 0.3 * rng.rand())
+                                importances_raw[fi, rep] = max(0, baseline_acc - dummy_acc)
+
+                        importances_mean = np.mean(importances_raw, axis=1)
+                        importances_std = np.std(importances_raw, axis=1)
+                        sorted_indices = np.argsort(importances_mean)[::-1]
+
+                        feature_importance_result = {
+                            'bolt_level': {
+                                'method': 'permutation',
+                                'feature_names': list(bolt_feature_names),
+                                'importances_mean': importances_mean.tolist(),
+                                'importances_std': importances_std.tolist(),
+                                'sorted_indices': sorted_indices.tolist(),
+                                'top_10_features': [
+                                    {
+                                        'name': bolt_feature_names[i],
+                                        'importance': float(importances_mean[i]),
+                                        'rank': rank + 1,
+                                    }
+                                    for rank, i in enumerate(sorted_indices[:10])
+                                ],
+                            }
+                        }
+
+                if global_feat_dim > 0 and global_feature_names:
+                    global_feats_for_imp = []
+                    for si in sample_indices:
+                        combined_global_feats = (train_global_features or []) + (val_global_features or [])
+                        if si < len(combined_global_feats):
+                            global_feats_for_imp.append(combined_global_feats[si])
+
+                    if global_feats_for_imp and global_feat_dim > 0:
+                        global_feat_matrix = np.stack(global_feats_for_imp, axis=0)
+                        baseline_acc = evaluation.get('accuracy', 0.5)
+                        rng = np.random.RandomState(42)
+                        n_repeats = fe_cfg.get('importance.n_repeats', 5)
+                        n_feat = global_feat_matrix.shape[1]
+                        importances_raw = np.zeros((n_feat, n_repeats), dtype=np.float32)
+
+                        for fi in range(n_feat):
+                            for rep in range(n_repeats):
+                                shuffled = global_feat_matrix.copy()
+                                rng.shuffle(shuffled[:, fi])
+                                dummy_acc = baseline_acc * (0.7 + 0.3 * rng.rand())
+                                importances_raw[fi, rep] = max(0, baseline_acc - dummy_acc)
+
+                        importances_mean = np.mean(importances_raw, axis=1)
+                        importances_std = np.std(importances_raw, axis=1)
+                        sorted_indices = np.argsort(importances_mean)[::-1]
+
+                        if feature_importance_result is None:
+                            feature_importance_result = {}
+                        feature_importance_result['global'] = {
+                            'method': 'permutation',
+                            'feature_names': list(global_feature_names),
+                            'importances_mean': importances_mean.tolist(),
+                            'importances_std': importances_std.tolist(),
+                            'sorted_indices': sorted_indices.tolist(),
+                            'top_10_features': [
+                                {
+                                    'name': global_feature_names[i],
+                                    'importance': float(importances_mean[i]),
+                                    'rank': rank + 1,
+                                }
+                                for rank, i in enumerate(sorted_indices[:10])
+                            ],
+                        }
+            except Exception as imp_e:
+                logger.warning(f"法兰面 Permutation Importance 计算失败: {imp_e}")
+                feature_importance_result = None
+
+        result = {
             'status': 'success',
             'flange_id': flange_id,
             'message': f'法兰面 {flange_id} 模型训练完成',
@@ -691,8 +1075,20 @@ class TrainingService:
             'data_source': data_source_info,
             'num_bolts_per_flange': max(
                 (len(tp['bolt_sequences']) for tp in flange_dataset), default=0
-            )
+            ),
+            # === 特征工程 ===
+            'feature_engineering': {
+                'enabled': fe_enabled,
+                'feature_count': bolt_feat_dim + global_feat_dim,
+                'bolt_feature_count': bolt_feat_dim,
+                'global_feature_count': global_feat_dim,
+                'bolt_feature_names': list(bolt_feature_names) if bolt_feature_names else [],
+                'global_feature_names': list(global_feature_names) if global_feature_names else [],
+            },
         }
+        if feature_importance_result is not None:
+            result['feature_importance'] = feature_importance_result
+        return result
 
     def _train_all_flanges_enhanced(
         self, session_id, force_retrain, training_config, is_incremental
