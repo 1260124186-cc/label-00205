@@ -30,6 +30,7 @@ from app.api.auth import get_tenant_context, revoke_tenant_token, verify_api_key
 from app.api.schemas import (
     HealthResponse, HealthComponentStatus, ErrorResponse,
     BoltPredictionRequest, BoltPredictionResponse,
+    BoltEnsemblePredictionRequest, BoltEnsemblePredictionResponse,
     FlangePredictionRequest, FlangePredictionResponse,
     RiskAssessmentRequest, RiskAssessmentResponse,
     RiskAssessExplainRequest, RiskAssessExplainResponse,
@@ -348,6 +349,86 @@ async def predict_bolt(
         raise
     except Exception as e:
         logger.error(f"螺栓预测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/predict/bolt/ensemble",
+    response_model=BoltEnsemblePredictionResponse,
+    tags=["预测"],
+    summary="螺栓集成学习预测调试"
+)
+async def predict_bolt_ensemble(
+    request: BoltEnsemblePredictionRequest,
+    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式"),
+):
+    """
+    螺栓集成学习预测调试接口
+
+    返回各子模型分项结果与最终融合结论，用于调试和分析集成学习效果。
+
+    支持配置:
+    - method: 投票策略 (hard/soft/weighted)
+    - weights: 自定义各预测器权重
+
+    状态类别:
+    - 0: 正常
+    - 1: 关注级预警
+    - 2: 检查级预警
+    - 3: 紧急级预警
+    - 4: 故障
+    """
+    try:
+        service = get_prediction_service()
+        validator = get_validator()
+
+        mode = ValidationMode.LENIENT if validation_mode.lower() == 'lenient' else ValidationMode.STRICT
+
+        validation_result = validator.validate_bolt_prediction(
+            bolt_id=request.bolt_id,
+            data=request.data,
+            mode=mode
+        )
+
+        if not validation_result.is_valid:
+            error_response = format_validation_errors(validation_result)
+            raise HTTPException(
+                status_code=400,
+                detail=error_response
+            )
+
+        cleaned = validation_result.cleaned_data
+        values = cleaned['values']
+
+        result = service.predict_bolt_ensemble(
+            bolt_id=request.bolt_id,
+            data=values,
+            version=request.version,
+            method=request.method,
+            weights=request.weights,
+        )
+
+        return BoltEnsemblePredictionResponse(
+            bolt_id=request.bolt_id,
+            prediction_source=result['prediction_source'],
+            ensemble_method=result['ensemble_method'],
+            final_status=result['final_status'],
+            final_status_code=result['final_status_code'],
+            final_confidence=result['final_confidence'],
+            final_probs=result.get('final_probs'),
+            weights=result['weights'],
+            individual_results=result['individual_results'],
+            individual_probs=result['individual_probs'],
+            model_version=result['model_version'],
+            duration_ms=result['duration_ms'],
+            ema_accuracy=result['ema_accuracy'],
+            performance_history=result['performance_history'],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"螺栓Ensemble预测失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

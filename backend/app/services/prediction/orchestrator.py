@@ -26,6 +26,7 @@ from app.models.flange_attention import FlangeAttentionModel
 from app.models.risk_model import BayesianRiskModel, RiskAssessment
 from app.models.prophet_forecaster import ProphetForecaster
 from app.models.fault_classifier import FaultClassifier, FaultType, FaultClassificationResult
+from app.models.ensemble_model import BoltEnsemblePredictor, EnsemblePrediction
 from app.services.preprocessing import DataPreprocessor
 from app.services.feature_engineering import FeatureEngineer
 from app.services.prediction.rule_classifier import RuleBasedClassifier
@@ -95,6 +96,15 @@ class PredictionOrchestrator:
         self.bolt_models: Dict[str, Dict[str, BoltLSTMModel]] = {}
         self.flange_models: Dict[str, Dict[str, FlangeAttentionModel]] = {}
 
+        # 集成学习模型缓存 {bolt_id: {version: BoltEnsemblePredictor}}
+        self.bolt_ensembles: Dict[str, Dict[str, BoltEnsemblePredictor]] = {}
+
+        # Ensemble 配置
+        self.ensemble_enabled = config.get('ensemble.enabled', True)
+        self.ensemble_confidence_threshold = config.get(
+            'ensemble.confidence_threshold', 0.7
+        )
+
         logger.info("预测编排器初始化完成")
 
     # ---------- 模型管理 ----------
@@ -146,6 +156,32 @@ class PredictionOrchestrator:
             self.flange_models[flange_id][cache_key] = model
 
         return self.flange_models[flange_id][cache_key]
+
+    def get_bolt_ensemble(
+        self, bolt_id: str, version: Optional[str] = None
+    ) -> BoltEnsemblePredictor:
+        """
+        获取或创建螺栓集成学习预测器（带版本缓存）
+
+        Args:
+            bolt_id: 螺栓ID
+            version: 版本号，None 表示使用当前活动版本
+
+        Returns:
+            BoltEnsemblePredictor 实例
+        """
+        cache_key = version or 'active'
+        if bolt_id not in self.bolt_ensembles:
+            self.bolt_ensembles[bolt_id] = {}
+
+        if cache_key not in self.bolt_ensembles[bolt_id]:
+            ensemble = BoltEnsemblePredictor(
+                bolt_id=bolt_id,
+                version=version,
+            )
+            self.bolt_ensembles[bolt_id][cache_key] = ensemble
+
+        return self.bolt_ensembles[bolt_id][cache_key]
 
     def _load_versioned_bolt_model(self, bolt_id: str, version: str) -> BoltLSTMModel:
         """
@@ -209,6 +245,9 @@ class PredictionOrchestrator:
             if node_id in self.bolt_models and cache_key in self.bolt_models[node_id]:
                 del self.bolt_models[node_id][cache_key]
                 logger.info(f"已清除螺栓模型缓存: {node_id} v{cache_key}")
+            if node_id in self.bolt_ensembles and cache_key in self.bolt_ensembles[node_id]:
+                del self.bolt_ensembles[node_id][cache_key]
+                logger.info(f"已清除螺栓Ensemble缓存: {node_id} v{cache_key}")
         elif model_type == 'flange':
             if node_id in self.flange_models and cache_key in self.flange_models[node_id]:
                 del self.flange_models[node_id][cache_key]
@@ -287,6 +326,141 @@ class PredictionOrchestrator:
         logger.info(f"螺栓预测完成: {bolt_id} -> {main_result['status']}, 耗时: {duration*1000:.2f}ms")
         return main_result
 
+    def predict_bolt_ensemble(
+        self,
+        bolt_id: str,
+        data: np.ndarray,
+        version: Optional[str] = None,
+        method: Optional[str] = None,
+        weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """
+        螺栓集成学习预测调试接口
+
+        返回各子模型分项结果与最终融合结论，用于调试和分析。
+
+        Args:
+            bolt_id: 螺栓ID
+            data: 预紧力数据
+            version: 模型版本号
+            method: 投票策略 (hard/soft/weighted)，None 使用配置默认值
+            weights: 自定义权重 {predictor_name: weight}
+
+        Returns:
+            Dict: 包含各子模型结果和最终融合结果的详细信息
+        """
+        start_time = time.time()
+        set_bolt_id(str(bolt_id))
+
+        logger.info(
+            f"开始螺栓Ensemble调试预测: {bolt_id}, "
+            f"数据点数: {len(data)}, method={method}, version={version or 'active'}"
+        )
+
+        processed = self.preprocessor.process(
+            data,
+            remove_anomalies=True,
+            normalize=True,
+            smooth=True,
+        )
+
+        ensemble = self.get_bolt_ensemble(bolt_id, version=version)
+
+        if method is not None:
+            try:
+                ensemble.set_method(method)
+            except ValueError as e:
+                logger.warning(f"设置投票策略失败: {e}")
+
+        if weights is not None:
+            ensemble.set_weights(weights)
+
+        ensemble_result = ensemble.predict(processed.data)
+        detail_result = ensemble.predict_with_details(processed.data)
+
+        duration = time.time() - start_time
+
+        individual_probs_list = {}
+        for name, probs in ensemble_result.individual_probs.items():
+            individual_probs_list[name] = probs.tolist() if probs is not None else None
+
+        result = {
+            'bolt_id': bolt_id,
+            'prediction_source': ensemble_result.prediction_source,
+            'ensemble_method': ensemble_result.method,
+            'final_status': detail_result['status'],
+            'final_status_code': detail_result['status_code'],
+            'final_confidence': float(ensemble_result.final_confidence),
+            'final_probs': (
+                ensemble_result.final_probs.tolist()
+                if ensemble_result.final_probs is not None
+                else None
+            ),
+            'weights': ensemble_result.weights,
+            'individual_results': detail_result['individual_results'],
+            'individual_probs': individual_probs_list,
+            'model_version': version or 'active',
+            'duration_ms': duration * 1000,
+            'ema_accuracy': ensemble.get_ema_accuracy(),
+            'performance_history': ensemble.get_performance_history(),
+        }
+
+        logger.info(
+            f"螺栓Ensemble调试预测完成: {bolt_id} -> {result['final_status']}, "
+            f"耗时: {duration*1000:.2f}ms"
+        )
+
+        return result
+
+    def update_ensemble_weights(
+        self,
+        bolt_id: str,
+        performance_metrics: Dict[str, float],
+        version: Optional[str] = None,
+        use_ema: bool = True,
+    ) -> Dict[str, float]:
+        """
+        更新集成学习预测器权重（基于历史表现动态调权）
+
+        Args:
+            bolt_id: 螺栓ID
+            performance_metrics: {predictor_name: accuracy_score}
+            version: 模型版本号
+            use_ema: 是否使用 EMA 平滑
+
+        Returns:
+            Dict: 更新后的权重
+        """
+        ensemble = self.get_bolt_ensemble(bolt_id, version=version)
+        new_weights = ensemble.update_weights(
+            performance_metrics, use_ema=use_ema
+        )
+
+        logger.info(
+            f"Ensemble权重已更新: 螺栓 {bolt_id}, "
+            f"新权重: {new_weights}"
+        )
+
+        return new_weights
+
+    def get_ensemble_weights(
+        self,
+        bolt_id: str,
+        version: Optional[str] = None,
+    ) -> Dict[str, float]:
+        """
+        获取集成学习预测器当前权重
+
+        Args:
+            bolt_id: 螺栓ID
+            version: 模型版本号
+
+        Returns:
+            Dict: 当前权重 {predictor_name: weight}
+        """
+        ensemble = self.get_bolt_ensemble(bolt_id, version=version)
+        return ensemble.get_weights()
+
     def _run_bolt_prediction(
         self,
         bolt_id: str,
@@ -316,6 +490,8 @@ class PredictionOrchestrator:
         original_status = ''
         model_type = 'rule'
         probs = None
+        prediction_source = 'rule'
+        ensemble_result: Optional[EnsemblePrediction] = None
 
         # Step 1: 数据预处理
         processed = self.preprocessor.process(
@@ -336,9 +512,11 @@ class PredictionOrchestrator:
                 return_proba=True,
             )
             model_type = 'lstm'
+            prediction_source = 'lstm'
         else:
             original_status_code, confidence, probs = self.rule_classifier.predict(data)
             model_type = 'rule'
+            prediction_source = 'rule'
 
         original_status = STATUS_LABELS.get(original_status_code, '未知')
 
@@ -401,6 +579,38 @@ class PredictionOrchestrator:
             except Exception as e:
                 logger.warning(f"数据质量置信度调整失败，使用原始置信度: {e}")
                 quality_info = {'error': str(e)}
+
+        # Step 3.5: Ensemble 二次裁决（LSTM 置信度低于阈值时触发）
+        if (
+            self.ensemble_enabled
+            and model_type == 'lstm'
+            and confidence < self.ensemble_confidence_threshold
+        ):
+            try:
+                ensemble = self.get_bolt_ensemble(bolt_id, version=version)
+                ensemble_result = ensemble.predict(processed.data)
+
+                logger.info(
+                    f"Ensemble 二次裁决: 螺栓 {bolt_id}, "
+                    f"LSTM置信度 {confidence:.3f} < 阈值 {self.ensemble_confidence_threshold}, "
+                    f"LSTM状态 {original_status} ({original_status_code}) → "
+                    f"Ensemble状态 {STATUS_LABELS[ensemble_result.final_prediction]} ({ensemble_result.final_prediction}), "
+                    f"Ensemble置信度 {ensemble_result.final_confidence:.3f}, "
+                    f"策略={ensemble_result.method}"
+                )
+
+                if ensemble_result.final_confidence >= confidence:
+                    original_status_code = ensemble_result.final_prediction
+                    confidence = ensemble_result.final_confidence
+                    if ensemble_result.final_probs is not None:
+                        probs = ensemble_result.final_probs
+                    original_status = STATUS_LABELS.get(
+                        ensemble_result.final_prediction, '未知'
+                    )
+                    prediction_source = 'ensemble'
+
+            except Exception as e:
+                logger.warning(f"Ensemble 二次裁决失败，使用原始结果: {e}")
 
         # Step 4: 风险评估
         risk_assessment = self.risk_model.assess_risk(
@@ -507,6 +717,20 @@ class PredictionOrchestrator:
             except Exception as e:
                 logger.warning(f"故障分类失败，跳过: {e}")
 
+        ensemble_detail = None
+        if ensemble_result is not None:
+            ensemble_detail = {
+                'method': ensemble_result.method,
+                'triggered': True,
+                'final_prediction': ensemble_result.final_prediction,
+                'final_confidence': float(ensemble_result.final_confidence),
+                'individual_predictions': ensemble_result.individual_predictions,
+                'individual_confidences': {
+                    k: float(v) for k, v in ensemble_result.individual_confidences.items()
+                },
+                'weights': ensemble_result.weights,
+            }
+
         result = {
             'bolt_id': bolt_id,
             'status': final_status,
@@ -519,6 +743,7 @@ class PredictionOrchestrator:
             'recent_time': timestamps[-1] if timestamps else None,
             'model_version': model_version_str,
             'model_type': model_type,
+            'prediction_source': prediction_source,
             'is_shadow': is_shadow,
             'data_quality': quality_info if quality_info else None,
             'similar_cases': [
@@ -534,6 +759,7 @@ class PredictionOrchestrator:
             ] if similar_cases else [],
             'rag_context': rag_context,
             'fault_detail': fault_detail,
+            'ensemble': ensemble_detail,
         }
 
         # Step 5: 审计快照

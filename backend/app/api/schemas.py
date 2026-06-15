@@ -121,6 +121,76 @@ class BoltPredictionResponse(BaseModel):
     shadow_version: Optional[str] = Field(None, description="Shadow模式版本号")
     shadow_result: Optional[Dict[str, Any]] = Field(None, description="Shadow模式预测结果")
     fault_detail: Optional[FaultDetailSchema] = Field(None, description="故障类型细分详情")
+    prediction_source: Optional[str] = Field(None, description="预测来源: lstm / ensemble / rule")
+    ensemble: Optional[Dict[str, Any]] = Field(None, description="Ensemble集成学习详情（触发时返回）")
+
+
+class EnsemblePredictorResultSchema(BaseModel):
+    """
+    单个预测器的结果"""
+    predictor_name: str
+    prediction: int
+    status: str
+    confidence: float
+    probs: Optional[List[float]] = None
+    weight: Optional[float] = None
+
+
+class BoltEnsemblePredictionResponse(BaseModel):
+    """
+    螺栓集成学习预测调试响应
+
+    Attributes:
+        bolt_id: 螺栓ID
+        prediction_source: 预测来源
+        ensemble_method: 集成方法: hard / soft / weighted
+        final_status: 最终状态
+        final_status_code: 最终状态代码
+        final_confidence: 最终置信度
+        final_probs: 最终概率分布
+        weights: 各预测器权重
+        individual_results: 各子模型分项结果
+        individual_probs: 各子模型概率分布
+        model_version: 模型版本
+        duration_ms: 预测耗时(ms)
+        ema_accuracy: EMA准确率
+        performance_history: 历史表现记录
+    """
+    bolt_id: str
+    prediction_source: str
+    ensemble_method: str
+    final_status: str
+    final_status_code: int
+    final_confidence: float
+    final_probs: Optional[List[float]] = None
+    weights: Dict[str, float]
+    individual_results: List[Dict[str, Any]]
+    individual_probs: Dict[str, Optional[List[float]]]
+    model_version: str
+    duration_ms: float
+    ema_accuracy: Dict[str, float]
+    performance_history: Dict[str, List[float]]
+
+
+class BoltEnsemblePredictionRequest(BaseModel):
+    """
+    螺栓集成学习预测调试请求
+    """
+    bolt_id: str = Field(..., description="螺栓唯一标识")
+    data: List[float] = Field(..., description="预紧力时序数据")
+    version: Optional[str] = Field(None, description="模型版本号")
+    method: Optional[str] = Field(None, description="投票策略: hard / soft / weighted")
+    weights: Optional[Dict[str, float]] = Field(None, description="自定义权重")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "bolt_id": "B001",
+                "data": [605.2, 603.1, 600.8, 598.5, 595.3, 590.1, 585.7],
+                "method": "weighted",
+                "weights": {"lstm": 0.5, "rule": 0.3, "statistical": 0.2}
+            }
+        }
 
 
 # ==================== 法兰面预测 ====================

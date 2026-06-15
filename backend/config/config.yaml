@@ -120,6 +120,44 @@ risk_assessment:
     extreme_values: 0.15      # 极值
     lstm_prediction: 0.20     # LSTM预测
 
+# 集成学习配置
+ensemble:
+  # 是否启用集成学习二次裁决
+  enabled: true
+
+  # LSTM置信度阈值：低于此阈值时触发 Ensemble 二次裁决
+  confidence_threshold: 0.7
+
+  # 默认投票策略: hard / soft / weighted
+  default_method: "weighted"
+
+  # 默认权重（各子预测器权重，总和应为1.0）
+  default_weights:
+    lstm: 0.50          # LSTM 深度学习模型
+    rule: 0.25          # 规则分类器
+    statistical: 0.15   # 统计预测器
+    trend: 0.10         # 趋势预测器
+
+  # EMA 动态调权配置
+  dynamic_weighting:
+    enabled: true
+    ema_alpha: 0.3      # EMA 平滑系数
+    min_weight: 0.05    # 最小权重
+    max_weight: 0.70    # 最大权重
+    history_size: 50    # 历史记录窗口大小
+
+  # 子预测器配置
+  predictors:
+    statistical:
+      # 统计预测器阈值（基于历史均值）
+      warning_std_threshold: 1.5
+      critical_std_threshold: 2.5
+    trend:
+      # 趋势预测器斜率阈值
+      warning_slope_threshold: 0.5
+      critical_slope_threshold: 1.0
+      window_size: 20
+
 # 定时任务配置
 scheduler:
   enabled: true
