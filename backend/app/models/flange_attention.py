@@ -118,67 +118,138 @@ class MultiHeadSelfAttention(nn.Module):
 
 class BoltFeatureExtractor(nn.Module):
     """
-    螺栓特征提取器
-    
-    从单个螺栓的时间序列中提取特征。
-    
+    螺栓特征提取器（支持多变量跨通道 Attention）
+
+    从单个螺栓的多通道时间序列中提取特征。
+    架构:
+        通道嵌入(Linear) → 跨通道 Self-Attention → 双向LSTM → 压缩全连接
+    当 input_dim <= 2 时自动退化为普通 BiLSTM。
+
     Attributes:
         lstm: LSTM层用于序列编码
+        channel_embed: 通道嵌入层（input_dim → model_dim）
+        cross_channel_attention: 跨通道多头注意力层
         fc: 全连接层用于特征压缩
     """
-    
+
     def __init__(
-        self, 
-        input_dim: int = 2, 
+        self,
+        input_dim: int = 2,
         hidden_dim: int = 64,
-        output_dim: int = 32
+        output_dim: int = 32,
+        enable_channel_attention: bool = True,
+        channel_attention_heads: int = 4,
     ):
         """
         初始化特征提取器
-        
+
         Args:
-            input_dim: 输入特征维度
+            input_dim: 输入特征维度（通道数，如 5 = 预紧力+温度+湿度+振动+扭矩）
             hidden_dim: LSTM隐藏层维度
             output_dim: 输出特征维度
+            enable_channel_attention: 是否启用跨通道注意力（多变量时推荐 True）
+            channel_attention_heads: 跨通道注意力头数
         """
         super(BoltFeatureExtractor, self).__init__()
-        
+        self.input_dim = input_dim
+        self.enable_channel_attention = enable_channel_attention and input_dim > 2
+
+        # 通道嵌入（将每一个时间步的多通道值映射到更高维空间）
+        if self.enable_channel_attention:
+            model_dim = max(64, input_dim * 16)
+            self.channel_embed = nn.Linear(input_dim, model_dim)
+            self.channel_ln = nn.LayerNorm(model_dim)
+
+            self.cross_channel_attention = MultiHeadSelfAttention(
+                embed_dim=model_dim,
+                num_heads=channel_attention_heads,
+                dropout=0.1
+            )
+
+            # LSTM 使用融合后的特征维度
+            lstm_input_dim = model_dim
+        else:
+            lstm_input_dim = input_dim
+            self.channel_embed = None
+            self.channel_ln = None
+            self.cross_channel_attention = None
+
         self.lstm = nn.LSTM(
-            input_size=input_dim,
+            input_size=lstm_input_dim,
             hidden_size=hidden_dim,
             batch_first=True,
             bidirectional=True
         )
-        
+
         self.fc = nn.Linear(hidden_dim * 2, output_dim)
         self.relu = nn.ReLU()
-        
+        self.dropout = nn.Dropout(0.1)
+
+        # 通道重要性权重（注意力值汇总后输出，用于可解释性）
+        self._last_channel_weights: Optional[torch.Tensor] = None
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         提取螺栓特征
-        
+
         Args:
             x: 输入张量，形状为 (batch_size, seq_len, input_dim)
-            
+               input_dim 可以是 2（时间+预紧力）或 N（多通道）
+
         Returns:
             torch.Tensor: 特征向量，形状为 (batch_size, output_dim)
         """
-        lstm_out, (h_n, _) = self.lstm(x)
-        
+        batch_size, seq_len, in_dim = x.size()
+
+        if self.enable_channel_attention:
+            # 对通道轴进行注意力：我们需要把通道维度看作 token
+            # 交换 seq_len 和 通道维度：(B, C, L) → 再嵌入 (B, C, model_dim)
+            # 这里在时间维度上做逐时间步的跨通道注意力更直观：
+            # (B, L, C) → embed → (B, L, D) → attention(把 L 看作 token)
+            # 或在每个时间步上 C 维度做 attention：把时间步拆成 batch 维度
+
+            # 方案: 通道轴注意力（每个时间步独立计算跨通道权重）
+            # 重塑 (B*L, 1, C) 不适合。我们在 L 维度的 token 上做 self-attention，
+            # 这样每个时间步都能看到其他时间步 + 通道信息的联合表达。
+
+            # 通道嵌入 (B, L, C) → (B, L, D)
+            embedded = self.channel_ln(self.channel_embed(x))  # (B, L, D)
+
+            # 跨时间-通道联合 Self-Attention（L 个 token，每个 token 是 D 维通道融合）
+            attended, attn_weights = self.cross_channel_attention(embedded)
+            # 记录平均注意力权重，供可解释性使用 (head, L, L) → 平均到 (L,)
+            self._last_channel_weights = attn_weights.mean(dim=[0, 1])  # (seq_len,)
+
+            lstm_input = attended + embedded  # 残差连接
+        else:
+            lstm_input = x
+            self._last_channel_weights = None
+
+        lstm_out, (h_n, _) = self.lstm(lstm_input)
+
         # 连接双向LSTM的最后隐藏状态
         hidden = torch.cat((h_n[-2, :, :], h_n[-1, :, :]), dim=1)
-        
-        features = self.relu(self.fc(hidden))
-        
+
+        features = self.dropout(self.relu(self.fc(hidden)))
+
         return features
+
+    def get_last_channel_attention(self) -> Optional[np.ndarray]:
+        """获取最后一次前向传播的时间步注意力权重（用于可解释性）"""
+        if self._last_channel_weights is None:
+            return None
+        return self._last_channel_weights.detach().cpu().numpy()
 
 
 class FlangeAttentionNetwork(nn.Module):
     """
-    法兰面注意力网络
-    
+    法兰面注意力网络（支持多变量联合 Attention 输入）
+
     集成多螺栓特征提取和注意力机制。
-    
+    架构:
+        多螺栓(各自N通道时序) → 各螺栓特征提取(BoltFeatureExtractor含跨通道Attention)
+        → 螺栓级多头自注意力 → 双向LSTM → 分类头
+
     Attributes:
         bolt_extractor: 螺栓特征提取器
         attention: 多头自注意力
@@ -186,7 +257,7 @@ class FlangeAttentionNetwork(nn.Module):
         fc: 全连接分类层
         output: 输出层
     """
-    
+
     def __init__(
         self,
         max_bolts: int = 20,
@@ -194,38 +265,45 @@ class FlangeAttentionNetwork(nn.Module):
         feature_dim: int = 32,
         attention_heads: int = 8,
         lstm_units: int = 64,
-        output_classes: int = 5
+        output_classes: int = 5,
+        enable_cross_channel_attention: bool = True,
+        channel_attention_heads: int = 4,
     ):
         """
         初始化法兰面网络
-        
+
         Args:
             max_bolts: 最大螺栓数量
-            input_dim: 输入特征维度
+            input_dim: 输入特征维度（单螺栓的通道数，如 2 = 时间+预紧力，5 = 预紧力+温度+湿度+振动+扭矩）
             feature_dim: 螺栓特征维度
-            attention_heads: 注意力头数
+            attention_heads: 螺栓级注意力头数
             lstm_units: LSTM单元数
             output_classes: 输出类别数
+            enable_cross_channel_attention: 是否启用螺栓内部的跨通道Attention（多变量时 True）
+            channel_attention_heads: 跨通道Attention头数
         """
         super(FlangeAttentionNetwork, self).__init__()
-        
+
         self.max_bolts = max_bolts
         self.feature_dim = feature_dim
-        
-        # 螺栓特征提取器
+        self.input_dim = input_dim  # 持久化供加载时使用
+
+        # 螺栓特征提取器（支持跨通道 Attention）
         self.bolt_extractor = BoltFeatureExtractor(
             input_dim=input_dim,
             hidden_dim=64,
-            output_dim=feature_dim
+            output_dim=feature_dim,
+            enable_channel_attention=enable_cross_channel_attention,
+            channel_attention_heads=channel_attention_heads,
         )
-        
-        # 多头自注意力
+
+        # 螺栓级多头自注意力
         self.attention = MultiHeadSelfAttention(
             embed_dim=feature_dim,
             num_heads=attention_heads,
             dropout=0.1
         )
-        
+
         # 跨螺栓LSTM
         self.lstm = nn.LSTM(
             input_size=feature_dim,
@@ -233,54 +311,66 @@ class FlangeAttentionNetwork(nn.Module):
             batch_first=True,
             bidirectional=True
         )
-        
+
         # 分类层
         self.fc = nn.Linear(lstm_units * 2, 64)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.2)
         self.output = nn.Linear(64, output_classes)
-        
+
     def forward(
-        self, 
-        x: torch.Tensor, 
+        self,
+        x: torch.Tensor,
         bolt_mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向传播
-        
+
         Args:
             x: 输入张量，形状为 (batch_size, num_bolts, seq_len, input_dim)
             bolt_mask: 螺栓掩码，用于处理不同数量的螺栓
-            
+
         Returns:
-            Tuple: (分类输出, 注意力权重)
+            Tuple: (分类输出, 螺栓级注意力权重)
         """
         batch_size, num_bolts, seq_len, input_dim = x.size()
-        
+
         # 提取每个螺栓的特征
         bolt_features = []
+        per_bolt_channel_attn = []
         for i in range(num_bolts):
             bolt_seq = x[:, i, :, :]  # (batch_size, seq_len, input_dim)
             features = self.bolt_extractor(bolt_seq)  # (batch_size, feature_dim)
             bolt_features.append(features)
-        
+
+            ch_attn = self.bolt_extractor.get_last_channel_attention()
+            if ch_attn is not None:
+                per_bolt_channel_attn.append(ch_attn)
+
         # 堆叠螺栓特征
         bolt_features = torch.stack(bolt_features, dim=1)  # (batch_size, num_bolts, feature_dim)
-        
-        # 自注意力机制
+
+        # 螺栓级自注意力机制
         attended_features, attention_weights = self.attention(bolt_features, bolt_mask)
-        
+
         # LSTM处理
         lstm_out, (h_n, _) = self.lstm(attended_features)
-        
+
         # 取最后隐藏状态
         hidden = torch.cat((h_n[-2, :, :], h_n[-1, :, :]), dim=1)
-        
+
         # 分类
         fc_out = self.relu(self.fc(hidden))
         fc_out = self.dropout(fc_out)
         output = self.output(fc_out)
-        
+
+        # 存储每螺栓的通道注意力（方便调试）
+        if per_bolt_channel_attn:
+            try:
+                self._last_per_bolt_channel_attn = np.array(per_bolt_channel_attn)  # (num_bolts, seq_len)
+            except Exception:
+                self._last_per_bolt_channel_attn = None
+
         return output, attention_weights
 
 
@@ -299,34 +389,49 @@ class FlangeAttentionModel:
         correlation_matrix: 螺栓相关性矩阵
     """
     
-    def __init__(self, flange_id: Optional[str] = None):
+    def __init__(
+        self,
+        flange_id: Optional[str] = None,
+        input_dim: Optional[int] = None,
+    ):
         """
         初始化法兰面预测模型
-        
+
         Args:
             flange_id: 法兰面ID
+            input_dim: 输入通道维度（None 则从配置读取，默认为 2）
         """
         self.flange_id = flange_id
         self.device = get_device()
         self.model_config = config.get('model.flange_attention', {})
         self.training_config = config.get('model.training', {})
-        
-        # 创建网络
+
+        # input_dim 优先级: 参数 → 配置 → 默认 2
+        if input_dim is None:
+            input_dim = int(self.model_config.get('input_dim', 2))
+        self.input_dim = input_dim
+
+        # 创建网络（input_dim 完全参数化）
         self.model = FlangeAttentionNetwork(
             max_bolts=self.model_config.get('max_bolts', 20),
-            input_dim=2,
+            input_dim=input_dim,
             feature_dim=32,
             attention_heads=self.model_config.get('attention_heads', 8),
             lstm_units=self.model_config.get('lstm_units', 64),
-            output_classes=self.model_config.get('output_classes', 5)
+            output_classes=self.model_config.get('output_classes', 5),
+            enable_cross_channel_attention=self.model_config.get('enable_cross_channel_attention', True),
+            channel_attention_heads=self.model_config.get('channel_attention_heads', 4),
         ).to(self.device)
-        
+
         self.is_trained = False
         self.correlation_matrix = None
         self.bolt_ids = []
         self.training_history = []
-        
-        logger.info(f"法兰面注意力模型初始化完成: flange_id={flange_id}")
+
+        logger.info(
+            f"法兰面注意力模型初始化完成: flange_id={flange_id}, "
+            f"input_dim={input_dim}, cross_channel_attn={input_dim > 2}"
+        )
     
     def analyze_bolt_correlations(self, bolt_data: Dict[str, np.ndarray]) -> np.ndarray:
         """
@@ -367,60 +472,89 @@ class FlangeAttentionModel:
         self,
         multi_bolt_data: List[np.ndarray],
         labels: Optional[np.ndarray] = None,
-        sequence_length: int = 100
+        sequence_length: int = 100,
+        input_dim: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """
-        准备多螺栓数据
-        
+        准备多螺栓数据（支持多通道 input_dim 动态适配）
+
         Args:
             multi_bolt_data: 多螺栓数据列表，每个元素为单个螺栓的时序数据
+                - 形状 (N,)：视为单通道（预紧力）→ 自动补全为 input_dim 维
+                - 形状 (N, C)：多通道数据（如 (N,5)=[时间,预紧力,温度,湿度,振动]
             labels: 标签数据
             sequence_length: 序列长度
-            
+            input_dim: 强制指定输入维度，默认使用模型的 self.input_dim
+
         Returns:
             Tuple: (输入张量, 标签张量, 螺栓掩码)
         """
         max_bolts = self.model_config.get('max_bolts', 20)
         n_bolts = len(multi_bolt_data)
-        
+        if input_dim is None:
+            input_dim = self.input_dim
+
         # 处理每个螺栓的数据
         processed_bolts = []
         for bolt_data in multi_bolt_data[:max_bolts]:
-            # 确保是2D的
+            bolt_data = np.asarray(bolt_data, dtype=np.float32)
+
+            # 确保是 2D: (N, input_dim)
             if bolt_data.ndim == 1:
                 n = len(bolt_data)
-                time_index = np.arange(n) / n
-                bolt_data = np.column_stack([bolt_data, time_index])
-            
-            # 调整长度
-            if len(bolt_data) < sequence_length:
-                # 填充
-                padded = np.zeros((sequence_length, bolt_data.shape[1]))
-                padded[-len(bolt_data):] = bolt_data
+                # 单通道数据：根据目标 input_dim 根据要求扩展
+                if input_dim == 1:
+                    bolt_data = bolt_data.reshape(-1, 1)
+                elif input_dim == 2:
+                    # 兼容原逻辑：值 + 归一化时间索引
+                    time_index = np.arange(n, dtype=np.float32) / max(n, 1)
+                    bolt_data = np.column_stack([bolt_data, time_index])
+                else:
+                    # 单通道扩展为多通道（只有第0列是值，其余补0）
+                    padded = np.zeros((n, input_dim), dtype=np.float32)
+                    padded[:, 0] = bolt_data
+                    # 第1列使用归一化时间索引
+                    padded[:, 1] = np.arange(n, dtype=np.float32) / max(n, 1)
+                    bolt_data = padded
+            elif bolt_data.ndim == 2:
+                N, C = bolt_data.shape
+                if C < input_dim:
+                    # 实际通道少于目标 input_dim，其余补0
+                    padded = np.zeros((N, input_dim), dtype=np.float32)
+                    padded[:, :C] = bolt_data
+                    bolt_data = padded
+                elif C > input_dim:
+                    # 通道过多，截断到 input_dim
+                    bolt_data = bolt_data[:, :input_dim]
+
+            # 调整序列长度
+            cur_len = len(bolt_data)
+            if cur_len < sequence_length:
+                padded = np.zeros((sequence_length, bolt_data.shape[1]), dtype=np.float32)
+                padded[-cur_len:] = bolt_data
                 bolt_data = padded
             else:
-                # 截断
                 bolt_data = bolt_data[-sequence_length:]
-            
+
             processed_bolts.append(bolt_data)
-        
-        # 填充不足的螺栓位置
+
+        # 填充不足的螺栓位置（全零 padding）
         while len(processed_bolts) < max_bolts:
-            processed_bolts.append(np.zeros((sequence_length, 2)))
-        
-        # 转换为张量
-        X = torch.FloatTensor(np.array(processed_bolts)).unsqueeze(0)  # (1, max_bolts, seq_len, 2)
+            processed_bolts.append(np.zeros((sequence_length, input_dim), dtype=np.float32))
+
+        # 转换为张量: (1, max_bolts, seq_len, input_dim)
+        X = torch.FloatTensor(np.array(processed_bolts, dtype=np.float32)).unsqueeze(0)
         X = X.to(self.device)
-        
+
         # 创建螺栓掩码
         mask = torch.zeros(max_bolts, dtype=torch.bool)
         mask[:n_bolts] = True
         mask = mask.to(self.device)
-        
+
         if labels is not None:
             y = torch.LongTensor(labels).to(self.device)
             return X, y, mask
-        
+
         return X, None, mask
     
     def train(

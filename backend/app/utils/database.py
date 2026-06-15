@@ -18,7 +18,9 @@
 
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Generator, Optional, List
+from typing import Generator, Optional, List, Dict
+
+import numpy as np
 
 from sqlalchemy import create_engine, Column, BigInteger, String, Float, DateTime, Index, Text, Boolean, Integer
 from sqlalchemy.ext.declarative import declarative_base
@@ -36,7 +38,7 @@ class BoltData(Base):
     螺栓预紧力数据表模型
 
     对应数据库表: sc_bolt_data
-    存储采集的螺栓预紧力原始数据
+    存储采集的螺栓预紧力原始数据（含多变量辅传感器扩展字段）
 
     Attributes:
         id: 主键，自增长
@@ -45,6 +47,13 @@ class BoltData(Base):
         splitter_num: 分线器ID
         position: 安装位置
         ptf: 预紧力值
+        temperature: 环境温度 (°C)
+        humidity: 环境湿度 (%)
+        vibration: 振动加速度 (g)
+        torque: 拧紧扭矩 (N·m)
+        pressure: 介质压力 (MPa)
+        data_quality: 数据质量 full/partial/degraded
+        missing_channels: 缺失通道列表 JSON
         create_time: 创建时间
     """
     __tablename__ = 'sc_bolt_data'
@@ -55,11 +64,19 @@ class BoltData(Base):
     splitter_num = Column(BigInteger, comment='分线器ID')
     position = Column(String(200), comment='安装位置')
     ptf = Column(Float, comment='预紧力')
+    temperature = Column(Float, comment='环境温度 (°C)')
+    humidity = Column(Float, comment='环境湿度 (%)')
+    vibration = Column(Float, comment='振动加速度 (g)')
+    torque = Column(Float, comment='拧紧扭矩 (N·m)')
+    pressure = Column(Float, comment='介质压力 (MPa)')
+    data_quality = Column(String(20), default='full', comment='数据质量: full=完整, partial=部分缺失, degraded=降级单变量')
+    missing_channels = Column(Text, comment='缺失通道列表 JSON')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     # 索引
     __table_args__ = (
         Index('idx_sensor_time', 'sensor_id', 'create_time'),
+        Index('idx_data_quality', 'data_quality'),
     )
 
     @property
@@ -73,6 +90,43 @@ class BoltData(Base):
             str: 法兰面ID
         """
         return f"{self.collector_id}-{self.splitter_num}-{self.position}"
+
+    def to_multivariate_dict(self) -> Dict[str, Optional[float]]:
+        """
+        转换为多变量数据字典
+
+        Returns:
+            Dict: 包含各通道值的字典
+        """
+        return {
+            'preload': self.ptf,
+            'temperature': self.temperature,
+            'humidity': self.humidity,
+            'vibration': self.vibration,
+            'torque': self.torque,
+            'pressure': self.pressure,
+        }
+
+    def get_available_channels(self) -> List[str]:
+        """
+        获取可用通道列表
+
+        Returns:
+            List[str]: 有有效值的通道名称列表
+        """
+        channels = []
+        channel_map = {
+            'preload': self.ptf,
+            'temperature': self.temperature,
+            'humidity': self.humidity,
+            'vibration': self.vibration,
+            'torque': self.torque,
+            'pressure': self.pressure,
+        }
+        for name, value in channel_map.items():
+            if value is not None and not (isinstance(value, float) and np.isnan(value)):
+                channels.append(name)
+        return channels
 
 
 class AbnormalPrediction(Base):
@@ -1637,6 +1691,114 @@ class ManualLabelData(Base):
         Index('idx_label_time', 'label_time'),
         Index('idx_tenant', 'tenant_id'),
     )
+
+
+class MultivariateBoltData(Base):
+    """
+    螺栓多变量传感器时序数据表模型
+
+    对应数据库表: sc_bolt_multivariate_data
+    独立存储高精度多通道传感器采集数据，支持预紧力、温度、振动、扭矩等多通道。
+    """
+    __tablename__ = 'sc_bolt_multivariate_data'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    sensor_id = Column(BigInteger, nullable=False, comment='通道ID/螺栓ID')
+    collector_id = Column(BigInteger, comment='采集器ID')
+    splitter_num = Column(BigInteger, comment='分线器ID')
+    position = Column(String(200), comment='安装位置')
+    timestamp = Column(DateTime, nullable=False, comment='采集时间戳')
+    preload = Column(Float, comment='预紧力 (kN)')
+    temperature = Column(Float, comment='环境温度 (°C)')
+    humidity = Column(Float, comment='环境湿度 (%)')
+    vibration_x = Column(Float, comment='X轴振动加速度 (g)')
+    vibration_y = Column(Float, comment='Y轴振动加速度 (g)')
+    vibration_z = Column(Float, comment='Z轴振动加速度 (g)')
+    torque = Column(Float, comment='拧紧扭矩 (N·m)')
+    pressure = Column(Float, comment='介质压力 (MPa)')
+    axial_force = Column(Float, comment='轴向力 (kN)')
+    strain = Column(Float, comment='应变 (με)')
+    rpm = Column(Float, comment='转速 (RPM)')
+    extra_channels = Column(Text, comment='扩展通道数据 JSON')
+    data_quality = Column(String(20), default='full', comment='数据质量: full/partial/degraded')
+    missing_channels = Column(Text, comment='缺失通道列表 JSON')
+    interpolation_flags = Column(Text, comment='插值标记 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_sensor_time_multi', 'sensor_id', 'timestamp'),
+        Index('idx_collector_multi', 'collector_id', 'splitter_num', 'position'),
+        Index('idx_quality_multi', 'data_quality'),
+        Index('idx_create_time_multi', 'create_time'),
+    )
+
+    def to_channel_array(self, channel_list: List[str]) -> np.ndarray:
+        """
+        按指定通道列表抽取数据为数组
+
+        Args:
+            channel_list: 通道名称列表，如 ["preload", "temperature"]
+
+        Returns:
+            np.ndarray: 1D 数组，长度等于 len(channel_list)，缺失通道用 np.nan 填充
+        """
+        values = []
+        for ch in channel_list:
+            val = getattr(self, ch, None)
+            values.append(np.nan if val is None else float(val))
+        return np.array(values, dtype=np.float32)
+
+    def get_available_channels(self) -> List[str]:
+        """
+        获取可用（非空）通道列表
+        """
+        channels = ['preload', 'temperature', 'humidity', 'vibration_x', 'vibration_y',
+                    'vibration_z', 'torque', 'pressure', 'axial_force', 'strain', 'rpm']
+        available = []
+        for ch in channels:
+            val = getattr(self, ch, None)
+            if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                available.append(ch)
+        return available
+
+
+class MultivariateTrainingConfig(Base):
+    """
+    多变量训练数据集配置表模型
+
+    对应数据库表: sc_multivariate_training_config
+    存储各模型的多变量训练配置，包括输入通道、序列长度、插值方式等。
+    """
+    __tablename__ = 'sc_multivariate_training_config'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    model_id = Column(String(100), nullable=False, comment='模型标识（bolt_id 或 flange_id）')
+    model_type = Column(String(20), nullable=False, comment='模型类型: bolt/flange')
+    input_channels = Column(Text, nullable=False, comment='输入通道配置 JSON')
+    target_channel = Column(String(50), default='preload', comment='预测目标通道')
+    sequence_length = Column(Integer, default=100, comment='输入序列长度')
+    interpolation_method = Column(String(20), default='linear', comment='插值方法: linear/spline/time_aware')
+    allow_degraded_training = Column(Boolean, default=True, comment='是否允许降级训练')
+    min_complete_ratio = Column(Float, default=0.5, comment='最低完整数据比例')
+    data_normalization = Column(String(20), default='channel_wise', comment='归一化方式')
+    extra_params = Column(Text, comment='扩展参数 JSON')
+    is_active = Column(Boolean, default=True, comment='是否为活动配置')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_model_config', 'model_id', 'model_type', 'is_active', unique=True),
+        Index('idx_model_type', 'model_type'),
+    )
+
+    @property
+    def input_channels_list(self) -> List[str]:
+        """将 input_channels JSON 解析为列表"""
+        import json
+        try:
+            return json.loads(self.input_channels)
+        except (json.JSONDecodeError, TypeError):
+            return ['preload']
 
 
 class DatabaseManager:

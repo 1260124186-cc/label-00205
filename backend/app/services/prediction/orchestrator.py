@@ -857,6 +857,517 @@ class PredictionOrchestrator:
 
         return result
 
+    # ---------- 多变量螺栓预测 ----------
+
+    def predict_bolt_multivariate(
+        self,
+        bolt_id: str,
+        channels_data: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
+        aligned_array: Optional[np.ndarray] = None,
+        aligned_channel_names: Optional[List[str]] = None,
+        target_timestamps: Optional[np.ndarray] = None,
+        apply_temp_compensation: bool = True,
+        enable_degradation: bool = True,
+        version: Optional[str] = None,
+        save_to_db: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        螺栓多变量耦合预测（完整流水线）
+
+        支持两种输入方式：
+        1. channels_data: 分通道提供（各通道时间戳可不同，服务端自动对齐插值）
+        2. aligned_array + aligned_channel_names: 已对齐的 (N, C) 数组 + 通道名
+
+        流水线:
+            请求解析 → 多通道对齐/插值 → 降级判断 → 温度耦合补偿 → 模型推断
+            → 特征重要性 → 风险评估 → 预警策略 → 审计快照 → 持久化
+
+        Args:
+            bolt_id: 螺栓ID
+            channels_data: 分通道数据 {channel_name: (timestamps, values)}，推荐使用
+            aligned_array: 形状 (N, C)，已对齐的多通道数据
+            aligned_channel_names: 对应列的通道名，长度 = C
+            target_timestamps: 可选的统一目标时间网格
+            apply_temp_compensation: 是否执行温度耦合补偿（默认 True）
+            enable_degradation: 缺失严重时是否降级为单变量预测（默认 True）
+            version: 模型版本号
+            save_to_db: 是否保存结果到数据库
+
+        Returns:
+            Dict: 包含标准预测字段 + 多变量扩展字段（data_quality / feature_importance / temp_compensation 等）
+        """
+        from datetime import datetime as _dt
+        from app.services.preprocessing import (
+            MultivariatePreprocessor,
+            MultivariatePreprocessingResult,
+        )
+        from app.models.multivariate_model import (
+            MultivariatePredictor,
+            MultivariateInput,
+            TemperatureCouplingModel,
+        )
+
+        start_time = time.time()
+        set_bolt_id(str(bolt_id))
+
+        logger.info(
+            f"开始多变量螺栓预测: {bolt_id}, "
+            f"channels方式={'是' if channels_data else '否'}, "
+            f"aligned方式={'是(C=' + str(aligned_array.shape[1]) + ')' if aligned_array is not None else '否'}, "
+            f"version={version or 'active'}"
+        )
+
+        # ============== Step 1: 多变量预处理（对齐 + 插值 + 降级） ==============
+        mv_preprocessor = MultivariatePreprocessor(
+            interpolation_method='linear',
+            normalize_mode='channel_wise',
+            smooth_each_channel=True,
+            min_complete_ratio=0.5,
+            allow_degraded=enable_degradation,
+            fallback_channel='preload',
+        )
+
+        mv_result: MultivariatePreprocessingResult
+        if channels_data is not None and len(channels_data) > 0:
+            # 分通道对齐模式
+            mv_result = mv_preprocessor.process(
+                channels_data,
+                target_timestamps=target_timestamps,
+                normalize=False,
+                smooth=True,
+            )
+        elif aligned_array is not None and aligned_channel_names is not None:
+            # 已对齐数组模式
+            mv_result = mv_preprocessor.process_from_arrays(
+                aligned_array,
+                aligned_channel_names,
+                timestamps=target_timestamps,
+            )
+            # 补做平滑
+            mv_result = mv_preprocessor.smooth_multivariate(mv_result)
+        else:
+            raise ValueError(
+                "必须提供 channels_data 或 aligned_array+aligned_channel_names"
+            )
+
+        # 归一化（独立于对齐步骤）
+        mv_result = mv_preprocessor.normalize_multivariate(mv_result, fit=True)
+
+        actual_channels = mv_result.channels
+        input_dim_actual = len(actual_channels)
+        is_degraded = mv_result.data_quality == 'degraded'
+        prediction_source = (
+            'degraded_univariate' if is_degraded else 'multivariate_lstm'
+        )
+
+        # ============== Step 2: 温度耦合补偿（可选） ==============
+        temp_comp_info = None
+        data_for_model = mv_result.data.copy()  # (N, C)
+        preload_col_idx = None
+        temp_col_idx = None
+
+        try:
+            if 'preload' in actual_channels:
+                preload_col_idx = actual_channels.index('preload')
+            if 'temperature' in actual_channels:
+                temp_col_idx = actual_channels.index('temperature')
+        except Exception:
+            pass
+
+        if (
+            apply_temp_compensation
+            and preload_col_idx is not None
+            and temp_col_idx is not None
+        ):
+            try:
+                temp_model = TemperatureCouplingModel()
+                preload_raw = mv_result.data[:, preload_col_idx]
+                temp_raw = mv_result.data[:, temp_col_idx]
+                temp_analysis = temp_model.analyze_effect(preload_raw, temp_raw)
+                compensated = temp_model.compensate(preload_raw, temp_raw)
+                data_for_model[:, preload_col_idx] = compensated
+
+                temp_comp_info = {
+                    'applied': True,
+                    'temperature_coefficient': float(temp_analysis.get('coefficient', 0.0)),
+                    'correlation': float(temp_analysis.get('correlation', 0.0)),
+                    'original_mean_preload': float(np.nanmean(preload_raw)),
+                    'compensated_mean_preload': float(np.nanmean(compensated)),
+                    'delta_t_mean': float(np.nanmean(np.abs(temp_raw - np.nanmean(temp_raw)))),
+                }
+                logger.info(
+                    f"温度耦合补偿完成: 螺栓 {bolt_id}, "
+                    f"系数α={temp_comp_info['temperature_coefficient']:.4f} kN/°C, "
+                    f"相关系数={temp_comp_info['correlation']:.3f}"
+                )
+            except Exception as e:
+                logger.warning(f"温度耦合补偿失败，跳过: {e}")
+                temp_comp_info = {'applied': False, 'error': str(e)}
+        else:
+            temp_comp_info = {'applied': False}
+
+        # ============== Step 3: 模型推断 ==============
+        # 从补偿后数据中抽取 preload 用于风险评估和规则兜底
+        preload_for_risk = (
+            data_for_model[:, preload_col_idx]
+            if preload_col_idx is not None
+            else data_for_model[:, 0]
+        )
+
+        original_status_code = 0
+        confidence = 0.0
+        probs = None
+        model_version_str = version or 'unknown'
+        feature_importance = None
+
+        # 尝试使用多变量模型；若缺失通道则回退到单变量 BoltLSTMModel
+        if not is_degraded and input_dim_actual >= 2:
+            try:
+                mv_predictor = MultivariatePredictor(
+                    bolt_id=bolt_id,
+                    input_dim=input_dim_actual,
+                )
+                # 组装 MultivariateInput
+                mv_input = self._build_multivariate_input(
+                    mv_result, data_for_model
+                )
+                pred_output = mv_predictor.predict(
+                    mv_input,
+                    apply_temp_compensation=False,
+                )
+                original_status_code = int(pred_output.status_code)
+                confidence = float(pred_output.confidence)
+                if hasattr(pred_output, 'probs') and pred_output.probs is not None:
+                    probs = np.asarray(pred_output.probs, dtype=np.float32)
+                if hasattr(pred_output, 'feature_importance'):
+                    feature_importance = pred_output.feature_importance
+                prediction_source = 'multivariate_lstm'
+                logger.info(
+                    f"多变量LSTM预测: 螺栓 {bolt_id}, "
+                    f"input_dim={input_dim_actual}, "
+                    f"status={original_status_code}, confidence={confidence:.3f}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"多变量LSTM预测失败，回退到单变量BoltLSTMModel: {e}"
+                )
+                original_status_code, confidence, probs = self._fallback_predict_bolt(
+                    bolt_id, preload_for_risk, version
+                )
+                prediction_source = 'fallback'
+        else:
+            # 降级或单通道模式：直接用 BoltLSTMModel
+            original_status_code, confidence, probs = self._fallback_predict_bolt(
+                bolt_id, preload_for_risk, version
+            )
+            if version is None:
+                model_version_str = self._get_model_version('bolt', bolt_id)
+            logger.info(
+                f"单变量BoltLSTM预测(降级或单通道): 螺栓 {bolt_id}, "
+                f"status={original_status_code}, confidence={confidence:.3f}"
+            )
+
+        original_status = STATUS_LABELS.get(original_status_code, '未知')
+
+        # ============== Step 4: 风险评估 ==============
+        risk_assessment = self.risk_model.assess_risk(
+            preload_for_risk,
+            lstm_probs=probs,
+            lstm_class=original_status_code,
+            node_type='bolt',
+            node_id=bolt_id,
+        )
+
+        # ============== Step 5: 预警策略 ==============
+        final_status_code, final_status = self.warning_policy.apply(
+            original_status_code, original_status, confidence,
+            risk_level=risk_assessment.level.value,
+            lstm_confidence=float(confidence),
+        )
+
+        # 获取推荐措施
+        try:
+            bolt_model = self.get_bolt_model(bolt_id, version=version)
+            recommendations = bolt_model.get_recommendation(
+                final_status_code, confidence
+            )
+        except Exception:
+            recommendations = risk_assessment.recommendations
+
+        # 合并风险评估推荐
+        all_recs = list(recommendations) if isinstance(recommendations, list) else [recommendations]
+        for r in risk_assessment.recommendations:
+            if r and r not in all_recs:
+                all_recs.append(r)
+
+        # ============== Step 6: 特征重要性标准化 ==============
+        if feature_importance is None:
+            feature_importance = self._estimate_feature_importance(
+                mv_result, final_status_code
+            )
+
+        # 通道元数据信息
+        default_units = {
+            'preload': 'kN',
+            'temperature': '°C',
+            'humidity': '%',
+            'vibration': 'g',
+            'vibration_x': 'g',
+            'vibration_y': 'g',
+            'vibration_z': 'g',
+            'torque': 'N·m',
+            'pressure': 'MPa',
+            'axial_force': 'kN',
+            'strain': 'με',
+            'rpm': 'RPM',
+        }
+        default_desc = {
+            'preload': '预紧力',
+            'temperature': '环境温度',
+            'humidity': '环境湿度',
+            'vibration': '振动加速度',
+            'vibration_x': 'X轴振动',
+            'vibration_y': 'Y轴振动',
+            'vibration_z': 'Z轴振动',
+            'torque': '拧紧扭矩',
+            'pressure': '介质压力',
+            'axial_force': '轴向力',
+            'strain': '应变',
+            'rpm': '转速',
+        }
+        channels_info = [
+            {
+                'name': ch,
+                'unit': default_units.get(ch),
+                'description': default_desc.get(ch),
+            }
+            for ch in actual_channels
+        ]
+
+        # ============== Step 7: 组装响应 ==============
+        result = {
+            'bolt_id': bolt_id,
+            'status': final_status,
+            'status_code': final_status_code,
+            'confidence': float(confidence),
+            'risk_score': float(risk_assessment.score),
+            'risk_level': risk_assessment.level.value,
+            'diagnosis': risk_assessment.diagnosis,
+            'recommendations': all_recs[:10],
+            'prediction_time': _dt.now(),
+            'model_version': model_version_str,
+            'input_dim_actual': input_dim_actual,
+            'channels_info': channels_info,
+            'data_quality': {
+                'level': mv_result.data_quality,
+                'complete_ratio': mv_result.complete_ratio,
+                'missing_channels': mv_result.missing_channels,
+                'interpolation_count': mv_result.interpolation_count,
+                'degradation_applied': is_degraded,
+                'actual_channels_used': actual_channels,
+            },
+            'temp_compensation': temp_comp_info,
+            'feature_importance': feature_importance,
+            'sequence_length_used': len(data_for_model),
+            'prediction_source': prediction_source,
+        }
+
+        # ============== Step 8: 审计 + 持久化 ==============
+        try:
+            self._record_audit_snapshot(
+                node_type='bolt',
+                node_id=bolt_id,
+                input_data=preload_for_risk,
+                processed_data=preload_for_risk,
+                model_version=model_version_str,
+                model_type=prediction_source,
+                original_status_code=original_status_code,
+                confidence=float(confidence),
+                probs=probs,
+                risk_assessment=risk_assessment,
+                final_status_code=final_status_code,
+                final_status=final_status,
+                recommendations=all_recs[:10],
+                extra={
+                    'input_dim': input_dim_actual,
+                    'channels': actual_channels,
+                    'data_quality': mv_result.data_quality,
+                    'degraded': is_degraded,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"多变量预测审计快照异常: {e}")
+
+        if save_to_db:
+            try:
+                self.repository.save_bolt_prediction(bolt_id, result)
+            except Exception as e:
+                logger.warning(f"多变量预测持久化失败: {e}")
+
+        # 告警评估
+        try:
+            self._evaluate_alert(node_type='bolt', node_id=bolt_id, result=result)
+        except Exception as e:
+            logger.warning(f"多变量预测告警评估异常: {e}")
+
+        duration = time.time() - start_time
+        logger.info(
+            f"多变量螺栓预测完成: {bolt_id} -> {final_status}, "
+            f"channels={actual_channels}, "
+            f"degraded={is_degraded}, "
+            f"耗时: {duration*1000:.2f}ms"
+        )
+        return result
+
+    # ---------- 多变量预测内部工具方法 ----------
+
+    def _build_multivariate_input(
+        self,
+        mv_result: 'MultivariatePreprocessingResult',
+        model_ready_data: np.ndarray,
+    ) -> 'MultivariateInput':
+        """
+        将预处理结果转换为 MultivariateInput（供 MultivariatePredictor 使用）
+        """
+        from app.models.multivariate_model import MultivariateInput
+
+        def _get_channel(ch: str) -> Optional[np.ndarray]:
+            if ch in mv_result.channels:
+                idx = mv_result.channels.index(ch)
+                return model_ready_data[:, idx].astype(np.float32)
+            return None
+
+        return MultivariateInput(
+            preload=_get_channel('preload') or model_ready_data[:, 0].astype(np.float32),
+            temperature=_get_channel('temperature'),
+            timestamps=mv_result.timestamps,
+            humidity=_get_channel('humidity'),
+            vibration=(
+                _get_channel('vibration')
+                if 'vibration' in mv_result.channels
+                else _get_channel('vibration_x')
+            ),
+        )
+
+    def _fallback_predict_bolt(
+        self,
+        bolt_id: str,
+        preload_data: np.ndarray,
+        version: Optional[str],
+    ) -> Tuple[int, float, Optional[np.ndarray]]:
+        """
+        回退到单变量 BoltLSTMModel 进行预测
+
+        Returns:
+            (status_code, confidence, probs)
+        """
+        processed = self.preprocessor.process(
+            preload_data,
+            remove_anomalies=True,
+            normalize=True,
+            smooth=True,
+        )
+        model = self.get_bolt_model(bolt_id, version=version)
+        if model.is_trained:
+            status_code, confidence, probs = model.predict(
+                processed.data, return_proba=True
+            )
+            return int(status_code), float(confidence), probs
+        else:
+            status_code, confidence, probs = self.rule_classifier.predict(
+                preload_data
+            )
+            return int(status_code), float(confidence), probs
+
+    def _estimate_feature_importance(
+        self,
+        mv_result: 'MultivariatePreprocessingResult',
+        status_code: int,
+    ) -> Dict[str, float]:
+        """
+        基于统计方法估算各通道特征重要性（当模型未输出时的兜底方案）
+
+        方法：
+        - preload 始终作为最重要通道（基础权重 = 0.5 + 异常程度 * 0.3）
+        - 温度：与预紧力的相关系数绝对值 * 0.2
+        - 其他通道：方差贡献率 * 剩余权重
+        """
+        channels = mv_result.channels
+        n = len(channels)
+        importance = {ch: 0.0 for ch in channels}
+
+        if n == 0:
+            return {
+                'preload': 1.0, 'temperature': 0.0, 'humidity': 0.0,
+                'vibration': 0.0, 'torque': 0.0, 'others': {},
+            }
+
+        # 各通道归一化方差
+        variances = {}
+        for c, ch in enumerate(channels):
+            col = mv_result.data[:, c]
+            valid = ~np.isnan(col)
+            if valid.any():
+                variances[ch] = float(np.nanvar(col))
+            else:
+                variances[ch] = 0.0
+
+        total_var = sum(variances.values()) + 1e-9
+
+        # preload 基础权重
+        base_preload = 0.55
+        severity = status_code / 4.0  # 0 ~ 1
+        importance['preload'] = base_preload + 0.25 * severity
+
+        # 温度相关度
+        if 'preload' in channels and 'temperature' in channels:
+            try:
+                p_idx = channels.index('preload')
+                t_idx = channels.index('temperature')
+                p_col = mv_result.data[:, p_idx]
+                t_col = mv_result.data[:, t_idx]
+                valid = ~np.isnan(p_col) & ~np.isnan(t_col)
+                if valid.sum() >= 5:
+                    corr = abs(np.corrcoef(p_col[valid], t_col[valid])[0, 1])
+                    if not np.isnan(corr):
+                        importance['temperature'] = 0.2 * corr
+            except Exception:
+                pass
+
+        # 剩余权重按方差分配
+        assigned = sum(v for k, v in importance.items() if k in channels)
+        remaining = max(0.0, 1.0 - assigned)
+
+        for ch in channels:
+            if importance.get(ch, 0.0) > 0:
+                continue
+            importance[ch] = remaining * (variances.get(ch, 0.0) / total_var)
+
+        # 归一化并输出规范格式
+        total = sum(importance.values()) + 1e-9
+        normalized = {k: v / total for k, v in importance.items()}
+
+        output = {
+            'preload': float(normalized.get('preload', 0.0)),
+            'temperature': float(normalized.get('temperature', 0.0)),
+            'humidity': float(normalized.get('humidity', 0.0)),
+            'vibration': float(
+                normalized.get('vibration', 0.0)
+                + normalized.get('vibration_x', 0.0)
+                + normalized.get('vibration_y', 0.0)
+                + normalized.get('vibration_z', 0.0)
+            ),
+            'torque': float(normalized.get('torque', 0.0)),
+            'others': {
+                k: float(v) for k, v in normalized.items()
+                if k not in {
+                    'preload', 'temperature', 'humidity',
+                    'vibration', 'vibration_x', 'vibration_y', 'vibration_z', 'torque'
+                }
+            },
+        }
+        return output
+
     # ---------- 法兰面预测 ----------
 
     def predict_flange(

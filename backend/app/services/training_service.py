@@ -28,7 +28,7 @@ from loguru import logger
 
 from app.models.bolt_lstm import BoltLSTMModel
 from app.models.flange_attention import FlangeAttentionModel
-from app.services.preprocessing import DataPreprocessor
+from app.services.preprocessing import DataPreprocessor, MultivariatePreprocessor
 from app.services.feature_engineering import FeatureEngineer
 from app.services.label_import import label_import_service
 from app.api.validators import get_validator, ValidationMode, format_validation_errors
@@ -36,6 +36,8 @@ from app.utils.config import config
 from app.utils.database import (
     get_db,
     BoltData,
+    MultivariateBoltData,
+    MultivariateTrainingConfig,
     TrainingLog,
     ModelVersionORM
 )
@@ -278,6 +280,19 @@ class TrainingService:
                             )
                         log.samples_count = r.get('samples_count')
                         log.val_samples_count = r.get('val_samples_count')
+                        log.data_quality = r.get('data_quality', log.data_quality)
+                        if r.get('missing_channels') is not None:
+                            log.missing_channels = json.dumps(
+                                r['missing_channels'], ensure_ascii=False
+                            )
+                        if r.get('actual_channels_used'):
+                            log.remark = json.dumps({
+                                'actual_channels_used': r['actual_channels_used'],
+                                'complete_ratio': r.get('complete_ratio'),
+                                'input_dim': r.get('input_dim_actual'),
+                                'degradation_applied': r.get('degradation_applied', False),
+                                'interpolation_count': r.get('interpolation_count', 0),
+                            }, ensure_ascii=False)
                         if r.get('history'):
                             log.metrics_history = json.dumps(
                                 r['history'], ensure_ascii=False
@@ -398,9 +413,20 @@ class TrainingService:
                 'message': f'训练数据不足 (仅{len(data)}条，需要至少100条)'
             }
 
+        # === 判断数据维度（单变量 vs 多变量）===
+        input_dim_actual = 1
+        actual_channels_used = data_source_info.get('actual_channels_used', ['preload'])
+        if isinstance(data, np.ndarray) and data.ndim == 2:
+            input_dim_actual = data.shape[1]
+
+        # 校验器：1D / 2D 数据都兼容
         validator = get_validator()
+        validation_data = data
+        if data.ndim == 2 and 'preload' in actual_channels_used:
+            preload_idx = actual_channels_used.index('preload')
+            validation_data = data[:, preload_idx]
         validation_result = validator.validate_training_data(
-            data=data, labels=labels, min_samples=100, mode=ValidationMode.LENIENT
+            data=validation_data, labels=labels, min_samples=100, mode=ValidationMode.LENIENT
         )
         if not validation_result.is_valid:
             return {
@@ -410,10 +436,45 @@ class TrainingService:
                 'validation_errors': format_validation_errors(validation_result)
             }
 
+        # 模型初始化（BoltLSTMModel 已扩展 prepare_data 支持多维输入）
         model = BoltLSTMModel(bolt_id=bolt_id)
+        actual_input_dim = model.model.input_size  # LSTM input_size
+        if input_dim_actual > 1 and actual_input_dim != input_dim_actual:
+            logger.info(
+                f"重新初始化多变量模型 bolt={bolt_id}: "
+                f"input_dim {actual_input_dim} → {input_dim_actual}, "
+                f"channels={actual_channels_used}, "
+                f"data_quality={data_source_info.get('data_quality', 'full')}"
+            )
+            try:
+                # 重建 LSTMNetwork，保持其他超参数不变，仅调整 input_dim
+                lstm_cfg = model.model_config
+                from app.models.bolt_lstm import LSTMNetwork, get_device
+                model.model = LSTMNetwork(
+                    input_dim=input_dim_actual,
+                    lstm_units_1=lstm_cfg.get('lstm_units_1', 128),
+                    lstm_units_2=lstm_cfg.get('lstm_units_2', 64),
+                    dropout_rate=lstm_cfg.get('dropout_rate', 0.2),
+                    dense_units=lstm_cfg.get('dense_units', 32),
+                    output_classes=lstm_cfg.get('output_classes', 5)
+                ).to(model.device)
+                model.model_config['input_dim'] = input_dim_actual
+            except Exception as rebuild_e:
+                logger.warning(f"重建多变量模型失败，使用默认模型: {rebuild_e}")
+        elif input_dim_actual > 1:
+            logger.info(
+                f"多变量训练 bolt={bolt_id}, "
+                f"input_dim={input_dim_actual}, "
+                f"channels={actual_channels_used}, "
+                f"data_quality={data_source_info.get('data_quality', 'full')}"
+            )
+
         if is_incremental and model_path.exists():
             logger.info(f"增量训练: 加载基础模型 {model_path}")
-            model.load(str(model_path))
+            try:
+                model.load(str(model_path))
+            except Exception as load_e:
+                logger.warning(f"增量加载失败（可能是维度变化），重新训练: {load_e}")
 
         unique, counts = np.unique(labels, return_counts=True)
         class_weights = len(labels) / (len(unique) * counts)
@@ -442,7 +503,7 @@ class TrainingService:
         return {
             'status': 'success',
             'bolt_id': bolt_id,
-            'message': f'螺栓 {bolt_id} 模型训练完成',
+            'message': f'螺栓 {bolt_id} 模型训练完成（{input_dim_actual}维，{data_source_info.get("data_quality","full")}）',
             'total_epochs': len(history.get('val_loss', [])),
             'best_epoch': train_result.get('best_epoch'),
             'best_val_acc': float(best_val_acc),
@@ -468,7 +529,15 @@ class TrainingService:
             'model_file_path': str(model_path),
             'model_file_hash': file_hash,
             'model_file_size': file_size,
-            'data_source': data_source_info
+            'data_source': data_source_info,
+            # === 多变量数据质量（写入 TrainingLog.data_quality / missing_channels / remark）===
+            'data_quality': data_source_info.get('data_quality', 'full'),
+            'missing_channels': data_source_info.get('missing_channels', []),
+            'actual_channels_used': actual_channels_used,
+            'complete_ratio': data_source_info.get('complete_ratio', 1.0),
+            'input_dim_actual': input_dim_actual,
+            'degradation_applied': data_source_info.get('degradation_applied', False),
+            'interpolation_count': data_source_info.get('interpolation_count', 0),
         }
 
     def _train_all_bolts_enhanced(
@@ -663,10 +732,44 @@ class TrainingService:
     def _load_bolt_training_data_enhanced(self, bolt_id):
         dq_enabled = config.get('data_quality.enabled', True)
         auto_filter = config.get('data_quality.integration.auto_filter_training_data', True)
-        info = {'primary': 'none', 'quality_filtered': False, 'manual_label_overrides': 0}
+        info = {
+            'primary': 'none',
+            'quality_filtered': False,
+            'manual_label_overrides': 0,
+            'data_quality': 'full',
+            'missing_channels': [],
+            'actual_channels_used': ['preload'],
+            'complete_ratio': 1.0,
+            'degradation_applied': False,
+            'interpolation_count': 0,
+            'input_dim_actual': 1,
+        }
 
-        values = None
+        # 1. 读取训练配置（支持 per-bolt 多变量通道配置）
+        mv_cfg = None
+        try:
+            with get_db() as db:
+                if db is not None:
+                    mv_cfg = db.query(MultivariateTrainingConfig).filter(
+                        MultivariateTrainingConfig.model_id == str(bolt_id),
+                        MultivariateTrainingConfig.model_type == 'bolt',
+                        MultivariateTrainingConfig.is_active == 1,
+                    ).first()
+        except Exception as e:
+            logger.warning(f"读取多变量训练配置失败，使用默认: {e}")
+
+        default_channels = ['preload', 'temperature', 'humidity', 'vibration', 'torque', 'pressure']
+        target_channels = mv_cfg.input_channels_list if mv_cfg else default_channels
+        min_complete_ratio = mv_cfg.min_complete_ratio if mv_cfg else 0.5
+        allow_degraded = mv_cfg.allow_degraded_training if mv_cfg is not None else True
+        interpolation_method = mv_cfg.interpolation_method if mv_cfg else 'linear'
+
+        values_preload = None
         timestamps = None
+        db_channels_data = {}
+        csv_extra = {}
+
+        # 2. 从 DB 加载（优先 sc_bolt_multivariate_data，次选 sc_bolt_data 扩展列）
         try:
             with get_db() as db:
                 if db is not None:
@@ -675,24 +778,159 @@ class TrainingService:
                         if bolt_id.isdigit()
                         else BoltData.sensor_id == bolt_id
                     )
-                    data = db.query(BoltData).filter(
-                        sensor_filter
-                    ).order_by(BoltData.create_time.asc()).all()
-                    if data and len(data) >= 50:
-                        values = np.array([d.ptf for d in data])
-                        timestamps = np.array([d.create_time for d in data])
-                        info['primary'] = 'database'
-                        info['raw_count'] = len(data)
+
+                    # 2a. 尝试 sc_bolt_multivariate_data 表
+                    try:
+                        sensor_id_val = int(bolt_id) if bolt_id.isdigit() else bolt_id
+                        mv_data = db.query(MultivariateBoltData).filter(
+                            MultivariateBoltData.sensor_id == sensor_id_val
+                        ).order_by(MultivariateBoltData.timestamp.asc()).all()
+                        if mv_data and len(mv_data) >= 50:
+                            N = len(mv_data)
+                            ts_arr = np.array([r.timestamp for r in mv_data], dtype=object)
+                            ch_arrays = {}
+                            for ch in target_channels:
+                                try:
+                                    arr = np.array([
+                                        np.nan if (v is None) else float(v)
+                                        for v in [getattr(r, ch, None) for r in mv_data]
+                                    ], dtype=np.float32)
+                                    if ch == 'preload' or np.sum(~np.isnan(arr)) >= 20:
+                                        ch_arrays[ch] = arr
+                                except Exception:
+                                    continue
+                            if 'preload' in ch_arrays:
+                                timestamps = ts_arr
+                                db_channels_data = ch_arrays
+                                info['primary'] = 'database_multivariate'
+                                info['raw_count'] = N
+                    except Exception as mv_e:
+                        logger.warning(f"从 sc_bolt_multivariate_data 加载失败，尝试 BoltData: {mv_e}")
+
+                    # 2b. 回退到 BoltData 扩展列
+                    if not db_channels_data:
+                        bolt_data_list = db.query(BoltData).filter(
+                            sensor_filter
+                        ).order_by(BoltData.create_time.asc()).all()
+                        if bolt_data_list and len(bolt_data_list) >= 50:
+                            N = len(bolt_data_list)
+                            values_preload = np.array([d.ptf for d in bolt_data_list], dtype=np.float32)
+                            timestamps = np.array([d.create_time for d in bolt_data_list], dtype=object)
+                            info['primary'] = 'database'
+                            info['raw_count'] = N
+
+                            for ch in target_channels:
+                                if ch == 'preload':
+                                    db_channels_data['preload'] = values_preload
+                                    continue
+                                try:
+                                    arr = np.array([
+                                        np.nan if v is None else float(v)
+                                        for v in [getattr(d, ch, None) for d in bolt_data_list]
+                                    ], dtype=np.float32)
+                                    if np.sum(~np.isnan(arr)) >= 20:
+                                        db_channels_data[ch] = arr
+                                except Exception:
+                                    continue
         except Exception as e:
             logger.warning(f"从DB加载螺栓数据失败: {e}")
 
-        if values is None:
-            values, timestamps = self._load_bolt_from_csv_detailed(bolt_id)
-            if values is not None:
+        # 3. 从 CSV 加载（DB 加载失败时）
+        if not db_channels_data:
+            csv_res = self._load_bolt_from_csv_detailed(bolt_id)
+            if csv_res and csv_res[0] is not None:
+                values_preload, timestamps, csv_extra = csv_res
+                db_channels_data['preload'] = values_preload
+                for ch, arr in (csv_extra or {}).items():
+                    if ch in target_channels and len(arr) == len(values_preload):
+                        db_channels_data[ch] = arr
                 info['primary'] = 'csv'
-                info['raw_count'] = len(values)
+                info['raw_count'] = len(values_preload)
 
-        if values is None or len(values) < 1:
+        if not db_channels_data or 'preload' not in db_channels_data:
+            return np.array([]), np.array([]), info
+
+        # 4. 使用 MultivariatePreprocessor 进行对齐、插值、归一化、降级判断
+        try:
+            preprocessor = MultivariatePreprocessor(
+                interpolation_method=interpolation_method,
+                normalize_mode='none',
+                smooth_each_channel=False,
+                min_complete_ratio=min_complete_ratio,
+                allow_degraded=allow_degraded,
+                fallback_channel='preload',
+            )
+
+            # 构建 channels_data：Dict[ch_name] = (timestamps, values)
+            N = len(db_channels_data['preload'])
+            channels_input = {}
+            for ch, arr in db_channels_data.items():
+                if len(arr) == N:
+                    channels_input[ch] = (timestamps, arr)
+                else:
+                    logger.warning(f"通道 {ch} 长度不匹配，跳过")
+
+            # 统一时间网格：使用 preload 的时间戳
+            target_ts = np.array(list(timestamps)) if not isinstance(timestamps, np.ndarray) else timestamps
+
+            mv_result = preprocessor.process(
+                channels_data=channels_input,
+                target_timestamps=target_ts,
+            )
+
+            processed_data = mv_result.data  # (N, C)
+            actual_channels_used = mv_result.channels
+            info['actual_channels_used'] = actual_channels_used
+            info['complete_ratio'] = mv_result.complete_ratio
+            info['missing_channels'] = mv_result.missing_channels
+            info['interpolation_count'] = mv_result.interpolation_count
+            info['degradation_applied'] = mv_result.data_quality == 'degraded'
+            info['data_quality'] = mv_result.data_quality
+            info['input_dim_actual'] = processed_data.shape[1] if processed_data.ndim == 2 else 1
+
+            # 数据质量过滤
+            if dq_enabled and auto_filter and processed_data.ndim == 2 and processed_data.shape[0] > 0:
+                try:
+                    engine = get_data_quality_engine()
+                    preload_col_idx = actual_channels_used.index('preload') if 'preload' in actual_channels_used else 0
+                    preload_values_only = processed_data[:, preload_col_idx]
+                    original_count = len(preload_values_only)
+                    fr = engine.filter_training_data(
+                        sensor_id=bolt_id, values=preload_values_only, timestamps=target_ts
+                    )
+                    keep_mask = np.ones(original_count, dtype=bool)
+                    if len(fr.filtered_data) < original_count:
+                        filtered_set = set(fr.filtered_data.tolist()) if hasattr(fr.filtered_data, 'tolist') else set(fr.filtered_data)
+                        keep_mask = np.array([v in filtered_set for v in preload_values_only], dtype=bool)
+                        processed_data = processed_data[keep_mask]
+                        target_ts = target_ts[keep_mask] if len(target_ts) == len(keep_mask) else target_ts
+                    info['quality_filtered'] = True
+                    info['after_filter_count'] = processed_data.shape[0]
+                except Exception as e:
+                    logger.warning(f"多变量数据质量过滤失败: {e}")
+
+            # 生成标签（基于 preload 通道）
+            if processed_data.ndim == 2:
+                preload_idx = actual_channels_used.index('preload') if 'preload' in actual_channels_used else 0
+                preload_for_labels = processed_data[:, preload_idx]
+            else:
+                preload_for_labels = processed_data
+
+            auto_labels = self._generate_labels(preload_for_labels)
+            merged_labels = label_import_service.merge_labels_with_manual(
+                node_type='bolt', node_id=bolt_id,
+                auto_labels=auto_labels, data_values=preload_for_labels
+            )
+            info['manual_label_overrides'] = int(np.sum(merged_labels != auto_labels))
+
+            return processed_data, merged_labels, info
+
+        except Exception as preproc_e:
+            logger.exception(f"多变量预处理失败，回退单变量: {preproc_e}")
+
+        # === Fallback: 单变量加载（兼容旧逻辑）===
+        values = db_channels_data.get('preload')
+        if values is None:
             return np.array([]), np.array([]), info
 
         if dq_enabled and auto_filter:
@@ -714,13 +952,19 @@ class TrainingService:
             auto_labels=auto_labels, data_values=values
         )
         info['manual_label_overrides'] = int(np.sum(merged_labels != auto_labels))
+        info['actual_channels_used'] = ['preload']
+        info['input_dim_actual'] = 1
+        info['data_quality'] = 'degraded'
+        info['degradation_applied'] = True
+        info['missing_channels'] = [c for c in target_channels if c != 'preload']
+        info['complete_ratio'] = 1.0 / max(len(target_channels), 1)
 
         return values, merged_labels, info
 
     def _load_bolt_from_csv_detailed(self, bolt_id):
         csv_path = Path('data/data_bolt.csv')
         if not csv_path.exists():
-            return None, None
+            return None, None, None
         try:
             df = pd.read_csv(csv_path)
             if '螺栓id' in df.columns:
@@ -730,13 +974,17 @@ class TrainingService:
             else:
                 bolt_data = df
             if len(bolt_data) == 0:
-                return None, None
+                return None, None, None
+
+            # 预紧力（必需）
             if '预紧力' in bolt_data.columns:
-                values = bolt_data['预紧力'].values
+                preload_values = bolt_data['预紧力'].values.astype(np.float32)
             elif 'ptf' in bolt_data.columns:
-                values = bolt_data['ptf'].values
+                preload_values = bolt_data['ptf'].values.astype(np.float32)
             else:
-                return None, None
+                return None, None, None
+
+            # 时间戳
             timestamps = None
             for col in ['采集时间', '时间', 'time', 'timestamp', 'create_time']:
                 if col in bolt_data.columns:
@@ -745,10 +993,29 @@ class TrainingService:
                         break
                     except Exception:
                         pass
-            return values, timestamps
+
+            # 读取辅传感器通道（可选）
+            channel_map = {
+                '温度': 'temperature', 'temperature': 'temperature', 'temp': 'temperature',
+                '湿度': 'humidity', 'humidity': 'humidity',
+                '振动': 'vibration', 'vibration': 'vibration', 'vibration_z': 'vibration',
+                '扭矩': 'torque', 'torque': 'torque',
+                '压力': 'pressure', 'pressure': 'pressure',
+            }
+            extra_channels = {}
+            for csv_col, ch_name in channel_map.items():
+                if csv_col in bolt_data.columns:
+                    try:
+                        vals = pd.to_numeric(bolt_data[csv_col], errors='coerce').values.astype(np.float32)
+                        if np.sum(~np.isnan(vals)) >= 10:
+                            extra_channels[ch_name] = vals
+                    except Exception:
+                        continue
+
+            return preload_values, timestamps, extra_channels
         except Exception as e:
             logger.error(f"读取螺栓CSV失败: {e}")
-            return None, None
+            return None, None, None
 
     def _load_flange_training_data_fixed(self, flange_id):
         info = {

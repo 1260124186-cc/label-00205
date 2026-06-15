@@ -193,6 +193,199 @@ class BoltEnsemblePredictionRequest(BaseModel):
         }
 
 
+# ==================== 多变量/多传感器预测 ====================
+
+class MultivariateChannelSchema(BaseModel):
+    """
+    单通道时序元数据
+
+    Attributes:
+        name: 通道名称（如 preload / temperature / humidity / vibration / torque / pressure）
+        unit: 物理单位（可选）
+        description: 中文描述（可选）
+    """
+    name: str = Field(..., description="通道名称: preload/temperature/humidity/vibration/torque/pressure 或自定义")
+    unit: Optional[str] = Field(None, description="物理单位, 如 kN / °C / % / g / N·m / MPa")
+    description: Optional[str] = Field(None, description="通道中文描述")
+
+
+class DataQualityInfo(BaseModel):
+    """
+    数据质量评估结果
+
+    Attributes:
+        level: 数据质量等级 full=完整, partial=部分缺失, degraded=降级单变量
+        complete_ratio: 完整数据占比 (0-1)
+        missing_channels: 被丢弃/降级时缺失的通道列表
+        interpolation_count: 插值填充的总数据点数
+        interpolation_flags: 可选，每个时间点每通道的插值标记（1=插值 0=原始）
+        degradation_applied: 是否触发了降级策略
+    """
+    level: str = Field("full", description="数据质量等级: full / partial / degraded")
+    complete_ratio: float = Field(1.0, description="完整数据占比 0-1")
+    missing_channels: List[str] = Field(default_factory=list, description="缺失或降级丢弃的通道列表")
+    interpolation_count: int = Field(0, description="插值填充的总点数")
+    degradation_applied: bool = Field(False, description="是否因缺失严重触发了单变量降级")
+    actual_channels_used: List[str] = Field(default_factory=list, description="实际参与模型计算的通道")
+
+
+class TemperatureCompensationInfo(BaseModel):
+    """
+    温度耦合补偿信息
+
+    Attributes:
+        applied: 是否执行了温度补偿
+        temperature_coefficient: 估计的温度系数 α (kN/°C)
+        correlation: 温度与预紧力的皮尔逊相关系数
+        original_mean_preload: 补偿前平均预紧力
+        compensated_mean_preload: 补偿后平均预紧力
+        delta_t_mean: 平均温度波动
+    """
+    applied: bool = False
+    temperature_coefficient: Optional[float] = None
+    correlation: Optional[float] = None
+    original_mean_preload: Optional[float] = None
+    compensated_mean_preload: Optional[float] = None
+    delta_t_mean: Optional[float] = None
+
+
+class FeatureImportanceInfo(BaseModel):
+    """特征重要性分析（各通道对预测结果的贡献度）"""
+    preload: float = Field(0.0, description="预紧力通道重要性")
+    temperature: float = Field(0.0, description="温度通道重要性")
+    humidity: float = Field(0.0, description="湿度通道重要性")
+    vibration: float = Field(0.0, description="振动通道重要性")
+    torque: float = Field(0.0, description="扭矩通道重要性")
+    others: Dict[str, float] = Field(default_factory=dict, description="其他扩展通道的重要性")
+
+
+class BoltMultivariatePredictionRequest(BaseModel):
+    """
+    螺栓多变量耦合预测请求
+
+    请求支持两种数据格式：
+    1. channels 分开提供（各通道时间戳可以不同，服务端会自动对齐插值）
+    2. aligned_data 统一提供（各通道已在同一时间网格上，仅需缺失值插值）
+
+    Attributes:
+        bolt_id: 螺栓唯一标识
+        channels: 分通道提供的时序数据 {通道名: [[时间, 值], ...]}
+        aligned_data: 已对齐的多通道数据 [[时间, 通道1, 通道2, ...], ...]
+        aligned_channel_names: 使用 aligned_data 时必须提供，对应列的通道名称（不含时间列）
+        timestamps: 可选，统一目标时间网格
+        apply_temp_compensation: 是否执行温度耦合补偿（默认 True）
+        enable_degradation: 缺失严重时是否降级为单变量预测（默认 True）
+        version: 模型版本号（可选）
+    """
+    bolt_id: str = Field(..., description="螺栓唯一标识")
+
+    channels: Optional[Dict[str, List[List[Any]]]] = Field(
+        None,
+        description="分通道数据 {channel_name: [[timestamp, value], ...]}，时间戳可不对齐",
+        examples=[{
+            "preload": [["2025-02-01 00:00:00", 600.0], ["2025-02-01 00:01:00", 599.5]],
+            "temperature": [["2025-02-01 00:00:30", 25.3], ["2025-02-01 00:01:30", 25.8]],
+            "humidity": [["2025-02-01 00:00:00", 45.2], ["2025-02-01 00:01:00", 44.8]],
+        }]
+    )
+
+    aligned_data: Optional[List[List[Any]]] = Field(
+        None,
+        description="已对齐的多通道数据（首列为时间戳），形状(N, 1 + C)",
+        examples=[[
+            ["2025-02-01 00:00:00", 600.0, 25.3, 45.2, 0.02, 120.5],
+            ["2025-02-01 00:01:00", 599.5, 25.8, 44.8, 0.03, 120.3],
+        ]]
+    )
+    aligned_channel_names: Optional[List[str]] = Field(
+        None,
+        description="aligned_data 除去时间列后的各通道名，顺序与列对应",
+        examples=[["preload", "temperature", "humidity", "vibration", "torque"]]
+    )
+
+    timestamps: Optional[List[Any]] = Field(
+        None,
+        description="目标时间戳列表（可选），不填则自动推导统一时间网格"
+    )
+
+    apply_temp_compensation: bool = Field(True, description="是否执行温度耦合补偿")
+    enable_degradation: bool = Field(True, description="缺失严重时是否自动降级为单变量预测")
+    version: Optional[str] = Field(None, description="模型版本号")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "bolt_id": "B001",
+                "channels": {
+                    "preload": [
+                        ["2025-02-01 00:00:00", 600.0],
+                        ["2025-02-01 00:01:00", 599.5],
+                        ["2025-02-01 00:02:00", 598.8],
+                        ["2025-02-01 00:03:00", 597.3],
+                        ["2025-02-01 00:04:00", 595.1],
+                    ],
+                    "temperature": [
+                        ["2025-02-01 00:00:00", 25.3],
+                        ["2025-02-01 00:02:00", 26.1],
+                        ["2025-02-01 00:04:00", 27.5],
+                    ],
+                    "humidity": [
+                        ["2025-02-01 00:00:00", 45.2],
+                        ["2025-02-01 00:01:00", 44.8],
+                        ["2025-02-01 00:02:00", 44.5],
+                        ["2025-02-01 00:03:00", 44.1],
+                        ["2025-02-01 00:04:00", 43.9],
+                    ],
+                    "vibration": [
+                        ["2025-02-01 00:00:00", 0.02],
+                        ["2025-02-01 00:02:00", 0.05],
+                    ],
+                    "torque": [
+                        ["2025-02-01 00:00:00", 120.5],
+                        ["2025-02-01 00:04:00", 119.8],
+                    ]
+                },
+                "apply_temp_compensation": True,
+                "enable_degradation": True
+            }
+        }
+
+
+class BoltMultivariatePredictionResponse(BaseModel):
+    """
+    螺栓多变量耦合预测响应
+
+    在标准螺栓预测响应基础上，新增：
+    - data_quality: 数据质量评估（含降级信息）
+    - channels_info: 实际使用的通道元数据
+    - temp_compensation: 温度耦合补偿详情
+    - feature_importance: 各通道特征重要性（可解释性）
+    """
+    bolt_id: str
+    status: str
+    status_code: int
+    confidence: float
+    risk_score: float
+    risk_level: str
+    diagnosis: str
+    recommendations: List[str]
+    prediction_time: datetime
+    model_version: Optional[str] = Field(None, description="模型版本号")
+
+    # ==== 多变量扩展字段 ====
+    input_dim_actual: int = Field(..., description="实际输入模型的通道数")
+    channels_info: List[MultivariateChannelSchema] = Field(default_factory=list, description="实际使用的通道元数据")
+    data_quality: DataQualityInfo = Field(..., description="数据质量评估与降级信息")
+    temp_compensation: Optional[TemperatureCompensationInfo] = Field(None, description="温度耦合补偿详情")
+    feature_importance: Optional[FeatureImportanceInfo] = Field(None, description="各通道特征重要性（可解释性）")
+    sequence_length_used: int = Field(0, description="实际送入模型的序列长度")
+    prediction_source: str = Field("multivariate_lstm", description="预测来源: multivariate_lstm / degraded_univariate / fallback")
+
+    fault_detail: Optional[FaultDetailSchema] = Field(None, description="故障类型细分详情")
+    shadow_version: Optional[str] = Field(None, description="Shadow模式版本号")
+    shadow_result: Optional[Dict[str, Any]] = Field(None, description="Shadow模式预测结果")
+
+
 # ==================== 法兰面预测 ====================
 
 class FlangePredictionRequest(BaseModel):

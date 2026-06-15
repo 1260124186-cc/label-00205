@@ -1239,3 +1239,175 @@ CREATE TABLE IF NOT EXISTS sc_strategy_audit_log (
 INSERT INTO sc_strategy_config (scope, strategy_type, confidence_threshold, false_positive_threshold, false_negative_threshold, version, is_active, description) VALUES
 ('global', 1, 0.7, 0.05, NULL, 1, 1, '默认全局策略：应报尽报'),
 ('global', 2, 0.95, NULL, 0.10, 1, 0, '默认全局策略：精准报警（备用）');
+
+-- ============================================================
+-- 多变量/多传感器耦合预测模块
+-- ============================================================
+
+-- 扩展 sc_bolt_data 表，添加辅传感器字段
+SET @dbname = DATABASE();
+SET @tablename = 'sc_bolt_data';
+
+-- 添加温度字段
+SET @columnname = 'temperature';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DOUBLE COMMENT ''环境温度 (°C)''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 添加湿度字段
+SET @columnname = 'humidity';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DOUBLE COMMENT ''环境湿度 (%)''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 添加振动字段
+SET @columnname = 'vibration';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DOUBLE COMMENT ''振动加速度 (g)''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 添加扭矩字段
+SET @columnname = 'torque';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DOUBLE COMMENT ''拧紧扭矩 (N·m)''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 添加压力字段
+SET @columnname = 'pressure';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DOUBLE COMMENT ''介质压力 (MPa)''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 添加数据质量字段
+SET @columnname = 'data_quality';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(20) DEFAULT ''full'' COMMENT ''数据质量: full=完整, partial=部分缺失, degraded=降级单变量''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 添加缺失通道标记字段
+SET @columnname = 'missing_channels';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' TEXT COMMENT ''缺失通道列表 JSON''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- ============================================================
+-- 多变量传感器时序数据表（独立存储高精度传感器数据）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_bolt_multivariate_data (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    sensor_id BIGINT NOT NULL COMMENT '通道ID/螺栓ID',
+    collector_id BIGINT COMMENT '采集器ID',
+    splitter_num BIGINT COMMENT '分线器ID',
+    position VARCHAR(200) COMMENT '安装位置',
+    timestamp DATETIME NOT NULL COMMENT '采集时间戳',
+    preload DOUBLE COMMENT '预紧力 (kN)',
+    temperature DOUBLE COMMENT '环境温度 (°C)',
+    humidity DOUBLE COMMENT '环境湿度 (%)',
+    vibration_x DOUBLE COMMENT 'X轴振动加速度 (g)',
+    vibration_y DOUBLE COMMENT 'Y轴振动加速度 (g)',
+    vibration_z DOUBLE COMMENT 'Z轴振动加速度 (g)',
+    torque DOUBLE COMMENT '拧紧扭矩 (N·m)',
+    pressure DOUBLE COMMENT '介质压力 (MPa)',
+    axial_force DOUBLE COMMENT '轴向力 (kN)',
+    strain DOUBLE COMMENT '应变 (με)',
+    rpm DOUBLE COMMENT '转速 (RPM)',
+    extra_channels TEXT COMMENT '扩展通道数据 JSON',
+    data_quality VARCHAR(20) DEFAULT 'full' COMMENT '数据质量: full/partial/degraded',
+    missing_channels TEXT COMMENT '缺失通道列表 JSON',
+    interpolation_flags TEXT COMMENT '插值标记 JSON，标记哪些通道值是插值填充的',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_sensor_time (sensor_id, timestamp),
+    INDEX idx_collector (collector_id, splitter_num, position),
+    INDEX idx_quality (data_quality),
+    INDEX idx_create_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='螺栓多变量传感器时序数据表';
+
+-- ============================================================
+-- 多变量训练数据集配置表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_multivariate_training_config (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    model_id VARCHAR(100) NOT NULL COMMENT '模型标识（bolt_id 或 flange_id）',
+    model_type VARCHAR(20) NOT NULL COMMENT '模型类型: bolt/flange',
+    input_channels TEXT NOT NULL COMMENT '输入通道配置 JSON，如: ["preload","temperature","humidity"]',
+    target_channel VARCHAR(50) DEFAULT 'preload' COMMENT '预测目标通道',
+    sequence_length INT DEFAULT 100 COMMENT '输入序列长度',
+    interpolation_method VARCHAR(20) DEFAULT 'linear' COMMENT '插值方法: linear/spline/time_aware',
+    allow_degraded_training TINYINT(1) DEFAULT 1 COMMENT '是否允许降级训练（缺失辅传感器时仅用预紧力）',
+    min_complete_ratio FLOAT DEFAULT 0.5 COMMENT '最低完整数据比例（低于此比例降级）',
+    data_normalization VARCHAR(20) DEFAULT 'channel_wise' COMMENT '归一化方式: channel_wise/global/none',
+    extra_params TEXT COMMENT '扩展参数 JSON',
+    is_active TINYINT(1) DEFAULT 1 COMMENT '是否为活动配置',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY idx_model_config (model_id, model_type, is_active),
+    INDEX idx_model_type (model_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='多变量训练数据集配置表';
+
+-- 插入默认多变量配置
+INSERT INTO sc_multivariate_training_config (model_id, model_type, input_channels, target_channel, sequence_length, interpolation_method, allow_degraded_training, min_complete_ratio, data_normalization, description) VALUES
+('default', 'bolt', '["preload","temperature","humidity","vibration","torque"]', 'preload', 100, 'linear', 1, 0.5, 'channel_wise', '默认螺栓多变量配置'),
+('default', 'flange', '["preload","temperature","humidity","pressure"]', 'preload', 100, 'linear', 1, 0.5, 'channel_wise', '默认法兰面多变量配置');
+
+-- 显示新增的多变量相关表
+SHOW TABLES LIKE '%multivariate%';
+SHOW COLUMNS FROM sc_bolt_data LIKE '%temper%';
+SHOW COLUMNS FROM sc_bolt_data LIKE '%humid%';
+SHOW COLUMNS FROM sc_bolt_data LIKE '%vibra%';
+SHOW COLUMNS FROM sc_bolt_data LIKE '%torque%';

@@ -152,6 +152,8 @@ from app.api.schemas import (
     PeriodicReportResponse, BatchReportGenerateRequest,
     BatchReportResponse,
     FaultDetailSchema, FaultPatternSchema,
+    BoltMultivariatePredictionRequest, BoltMultivariatePredictionResponse,
+    MultivariateChannelSchema, DataQualityInfo, TemperatureCompensationInfo, FeatureImportanceInfo,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -429,6 +431,273 @@ async def predict_bolt_ensemble(
         raise
     except Exception as e:
         logger.error(f"螺栓Ensemble预测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/predict/bolt/multivariate",
+    response_model=BoltMultivariatePredictionResponse,
+    tags=["预测"],
+    summary="螺栓多变量耦合预测（温度/振动/扭矩等联合输入）"
+)
+async def predict_bolt_multivariate(
+    request: BoltMultivariatePredictionRequest,
+    save_to_db: bool = Query(True, description="是否保存预测结果到数据库"),
+):
+    """
+    螺栓多变量耦合预测接口
+
+    支持温度、振动、扭矩、湿度、压力等多传感器数据与预紧力联合预测。
+    内部使用跨通道 Attention 建模变量间的耦合关系。
+
+    **两种数据输入方式（二选一）**：
+
+    1. **分通道模式（推荐）**：
+       - 使用 `channels` 字段传入各通道的时序数据
+       - 各通道时间戳可以不同步，服务端自动对齐插值
+       - 例：`{"preload": [[时间,值], ...], "temperature": [[时间,值], ...], ...}`
+
+    2. **对齐数组模式**：
+       - 使用 `aligned_data` + `aligned_channel_names`
+       - 每行格式：[时间, 通道1值, 通道2值, ...]
+       - 适用于各传感器已同步采集的场景
+
+    **缺失降级策略**（可通过 enable_degradation 控制）：
+    - 缺失通道数不严重：自动线性插值补全 → 标记为 `data_quality.level=partial`
+    - 缺失严重（<50%完整度）且 `enable_degradation=True` → 自动降级为仅预紧力单变量预测 → 标记为 `data_quality.level=degraded`
+
+    状态类别:
+    - 0: 正常
+    - 1: 关注级预警
+    - 2: 检查级预警
+    - 3: 紧急级预警
+    - 4: 故障
+
+    响应中新增多变量专属字段:
+    - `data_quality`: 数据质量评估（full/partial/degraded，含插值点、降级信息）
+    - `temp_compensation`: 温度耦合补偿详情（系数α、相关系数等）
+    - `feature_importance`: 各通道对预测结果的重要性权重（可解释性）
+    - `channels_info`: 实际参与计算的通道元数据（单位、描述）
+    """
+    try:
+        from datetime import datetime
+
+        service = get_prediction_service()
+        bolt_id = request.bolt_id
+
+        # 解析目标时间戳（可选）
+        target_ts = None
+        if request.timestamps:
+            target_ts = np.array([
+                pd.Timestamp(t).to_pydatetime() if isinstance(t, str) else t
+                for t in request.timestamps
+            ])
+
+        channels_data = None
+        aligned_array = None
+        aligned_channel_names = None
+
+        # 模式 1: channels 分通道数据
+        if request.channels and len(request.channels) > 0:
+            channels_data = {}
+            for ch_name, rows in request.channels.items():
+                try:
+                    ts_list = []
+                    val_list = []
+                    for row in rows:
+                        if len(row) < 2:
+                            continue
+                        t_raw = row[0]
+                        v_raw = row[1]
+                        if isinstance(t_raw, str):
+                            try:
+                                ts = pd.Timestamp(t_raw).to_pydatetime()
+                            except Exception:
+                                ts = float(t_raw)
+                        else:
+                            ts = t_raw
+                        try:
+                            val = float(v_raw) if v_raw is not None else np.nan
+                        except (ValueError, TypeError):
+                            val = np.nan
+                        ts_list.append(ts)
+                        val_list.append(val)
+                    if len(ts_list) > 0:
+                        channels_data[ch_name] = (
+                            np.array(ts_list),
+                            np.array(val_list, dtype=np.float32),
+                        )
+                except Exception as ch_e:
+                    logger.warning(f"通道 {ch_name} 解析异常，跳过: {ch_e}")
+                    continue
+
+            if not channels_data:
+                raise HTTPException(
+                    status_code=400,
+                    detail="channels 字段为空或解析失败，请提供至少一个有效通道（推荐包含 preload）"
+                )
+
+        # 模式 2: aligned_data 已对齐数组
+        elif request.aligned_data and len(request.aligned_data) > 0:
+            if not request.aligned_channel_names or len(request.aligned_channel_names) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="使用 aligned_data 模式时必须同时提供 aligned_channel_names"
+                )
+
+            try:
+                raw = np.array(request.aligned_data, dtype=object)
+                if raw.ndim != 2:
+                    raise ValueError("aligned_data 必须是二维数组 [[时间, 通道1, 通道2, ...], ...]")
+
+                N, M = raw.shape
+                if M != len(request.aligned_channel_names) + 1:
+                    raise ValueError(
+                        f"aligned_data 列数={M}，"
+                        f"需要 {len(request.aligned_channel_names) + 1} "
+                        f"(=1时间列 + {len(request.aligned_channel_names)}通道列)"
+                    )
+
+                # 解析时间列
+                t_raw_col = raw[:, 0]
+                ts_parsed = []
+                for t in t_raw_col:
+                    if isinstance(t, str):
+                        try:
+                            ts_parsed.append(pd.Timestamp(t).to_pydatetime())
+                        except Exception:
+                            ts_parsed.append(float(t))
+                    else:
+                        ts_parsed.append(t)
+
+                # 解析通道值
+                values_parsed = np.zeros((N, M - 1), dtype=np.float32)
+                for c in range(M - 1):
+                    col = raw[:, c + 1]
+                    for i in range(N):
+                        v = col[i]
+                        try:
+                            values_parsed[i, c] = float(v) if v is not None else np.nan
+                        except (ValueError, TypeError):
+                            values_parsed[i, c] = np.nan
+
+                aligned_array = values_parsed
+                aligned_channel_names = list(request.aligned_channel_names)
+                # 提供给预处理模块：如果请求未带 timestamps，则使用解析的 ts
+                if target_ts is None:
+                    target_ts = np.array(ts_parsed)
+
+            except HTTPException:
+                raise
+            except Exception as parse_e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"aligned_data 解析失败: {parse_e}"
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="必须提供 channels 或 aligned_data 两种输入方式之一"
+            )
+
+        # 调用编排器的多变量预测方法
+        result = service.predict_bolt_multivariate(
+            bolt_id=bolt_id,
+            channels_data=channels_data,
+            aligned_array=aligned_array,
+            aligned_channel_names=aligned_channel_names,
+            target_timestamps=target_ts,
+            apply_temp_compensation=request.apply_temp_compensation,
+            enable_degradation=request.enable_degradation,
+            version=request.version,
+            save_to_db=save_to_db,
+        )
+
+        # 组装响应 Schema
+        channels_info_objs = [
+            MultivariateChannelSchema(**ci) for ci in result.get('channels_info', [])
+        ]
+        dq = result.get('data_quality', {})
+        data_quality_obj = DataQualityInfo(
+            level=dq.get('level', 'full'),
+            complete_ratio=dq.get('complete_ratio', 1.0),
+            missing_channels=dq.get('missing_channels', []),
+            interpolation_count=dq.get('interpolation_count', 0),
+            degradation_applied=dq.get('degradation_applied', False),
+            actual_channels_used=dq.get('actual_channels_used', []),
+        )
+
+        tc = result.get('temp_compensation')
+        temp_comp_obj = None
+        if tc and tc.get('applied', False):
+            temp_comp_obj = TemperatureCompensationInfo(
+                applied=True,
+                temperature_coefficient=tc.get('temperature_coefficient'),
+                correlation=tc.get('correlation'),
+                original_mean_preload=tc.get('original_mean_preload'),
+                compensated_mean_preload=tc.get('compensated_mean_preload'),
+                delta_t_mean=tc.get('delta_t_mean'),
+            )
+        elif tc:
+            temp_comp_obj = TemperatureCompensationInfo(applied=False)
+
+        fi = result.get('feature_importance')
+        fi_obj = None
+        if fi:
+            fi_obj = FeatureImportanceInfo(
+                preload=float(fi.get('preload', 0.0)),
+                temperature=float(fi.get('temperature', 0.0)),
+                humidity=float(fi.get('humidity', 0.0)),
+                vibration=float(fi.get('vibration', 0.0)),
+                torque=float(fi.get('torque', 0.0)),
+                others=fi.get('others', {}) if fi.get('others') else {},
+            )
+
+        fault_detail_obj = None
+        fd = result.get('fault_detail')
+        if fd:
+            pattern_obj = None
+            if fd.get('pattern'):
+                pattern_obj = FaultPatternSchema(**fd['pattern'])
+            fault_detail_obj = FaultDetailSchema(
+                fault_type=fd['fault_type'],
+                fault_confidence=fd['fault_confidence'],
+                fault_name=fd.get('fault_name', ''),
+                severity=fd.get('severity', 0),
+                evidence=fd.get('evidence', []),
+                recommendations=fd.get('recommendations', []),
+                pattern=pattern_obj,
+            )
+
+        response = BoltMultivariatePredictionResponse(
+            bolt_id=result['bolt_id'],
+            status=result['status'],
+            status_code=result['status_code'],
+            confidence=result['confidence'],
+            risk_score=result['risk_score'],
+            risk_level=result['risk_level'],
+            diagnosis=result['diagnosis'],
+            recommendations=result['recommendations'],
+            prediction_time=result.get('prediction_time') or datetime.now(),
+            model_version=result.get('model_version'),
+            input_dim_actual=result.get('input_dim_actual', 1),
+            channels_info=channels_info_objs,
+            data_quality=data_quality_obj,
+            temp_compensation=temp_comp_obj,
+            feature_importance=fi_obj,
+            sequence_length_used=result.get('sequence_length_used', 0),
+            prediction_source=result.get('prediction_source', 'multivariate_lstm'),
+            fault_detail=fault_detail_obj,
+            shadow_version=result.get('shadow_version'),
+            shadow_result=result.get('shadow_result'),
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"螺栓多变量耦合预测失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
