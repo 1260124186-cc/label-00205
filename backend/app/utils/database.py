@@ -1653,6 +1653,275 @@ class StrategyAuditLog(Base):
     )
 
 
+# ============================================================
+# SSO / 企业身份认证模块 ORM 模型
+# ============================================================
+
+class SSOProvider(Base):
+    """
+    SSO 身份提供者配置表模型
+
+    对应数据库表: sc_sso_providers
+    存储 OIDC 和 SAML 身份提供者的配置信息。
+    """
+    __tablename__ = 'sc_sso_providers'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID，0表示平台级')
+    provider_name = Column(String(200), nullable=False, comment='提供者名称，如 Azure AD、Okta')
+    provider_type = Column(String(20), nullable=False, comment='协议类型 oidc/saml')
+    status = Column(String(20), default='inactive', comment='状态 active/inactive')
+    is_default = Column(Boolean, default=False, comment='是否为默认提供者')
+    sort_order = Column(Integer, default=0, comment='排序序号')
+
+    # OIDC 配置
+    issuer_url = Column(String(500), comment='OIDC Issuer URL')
+    client_id = Column(String(200), comment='OIDC Client ID')
+    client_secret = Column(String(500), comment='OIDC Client Secret（加密存储）')
+    authorization_endpoint = Column(String(500), comment='授权端点 URL')
+    token_endpoint = Column(String(500), comment='令牌端点 URL')
+    userinfo_endpoint = Column(String(500), comment='用户信息端点 URL')
+    jwks_uri = Column(String(500), comment='JWKS 公钥 URL')
+    scopes = Column(Text, comment='请求的 scope 列表 JSON')
+
+    # SAML 配置
+    saml_entity_id = Column(String(500), comment='SAML Entity ID')
+    saml_sso_url = Column(String(500), comment='SAML SSO URL')
+    saml_slo_url = Column(String(500), comment='SAML SLO URL')
+    saml_idp_cert = Column(Text, comment='SAML IdP 证书')
+    saml_name_id_format = Column(String(200), comment='SAML NameID 格式')
+
+    # 用户属性映射
+    attribute_mapping = Column(Text, comment='IdP 属性到本地用户字段的映射 JSON')
+    # 角色映射规则
+    role_mapping = Column(Text, comment='IdP groups/roles 到本地角色的映射 JSON')
+
+    # JIT 配置
+    jit_enabled = Column(Boolean, default=True, comment='是否启用 JIT 自动建号')
+    jit_default_role = Column(String(30), default='viewer', comment='JIT 默认角色')
+    jit_auto_activate = Column(Boolean, default=True, comment='JIT 创建用户是否自动激活')
+
+    # 会话配置
+    session_max_age = Column(Integer, default=86400, comment='会话最大时长（秒）')
+    session_idle_timeout = Column(Integer, default=3600, comment='会话空闲超时（秒）')
+
+    # 扩展配置
+    extra_config = Column(Text, comment='扩展配置 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_sso_tenant', 'tenant_id'),
+        Index('idx_sso_type', 'provider_type'),
+        Index('idx_sso_status', 'status'),
+        Index('idx_sso_default', 'tenant_id', 'is_default'),
+    )
+
+
+class UserSession(Base):
+    """
+    用户会话表模型
+
+    对应数据库表: sc_user_sessions
+    存储用户登录会话信息，支持强制登出。
+    """
+    __tablename__ = 'sc_user_sessions'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id = Column(String(64), unique=True, nullable=False, comment='会话ID（JWT jti）')
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+    user_id = Column(BigInteger, nullable=False, comment='用户ID')
+    username = Column(String(100), comment='用户名')
+    display_name = Column(String(200), comment='显示名称')
+
+    auth_method = Column(String(30), comment='认证方式 password/oidc/saml/api_key')
+    sso_provider_id = Column(BigInteger, comment='SSO 提供者ID')
+    idp_session_id = Column(String(200), comment='IdP 会话ID（用于 SLO）')
+
+    ip_address = Column(String(50), comment='客户端IP')
+    user_agent = Column(String(500), comment='用户代理')
+    device_info = Column(Text, comment='设备信息 JSON')
+
+    login_time = Column(DateTime, default=datetime.now, comment='登录时间')
+    last_activity_time = Column(DateTime, default=datetime.now, comment='最后活动时间')
+    expires_at = Column(DateTime, comment='过期时间')
+
+    status = Column(String(20), default='active', comment='状态 active/revoked/expired/logged_out')
+    revoke_reason = Column(String(200), comment='撤销原因')
+    revoke_time = Column(DateTime, comment='撤销时间')
+    revoked_by = Column(String(100), comment='撤销人')
+
+    refresh_token_hash = Column(String(128), comment='刷新令牌哈希')
+    refresh_expires_at = Column(DateTime, comment='刷新令牌过期时间')
+
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_session_tenant', 'tenant_id'),
+        Index('idx_session_user', 'user_id'),
+        Index('idx_session_status', 'status'),
+        Index('idx_session_expires', 'expires_at'),
+        Index('idx_session_login_time', 'login_time'),
+        Index('idx_session_sso_provider', 'sso_provider_id'),
+    )
+
+
+class ServiceAccount(Base):
+    """
+    服务账号表模型
+
+    对应数据库表: sc_service_accounts
+    独立于普通用户的服务账号管理，用于 API 集成和自动化任务。
+    """
+    __tablename__ = 'sc_service_accounts'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+    account_name = Column(String(100), nullable=False, comment='账号名称')
+    display_name = Column(String(200), comment='显示名称')
+    description = Column(String(500), comment='描述')
+
+    status = Column(String(20), default='active', comment='状态 active/disabled')
+    role = Column(String(30), default='viewer', comment='角色 tenant_admin/admin/operator/viewer')
+
+    # API Key 信息（可以有多个密钥轮换）
+    current_api_key_id = Column(BigInteger, comment='当前生效的 API Key ID')
+
+    # 使用限制
+    rate_limit = Column(Integer, default=1000, comment='速率限制（每分钟）')
+    allowed_ips = Column(Text, comment='允许的IP白名单 JSON，空表示不限制')
+    allowed_scopes = Column(Text, comment='允许的 scope 列表 JSON')
+
+    # 有效期
+    expires_at = Column(DateTime, comment='过期时间，NULL表示永久')
+    last_used_at = Column(DateTime, comment='最后使用时间')
+    last_used_ip = Column(String(50), comment='最后使用IP')
+
+    # 负责人
+    owner_id = Column(BigInteger, comment='负责人用户ID')
+    owner_name = Column(String(200), comment='负责人姓名')
+    owner_email = Column(String(200), comment='负责人邮箱')
+
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_svc_account_tenant', 'tenant_id'),
+        Index('idx_svc_account_name', 'tenant_id', 'account_name', unique=True),
+        Index('idx_svc_account_status', 'status'),
+        Index('idx_svc_account_role', 'role'),
+    )
+
+
+class ServiceAccountKey(Base):
+    """
+    服务账号 API Key 表模型
+
+    对应数据库表: sc_service_account_keys
+    存储服务账号的 API 密钥，支持密钥轮换。
+    """
+    __tablename__ = 'sc_service_account_keys'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    service_account_id = Column(BigInteger, nullable=False, comment='服务账号ID')
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+
+    key_name = Column(String(200), comment='密钥名称')
+    key_prefix = Column(String(20), comment='密钥前缀（用于识别）')
+    key_hash = Column(String(128), nullable=False, comment='密钥哈希（SHA256）')
+
+    status = Column(String(20), default='active', comment='状态 active/expiring/revoked')
+    expires_at = Column(DateTime, comment='过期时间')
+    last_used_at = Column(DateTime, comment='最后使用时间')
+    last_used_ip = Column(String(50), comment='最后使用IP')
+
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_svc_key_account', 'service_account_id'),
+        Index('idx_svc_key_tenant', 'tenant_id'),
+        Index('idx_svc_key_hash', 'key_hash', unique=True),
+        Index('idx_svc_key_status', 'status'),
+        Index('idx_svc_key_expires', 'expires_at'),
+    )
+
+
+class JWTKeyStore(Base):
+    """
+    JWT 签名密钥存储表模型
+
+    对应数据库表: sc_jwt_keys
+    存储 JWT 签名密钥，支持密钥轮换。
+    """
+    __tablename__ = 'sc_jwt_keys'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    kid = Column(String(64), unique=True, nullable=False, comment='密钥ID')
+    algorithm = Column(String(20), default='RS256', comment='签名算法 RS256/HS256/ES256')
+    key_type = Column(String(20), default='asymmetric', comment='密钥类型 symmetric/asymmetric')
+
+    private_key = Column(Text, comment='私钥（PEM格式，加密存储）')
+    public_key = Column(Text, comment='公钥（PEM格式）')
+    secret_key = Column(String(200), comment='对称密钥（加密存储）')
+
+    status = Column(String(20), default='active', comment='状态 active/rotating/expired')
+    is_current = Column(Boolean, default=False, comment='是否为当前签名密钥')
+
+    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+    activated_at = Column(DateTime, comment='激活时间')
+    expires_at = Column(DateTime, comment='过期时间')
+    rotated_at = Column(DateTime, comment='轮换时间')
+
+    __table_args__ = (
+        Index('idx_jwt_kid', 'kid'),
+        Index('idx_jwt_status', 'status'),
+        Index('idx_jwt_current', 'is_current'),
+        Index('idx_jwt_expires', 'expires_at'),
+    )
+
+
+class UserSSOLink(Base):
+    """
+    用户 SSO 身份关联表模型
+
+    对应数据库表: sc_user_sso_links
+    存储本地用户与 IdP 身份的关联关系。
+    """
+    __tablename__ = 'sc_user_sso_links'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+    user_id = Column(BigInteger, nullable=False, comment='本地用户ID')
+    sso_provider_id = Column(BigInteger, nullable=False, comment='SSO 提供者ID')
+
+    idp_user_id = Column(String(200), nullable=False, comment='IdP 用户唯一标识（sub/NameID）')
+    idp_username = Column(String(200), comment='IdP 用户名')
+    idp_email = Column(String(200), comment='IdP 邮箱')
+
+    linked_at = Column(DateTime, default=datetime.now, comment='关联时间')
+    last_login_at = Column(DateTime, comment='最后登录时间')
+    login_count = Column(Integer, default=0, comment='登录次数')
+
+    idp_groups = Column(Text, comment='IdP 用户组列表 JSON')
+    idp_attributes = Column(Text, comment='IdP 用户属性 JSON')
+
+    is_primary = Column(Boolean, default=False, comment='是否为主要登录方式')
+    status = Column(String(20), default='active', comment='状态 active/disconnected')
+
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_sso_link_user', 'user_id'),
+        Index('idx_sso_link_tenant', 'tenant_id'),
+        Index('idx_sso_link_provider', 'sso_provider_id'),
+        Index('idx_sso_link_idp_user', 'sso_provider_id', 'idp_user_id', unique=True),
+        Index('idx_sso_link_status', 'status'),
+    )
+
+
 class ManualLabelData(Base):
     """
     人工标注数据表模型

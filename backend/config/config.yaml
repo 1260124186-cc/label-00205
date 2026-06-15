@@ -227,6 +227,31 @@ auth:
       permissions: ["read", "write", "admin"]
       rate_limit: 5000
 
+  # SSO 单点登录配置
+  sso:
+    enabled: true
+    sso_enabled: true
+    service_account_enabled: true
+    default_protocol: "oidc"
+
+  # JWT 配置
+  jwt:
+    algorithm: "HS256"                # 签名算法: HS256 / RS256
+    secret_key: "change-me-in-production-please-use-strong-secret"
+    access_token_expire_minutes: 60   # Access Token 有效期（分钟）
+    refresh_token_expire_days: 7      # Refresh Token 有效期（天）
+    issuer: "bolt-prediction-system"
+    audience: "bolt-prediction-api"
+    use_database_key_store: true      # 是否使用数据库存储密钥（支持密钥轮换）
+    key_rotation_days: 90             # 密钥轮换周期（天）
+
+  # 会话管理配置
+  session:
+    max_sessions_per_user: 10         # 每个用户最大会话数
+    inactivity_timeout_minutes: 30    # 空闲超时（分钟）
+    absolute_timeout_hours: 24        # 绝对超时（小时）
+    enable_concurrent_limit: true     # 是否启用并发会话限制
+
 # 大模型配置
 llm:
   enabled: false              # LLM 智能诊断全局开关
