@@ -181,6 +181,13 @@ def breaking_change(
     help="手动指定升级类型",
 )
 @click.option(
+    "--set",
+    "set_version",
+    type=str,
+    default=None,
+    help="直接设置版本号（替代 bump），例如 1.2.3",
+)
+@click.option(
     "--breaking-change-report",
     type=str,
     default=None,
@@ -197,39 +204,58 @@ def breaking_change(
     is_flag=True,
     help="更新 SDK 版本文件",
 )
+@click.option(
+    "--assert-alignment",
+    is_flag=True,
+    help="强校验 SDK 主版本与 API 版本一致，不一致则报错退出",
+)
 def version(
     current_version: Optional[str],
     api_version: str,
     bump_type: Optional[str],
+    set_version: Optional[str],
     breaking_change_report: Optional[str],
     sdk_dir: str,
     update_files: bool,
+    assert_alignment: bool,
 ):
     """管理 SDK 版本（semver，与 API v1 对齐）"""
     vm = create_version_manager(api_version, current_version)
 
-    has_breaking = False
-    has_new_features = False
-
-    if breaking_change_report:
-        with open(breaking_change_report, "r") as f:
-            report_data = json.load(f)
-        has_breaking = report_data.get("has_breaking_changes", False)
-        has_new_features = len(report_data.get("additive_changes", [])) > 0
-
-    if bump_type:
-        bump = VersionBumpType(bump_type)
+    if set_version:
+        new_version = vm.set_version(set_version)
+        click.echo(f"版本已设置: {new_version.sdk_version}")
+        click.echo(f"API 版本: {new_version.api_version}")
     else:
-        bump = vm.determine_bump_type(
-            has_breaking_changes=has_breaking,
-            has_new_features=has_new_features,
-        )
+        has_breaking = False
+        has_new_features = False
 
-    new_version = vm.bump_version(bump)
-    click.echo(f"新版本: {new_version.sdk_version} ({bump.value})")
-    click.echo(f"API 版本: {new_version.api_version}")
+        if breaking_change_report:
+            with open(breaking_change_report, "r") as f:
+                report_data = json.load(f)
+            has_breaking = report_data.get("has_breaking_changes", False)
+            has_new_features = len(report_data.get("additive_changes", [])) > 0
 
-    if not vm.validate_version_alignment():
+        if bump_type:
+            bump = VersionBumpType(bump_type)
+        else:
+            bump = vm.determine_bump_type(
+                has_breaking_changes=has_breaking,
+                has_new_features=has_new_features,
+            )
+
+        new_version = vm.bump_version(bump)
+        click.echo(f"新版本: {new_version.sdk_version} ({bump.value})")
+        click.echo(f"API 版本: {new_version.api_version}")
+
+    if assert_alignment:
+        try:
+            vm.assert_major_version_matches()
+            click.echo("✓ 版本对齐校验通过")
+        except ValueError as e:
+            click.echo(f"✗ 版本对齐校验失败: {e}", err=True)
+            sys.exit(1)
+    elif not vm.validate_version_alignment():
         click.echo("警告: SDK 主版本与 API 版本不对齐")
 
     if update_files:

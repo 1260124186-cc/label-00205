@@ -196,6 +196,52 @@ class VersionManager:
         """
         return self.current_version[0] == self.api_major
 
+    def assert_major_version_matches(self) -> None:
+        """
+        强校验 SDK 主版本与 API 版本一致，不一致则抛出异常
+
+        Raises:
+            ValueError: 主版本不一致
+        """
+        sdk_major = self.current_version[0]
+        if sdk_major != self.api_major:
+            raise ValueError(
+                f"SDK 主版本 ({sdk_major}) 与 API 主版本 ({self.api_major}) 不一致，"
+                f"SDK 版本必须与 API v{self.api_major} 对齐"
+            )
+        logger.info(
+            f"版本对齐校验通过: SDK v{sdk_major}.x.x == API v{self.api_major}"
+        )
+
+    def set_version(self, version: str) -> VersionInfo:
+        """
+        直接设置版本号
+
+        Args:
+            version: 版本号（支持带 v 前缀）
+
+        Returns:
+            版本信息
+
+        Raises:
+            ValueError: 版本号格式无效
+        """
+        parsed = self._parse_semver(version)
+        if parsed[0] < 0:
+            raise ValueError(f"无效的版本号: {version}")
+
+        old_version = self._format_version(self.current_version)
+        new_version_str = self._format_version(parsed)
+        self.current_version = parsed
+
+        logger.info(f"版本已设置: {old_version} -> {new_version_str}")
+
+        return VersionInfo(
+            api_version=self.api_version,
+            sdk_version=new_version_str,
+            sdk_version_semver=parsed,
+        )
+
     def get_current_version(self) -> VersionInfo:
         """获取当前版本信息"""
         return VersionInfo(

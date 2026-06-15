@@ -93,14 +93,14 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
 
-      - name: Update version
+      - name: Set SDK version and validate alignment
         run: |
           python -m sdk_generator.cli version \
-            --current-version 0.0.0 \
+            --set ${{ needs.prepare-release.outputs.version }} \
             --api-version v1 \
-            --bump-type patch \
             --sdk-dir ./sdks \
-            --update-files
+            --update-files \
+            --assert-alignment
         env:
           PYTHONPATH: ${{ github.workspace }}
 
@@ -163,6 +163,17 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
 
+      - name: Set SDK version and validate alignment
+        run: |
+          python -m sdk_generator.cli version \
+            --set ${{ needs.prepare-release.outputs.version }} \
+            --api-version v1 \
+            --sdk-dir ./sdks \
+            --update-files \
+            --assert-alignment
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -175,7 +186,6 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd sdks/typescript
-          npm version ${{ needs.prepare-release.outputs.version }} --no-git-tag-version
           npm install
           npm run build
           npm publish --access restricted
@@ -225,6 +235,17 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
 
+      - name: Set SDK version and validate alignment
+        run: |
+          python -m sdk_generator.cli version \
+            --set ${{ needs.prepare-release.outputs.version }} \
+            --api-version v1 \
+            --sdk-dir ./sdks \
+            --update-files \
+            --assert-alignment
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
@@ -240,7 +261,6 @@ jobs:
           MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
         run: |
           cd sdks/java
-          mvn versions:set -DnewVersion=${{ needs.prepare-release.outputs.version }}
           mvn clean deploy -DskipTests -s .mvn/settings.xml
 
       - name: Upload Java SDK artifact
@@ -285,6 +305,17 @@ jobs:
             --output ./sdks \
             --api-version v1 \
             --base-url ${{ secrets.API_BASE_URL || 'https://api.example.com' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Set SDK version and validate alignment
+        run: |
+          python -m sdk_generator.cli version \
+            --set ${{ needs.prepare-release.outputs.version }} \
+            --api-version v1 \
+            --sdk-dir ./sdks \
+            --update-files \
+            --assert-alignment
         env:
           PYTHONPATH: ${{ github.workspace }}
 

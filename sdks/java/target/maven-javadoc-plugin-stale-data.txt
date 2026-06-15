@@ -1,0 +1,61 @@
+@options
+@packages
+-classpath
+'/Users/zhangchengcheng/.m2/repository/com/squareup/okhttp3/okhttp/4.12.0/okhttp-4.12.0.jar:/Users/zhangchengcheng/.m2/repository/com/squareup/okio/okio/3.6.0/okio-3.6.0.jar:/Users/zhangchengcheng/.m2/repository/com/squareup/okio/okio-jvm/3.6.0/okio-jvm-3.6.0.jar:/Users/zhangchengcheng/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib-common/1.9.10/kotlin-stdlib-common-1.9.10.jar:/Users/zhangchengcheng/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib-jdk8/1.8.21/kotlin-stdlib-jdk8-1.8.21.jar:/Users/zhangchengcheng/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/1.8.21/kotlin-stdlib-1.8.21.jar:/Users/zhangchengcheng/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:/Users/zhangchengcheng/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib-jdk7/1.8.21/kotlin-stdlib-jdk7-1.8.21.jar:/Users/zhangchengcheng/.m2/repository/com/fasterxml/jackson/core/jackson-databind/2.16.0/jackson-databind-2.16.0.jar:/Users/zhangchengcheng/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.16.0/jackson-annotations-2.16.0.jar:/Users/zhangchengcheng/.m2/repository/com/fasterxml/jackson/core/jackson-core/2.16.0/jackson-core-2.16.0.jar:/Users/zhangchengcheng/.m2/repository/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar:/Users/zhangchengcheng/.m2/repository/io/github/resilience4j/resilience4j-retry/2.1.0/resilience4j-retry-2.1.0.jar:/Users/zhangchengcheng/.m2/repository/io/github/resilience4j/resilience4j-core/2.1.0/resilience4j-core-2.1.0.jar'
+-encoding
+'UTF-8'
+-protected
+-source
+'11'
+-sourcepath
+'/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/src/main/java:/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/generated-sources/annotations'
+-author
+-bottom
+'Copyright &#169; 2026. All rights reserved.'
+-charset
+'UTF-8'
+-d
+'/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs'
+-docencoding
+'UTF-8'
+-doctitle
+'Bolt Prediction SDK 1.0.0 API'
+-linkoffline
+'https://docs.oracle.com/en/java/javase/11/docs/api' '/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/javadoc-bundle-options'
+-use
+-version
+-windowtitle
+'Bolt Prediction SDK 1.0.0 API'
+com.boltprediction.sdk.core
+com.boltprediction.sdk.model
+com.boltprediction.sdk.api
+/Users/zhangchengcheng/.m2/repository/com/squareup/okhttp3/okhttp/4.12.0/okhttp-4.12.0.jar = 1697509437000
+/Users/zhangchengcheng/.m2/repository/com/squareup/okio/okio/3.6.0/okio-3.6.0.jar = 1696213723000
+/Users/zhangchengcheng/.m2/repository/com/squareup/okio/okio-jvm/3.6.0/okio-jvm-3.6.0.jar = 1696213713000
+/Users/zhangchengcheng/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib-common/1.9.10/kotlin-stdlib-common-1.9.10.jar = 1692781294000
+/Users/zhangchengcheng/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib-jdk8/1.8.21/kotlin-stdlib-jdk8-1.8.21.jar = 1682396738000
+/Users/zhangchengcheng/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/1.8.21/kotlin-stdlib-1.8.21.jar = 1682396733000
+/Users/zhangchengcheng/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar = 1387282242000
+/Users/zhangchengcheng/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib-jdk7/1.8.21/kotlin-stdlib-jdk7-1.8.21.jar = 1682396736000
+/Users/zhangchengcheng/.m2/repository/com/fasterxml/jackson/core/jackson-databind/2.16.0/jackson-databind-2.16.0.jar = 1700087936000
+/Users/zhangchengcheng/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.16.0/jackson-annotations-2.16.0.jar = 1700077132000
+/Users/zhangchengcheng/.m2/repository/com/fasterxml/jackson/core/jackson-core/2.16.0/jackson-core-2.16.0.jar = 1700086244000
+/Users/zhangchengcheng/.m2/repository/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar = 1700319806000
+/Users/zhangchengcheng/.m2/repository/io/github/resilience4j/resilience4j-retry/2.1.0/resilience4j-retry-2.1.0.jar = 1688032125000
+/Users/zhangchengcheng/.m2/repository/io/github/resilience4j/resilience4j-core/2.1.0/resilience4j-core-2.1.0.jar = 1688032033000
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/src/main/java = 1781532966089
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/generated-sources/annotations = 1781532968602
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/tag-search-index.js = 1781532985361
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/overview-tree.html = 1781532985176
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/module-search-index.js = 1781532985357
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/index.html = 1781532985177
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/package-search-index.js = 1781532985357
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/index-all.html = 1781532985439
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/allpackages-index.html = 1781532985356
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/member-search-index.js = 1781532985361
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/overview-summary.html = 1781532985442
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/help-doc.html = 1781532985448
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/element-list = 1781532984953
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/search.html = 1781532985441
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/allclasses-index.html = 1781532985355
+/Users/zhangchengcheng/work/ai-project/Trea/solo0605/label-00205/sdks/java/target/apidocs/type-search-index.js = 1781532985358
