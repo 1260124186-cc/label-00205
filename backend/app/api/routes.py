@@ -154,6 +154,13 @@ from app.api.schemas import (
     FaultDetailSchema, FaultPatternSchema,
     BoltMultivariatePredictionRequest, BoltMultivariatePredictionResponse,
     MultivariateChannelSchema, DataQualityInfo, TemperatureCompensationInfo, FeatureImportanceInfo,
+    CarbonMonthlyRankingRequest, CarbonMonthlyRankingResponse,
+    CarbonRiskItemSchema,
+    HICarbonDualViewRequest, HICarbonDualViewResponse, HICarbonDualItemSchema,
+    ESGReportExportRequest, ESGReportFragmentResponse,
+    ESGReportSummarySchema, ESGTrendAnalysisSchema,
+    CarbonModelConfigResponse, CarbonModelConfigUpdateRequest,
+    DegradationParamsSchema, LeakageParamsSchema, EnergyCarbonParamsSchema,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -9151,4 +9158,270 @@ async def get_llm_config_status():
         }
     except Exception as e:
         logger.error(f"获取 LLM 配置状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 碳排与能效关联分析 ====================
+
+_carbon_energy_service = None
+
+
+def get_carbon_energy_service():
+    """获取碳排与能效分析服务实例"""
+    global _carbon_energy_service
+    if _carbon_energy_service is None:
+        from app.services.carbon_energy_service import CarbonEnergyService
+        _carbon_energy_service = CarbonEnergyService()
+    return _carbon_energy_service
+
+
+@router.post(
+    "/carbon/ranking/monthly",
+    response_model=CarbonMonthlyRankingResponse,
+    tags=["碳排与能效分析"],
+    summary="装置级月度碳排风险贡献排行"
+)
+async def get_carbon_monthly_ranking(request: CarbonMonthlyRankingRequest):
+    """
+    生成装置级月度碳排风险贡献排行
+
+    基于预紧力劣化、估算泄漏率、能耗/碳排增量简化模型，
+    对各装置进行碳排风险评分与优先级排序。
+
+    不强制精确计量，强调趋势与优先级。
+    """
+    try:
+        service = get_carbon_energy_service()
+        result = service.generate_monthly_ranking(
+            nodes_data=request.nodes,
+            top_n=request.top_n,
+        )
+
+        ranked_items = [
+            CarbonRiskItemSchema(**item) for item in result['ranked_items']
+        ]
+
+        return CarbonMonthlyRankingResponse(
+            report_month=result['report_month'],
+            total_nodes=result['total_nodes'],
+            total_monthly_carbon_increment_kg=result['total_monthly_carbon_increment_kg'],
+            total_monthly_leakage_volume_m3=result['total_monthly_leakage_volume_m3'],
+            risk_distribution=result['risk_distribution'],
+            ranked_items=ranked_items,
+            generated_at=result['generated_at'],
+        )
+    except Exception as e:
+        logger.error(f"生成月度碳排风险排行失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/carbon/hi-dual-view",
+    response_model=HICarbonDualViewResponse,
+    tags=["碳排与能效分析"],
+    summary="HI rollup 与碳排并列展示"
+)
+async def get_hi_carbon_dual_view(request: HICarbonDualViewRequest):
+    """
+    生成健康指数(HI)与碳排风险并列展示数据
+
+    每个装置同时展示：
+    - HI 分数、等级、趋势
+    - 预紧力劣化速率
+    - 估算泄漏率
+    - 月度碳排增量、碳排风险等级、趋势
+    """
+    try:
+        service = get_carbon_energy_service()
+        result = service.generate_hi_carbon_dual_view(nodes_data=request.nodes)
+
+        items = [
+            HICarbonDualItemSchema(**item) for item in result['items']
+        ]
+
+        return HICarbonDualViewResponse(
+            report_month=result['report_month'],
+            total_nodes=result['total_nodes'],
+            items=items,
+            generated_at=result['generated_at'],
+        )
+    except Exception as e:
+        logger.error(f"生成HI碳排并列视图失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/carbon/esg/export",
+    response_model=ESGReportFragmentResponse,
+    tags=["碳排与能效分析"],
+    summary="导出 ESG 报表片段"
+)
+async def export_esg_report_fragment(request: ESGReportExportRequest):
+    """
+    导出适用于企业 ESG 报告 / 温室气体排放清单的片段内容
+
+    - 支持 json / csv 格式输出
+    - 包含汇总数据、Top 高风险装置、趋势分析、建议措施
+    - 可选择包含方法学说明
+    - 不强制精确计量，强调趋势与优先级
+    """
+    try:
+        service = get_carbon_energy_service()
+
+        ranking_data = service.generate_monthly_ranking(
+            nodes_data=request.nodes,
+            top_n=request.top_n,
+        )
+
+        fragment = service.generate_esg_report_fragment(
+            ranking_data=ranking_data,
+            include_methodology=request.include_methodology,
+        )
+
+        csv_content = None
+        if request.format.lower() == "csv":
+            csv_content = service.export_esg_csv(fragment)
+
+        top_risk_items = [
+            CarbonRiskItemSchema(**item) for item in fragment.top_risk_items
+        ]
+
+        return ESGReportFragmentResponse(
+            report_period=fragment.report_period,
+            generated_at=fragment.generated_at,
+            summary=ESGReportSummarySchema(**fragment.summary),
+            top_risk_items=top_risk_items,
+            trend_analysis=ESGTrendAnalysisSchema(**fragment.trend_analysis),
+            recommendations=fragment.recommendations,
+            methodology_note=fragment.methodology_note if fragment.methodology_note else None,
+            csv_content=csv_content,
+        )
+    except Exception as e:
+        logger.error(f"导出ESG报表片段失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/carbon/config",
+    response_model=CarbonModelConfigResponse,
+    tags=["碳排与能效分析"],
+    summary="获取碳排模型系数配置"
+)
+async def get_carbon_model_config():
+    """
+    获取当前生效的碳排与能效分析模型系数配置
+
+    包含：
+    - 预紧力劣化模型参数
+    - 泄漏率估算模型参数
+    - 能耗与碳排增量模型参数
+    """
+    try:
+        service = get_carbon_energy_service()
+        cfg = service.get_model_config()
+
+        return CarbonModelConfigResponse(
+            degradation=DegradationParamsSchema(**cfg['degradation']),
+            leakage=LeakageParamsSchema(**cfg['leakage']),
+            energy_carbon=EnergyCarbonParamsSchema(**cfg['energy_carbon']),
+        )
+    except Exception as e:
+        logger.error(f"获取碳排模型配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/carbon/config",
+    response_model=CarbonModelConfigResponse,
+    tags=["碳排与能效分析"],
+    summary="更新碳排模型系数配置"
+)
+async def update_carbon_model_config(request: CarbonModelConfigUpdateRequest):
+    """
+    更新碳排与能效分析模型系数配置
+
+    支持部分更新，仅传需要修改的参数即可。
+    更新后会持久化到数据库配置表，下次启动自动加载。
+    """
+    try:
+        from app.utils.database import get_db
+        import json
+
+        service = get_carbon_energy_service()
+        cfg_mgr = service.config_mgr
+
+        if request.degradation:
+            for field_name, value in request.degradation.model_dump(exclude_unset=True).items():
+                if hasattr(cfg_mgr.degradation, field_name):
+                    setattr(cfg_mgr.degradation, field_name, value)
+            try:
+                with get_db() as db:
+                    deg_dict = {
+                        k: getattr(cfg_mgr.degradation, k)
+                        for k in ['nominal_preload', 'min_effective_preload_ratio',
+                                  'relaxation_rate_per_month', 'temperature_acceleration_factor',
+                                  'vibration_acceleration_factor', 'cycle_acceleration_factor']
+                    }
+                    db.execute(
+                        "INSERT OR REPLACE INTO sc_health_config (config_key, config_value, description, update_time) "
+                        "VALUES ('carbon_degradation_params', :v, '碳排-预紧力劣化模型参数', :t)",
+                        {"v": json.dumps(deg_dict), "t": datetime.now().isoformat()}
+                    )
+                    db.commit()
+            except Exception as e:
+                logger.warning(f"持久化碳排劣化参数到数据库失败: {e}")
+
+        if request.leakage:
+            for field_name, value in request.leakage.model_dump(exclude_unset=True).items():
+                if hasattr(cfg_mgr.leakage, field_name):
+                    setattr(cfg_mgr.leakage, field_name, value)
+            try:
+                with get_db() as db:
+                    leak_dict = {
+                        k: getattr(cfg_mgr.leakage, k)
+                        for k in ['base_leakage_rate_m3_per_hour', 'critical_leakage_threshold',
+                                  'preload_leakage_sensitivity', 'seal_aging_factor_per_year',
+                                  'pressure_sensitivity']
+                    }
+                    db.execute(
+                        "INSERT OR REPLACE INTO sc_health_config (config_key, config_value, description, update_time) "
+                        "VALUES ('carbon_leakage_params', :v, '碳排-泄漏率估算模型参数', :t)",
+                        {"v": json.dumps(leak_dict), "t": datetime.now().isoformat()}
+                    )
+                    db.commit()
+            except Exception as e:
+                logger.warning(f"持久化碳排泄漏参数到数据库失败: {e}")
+
+        if request.energy_carbon:
+            for field_name, value in request.energy_carbon.model_dump(exclude_unset=True).items():
+                if hasattr(cfg_mgr.energy, field_name):
+                    setattr(cfg_mgr.energy, field_name, value)
+            try:
+                with get_db() as db:
+                    eng_dict = {
+                        k: getattr(cfg_mgr.energy, k)
+                        for k in ['energy_per_leakage_unit', 'carbon_factor_electricity',
+                                  'carbon_factor_natural_gas', 'carbon_factor_steam',
+                                  'compressor_efficiency', 'recovery_rate',
+                                  'base_monthly_energy_kwh', 'base_monthly_carbon_kg']
+                    }
+                    db.execute(
+                        "INSERT OR REPLACE INTO sc_health_config (config_key, config_value, description, update_time) "
+                        "VALUES ('carbon_energy_params', :v, '碳排-能耗与碳排增量模型参数', :t)",
+                        {"v": json.dumps(eng_dict), "t": datetime.now().isoformat()}
+                    )
+                    db.commit()
+            except Exception as e:
+                logger.warning(f"持久化碳排能耗参数到数据库失败: {e}")
+
+        cfg = service.get_model_config()
+        return CarbonModelConfigResponse(
+            degradation=DegradationParamsSchema(**cfg['degradation']),
+            leakage=LeakageParamsSchema(**cfg['leakage']),
+            energy_carbon=EnergyCarbonParamsSchema(**cfg['energy_carbon']),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新碳排模型配置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

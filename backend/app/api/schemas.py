@@ -3536,3 +3536,182 @@ class BatchReportResponse(BaseModel):
     failed: int = Field(0, description="失败数量")
     results: List[PeriodicReportResponse] = Field(default_factory=list, description="成功的报告列表")
     errors: Dict[str, str] = Field(default_factory=dict, description="失败的节点及错误信息")
+
+
+# ============================================================
+# 碳排与能效关联分析模块
+# ============================================================
+
+# ---------- 碳排风险排行 ----------
+
+class CarbonRiskItemSchema(BaseModel):
+    """碳排风险排行单项"""
+    rank: Optional[int] = Field(None, description="排名")
+    node_id: str = Field(..., description="节点ID")
+    node_type: str = Field(..., description="节点类型 bolt/flange/device")
+    node_name: str = Field(..., description="节点名称")
+    hi_score: float = Field(..., description="健康度指数 HI 0-100")
+    hi_level: str = Field(..., description="HI等级 excellent/good/fair/poor/critical")
+    carbon_risk_score: float = Field(..., description="碳排风险评分 0-100")
+    carbon_risk_level: str = Field(..., description="碳排风险等级 low/medium/high/critical")
+    monthly_leakage_volume_m3: float = Field(..., description="月度估算泄漏量 (m³)")
+    monthly_carbon_increment_kg: float = Field(..., description="月度碳排增量 (kgCO₂e)")
+    priority_score: float = Field(..., description="综合优先级评分")
+    trend: str = Field(..., description="趋势 stable/gradual_decline/accelerating_decline/recovering")
+    recommendations: List[str] = Field(default_factory=list, description="推荐措施")
+
+
+class CarbonMonthlyRankingRequest(BaseModel):
+    """装置级月度碳排风险排行请求"""
+    nodes: List[Dict[str, Any]] = Field(
+        ...,
+        description="节点数据列表，每项包含: node_id, node_type(可选), node_name(可选), "
+                    "hi_score, hi_level, preload_history, timestamps(可选), "
+                    "service_age_months(可选), avg_temperature(可选), "
+                    "seal_age_years(可选), operating_pressure_mpa(可选), energy_source(可选)"
+    )
+    top_n: Optional[int] = Field(None, description="返回前N名，None表示全部", ge=1)
+
+
+class CarbonMonthlyRankingResponse(BaseModel):
+    """装置级月度碳排风险排行响应"""
+    report_month: str = Field(..., description="报告月份 YYYY-MM")
+    total_nodes: int = Field(..., description="分析节点总数")
+    total_monthly_carbon_increment_kg: float = Field(..., description="月度碳排增量合计 (kgCO₂e)")
+    total_monthly_leakage_volume_m3: float = Field(..., description="月度泄漏量合计 (m³)")
+    risk_distribution: Dict[str, int] = Field(..., description="风险等级分布 {critical, high, medium, low}")
+    ranked_items: List[CarbonRiskItemSchema] = Field(..., description="按优先级排序的碳排风险列表")
+    generated_at: datetime = Field(..., description="生成时间")
+
+
+# ---------- HI + 碳排并列展示 ----------
+
+class HICarbonDualItemSchema(BaseModel):
+    """HI与碳排并列展示单项"""
+    node_id: str = Field(..., description="节点ID")
+    node_type: str = Field(..., description="节点类型")
+    node_name: str = Field(..., description="节点名称")
+    hi_score: float = Field(..., description="健康度指数 0-100")
+    hi_level: str = Field(..., description="HI等级")
+    hi_trend: str = Field(..., description="HI趋势 improving/stable/declining")
+    degradation_rate_per_month: float = Field(..., description="预紧力月劣化速率")
+    estimated_leakage_rate_m3_hour: float = Field(..., description="估算泄漏率 (m³/h)")
+    monthly_carbon_increment_kg: float = Field(..., description="月度碳排增量 (kgCO₂e)")
+    carbon_risk_level: str = Field(..., description="碳排风险等级 low/medium/high/critical")
+    carbon_trend: str = Field(..., description="碳排趋势 increasing/stable/decreasing")
+
+
+class HICarbonDualViewRequest(BaseModel):
+    """HI rollup 与碳排并列展示请求"""
+    nodes: List[Dict[str, Any]] = Field(
+        ...,
+        description="节点数据列表，每项包含: node_id, node_type(可选), node_name(可选), "
+                    "hi_score, hi_level, hi_trend(可选), preload_history, "
+                    "timestamps(可选), service_age_months(可选), avg_temperature(可选), "
+                    "seal_age_years(可选), operating_pressure_mpa(可选)"
+    )
+
+
+class HICarbonDualViewResponse(BaseModel):
+    """HI rollup 与碳排并列展示响应"""
+    report_month: str = Field(..., description="报告月份 YYYY-MM")
+    total_nodes: int = Field(..., description="节点总数")
+    items: List[HICarbonDualItemSchema] = Field(..., description="HI与碳排并列数据列表")
+    generated_at: datetime = Field(..., description="生成时间")
+
+
+# ---------- ESG 报表导出 ----------
+
+class ESGReportExportRequest(BaseModel):
+    """ESG报表片段导出请求"""
+    nodes: List[Dict[str, Any]] = Field(
+        ...,
+        description="节点数据列表，格式同 CarbonMonthlyRankingRequest"
+    )
+    format: str = Field("json", description="导出格式 json/csv/html")
+    include_methodology: bool = Field(True, description="是否包含方法学说明")
+    top_n: Optional[int] = Field(10, description="返回前N名高风险装置", ge=1)
+
+
+class ESGReportSummarySchema(BaseModel):
+    """ESG报表汇总数据"""
+    reporting_period: str = Field(..., description="报告期")
+    total_devices_analyzed: int = Field(..., description="分析装置总数")
+    estimated_monthly_carbon_increment_kg: float = Field(..., description="月度碳排增量估算 (kgCO₂e)")
+    estimated_monthly_carbon_increment_tons: float = Field(..., description="月度碳排增量估算 (吨CO₂e)")
+    estimated_monthly_leakage_m3: float = Field(..., description="月度泄漏量估算 (m³)")
+    average_carbon_per_device_kg: float = Field(..., description="单装置平均月度碳排增量 (kgCO₂e)")
+    carbon_risk_severity: str = Field(..., description="碳排风险严重度 高/中/低")
+    top5_contribution_ratio: float = Field(..., description="Top5装置碳排贡献占比")
+    risk_distribution: Dict[str, int] = Field(..., description="风险分布")
+
+
+class ESGTrendAnalysisSchema(BaseModel):
+    """ESG趋势分析"""
+    overall_trend: str = Field(..., description="整体趋势 deteriorating/stable/improving")
+    improving_count: int = Field(..., description="改善装置数")
+    stable_count: int = Field(..., description="稳定装置数")
+    declining_count: int = Field(..., description="劣化装置数")
+    key_observation: str = Field(..., description="关键观察结论")
+
+
+class ESGReportFragmentResponse(BaseModel):
+    """ESG报表片段响应"""
+    report_period: str = Field(..., description="报告期")
+    generated_at: datetime = Field(..., description="生成时间")
+    summary: ESGReportSummarySchema = Field(..., description="汇总数据")
+    top_risk_items: List[CarbonRiskItemSchema] = Field(..., description="高风险装置列表")
+    trend_analysis: ESGTrendAnalysisSchema = Field(..., description="趋势分析")
+    recommendations: List[str] = Field(..., description="建议措施")
+    methodology_note: Optional[str] = Field(None, description="方法学说明")
+    csv_content: Optional[str] = Field(None, description="CSV格式内容（format=csv时返回）")
+
+
+# ---------- 模型系数配置 ----------
+
+class DegradationParamsSchema(BaseModel):
+    """预紧力劣化模型参数"""
+    nominal_preload: float = Field(600.0, description="额定预紧力 (kN)")
+    min_effective_preload_ratio: float = Field(0.6, description="最小有效压紧比阈值")
+    relaxation_rate_per_month: float = Field(0.015, description="自然松弛月速率")
+    temperature_acceleration_factor: float = Field(0.002, description="高温加速因子 (每°C高于40)")
+    vibration_acceleration_factor: float = Field(0.003, description="振动加速因子")
+    cycle_acceleration_factor: float = Field(0.0001, description="压力循环加速因子")
+
+
+class LeakageParamsSchema(BaseModel):
+    """泄漏率估算模型参数"""
+    base_leakage_rate_m3_per_hour: float = Field(0.0, description="基准泄漏率 (m³/h)")
+    critical_leakage_threshold: float = Field(0.05, description="临界泄漏压紧比阈值")
+    preload_leakage_sensitivity: float = Field(2.5, description="预紧力泄漏敏感度指数")
+    seal_aging_factor_per_year: float = Field(0.08, description="密封年老化系数")
+    pressure_sensitivity: float = Field(1.2, description="压力敏感度")
+
+
+class EnergyCarbonParamsSchema(BaseModel):
+    """能耗与碳排增量模型参数"""
+    energy_per_leakage_unit: float = Field(8.5, description="单位泄漏能耗 (kWh/m³)")
+    carbon_factor_electricity: float = Field(0.5839, description="电力排放因子 (kgCO₂e/kWh)")
+    carbon_factor_natural_gas: float = Field(2.1622, description="天然气排放因子 (kgCO₂e/kWh)")
+    carbon_factor_steam: float = Field(0.11, description="蒸汽排放因子 (kgCO₂e/kWh)")
+    compressor_efficiency: float = Field(0.75, description="压缩机效率 0-1")
+    recovery_rate: float = Field(0.0, description="泄漏回收率 0-1")
+    base_monthly_energy_kwh: float = Field(10000.0, description="基准月度能耗 (kWh)")
+    base_monthly_carbon_kg: float = Field(5839.0, description="基准月度碳排 (kgCO₂e)")
+
+
+class CarbonModelConfigResponse(BaseModel):
+    """碳排模型系数配置响应"""
+    degradation: DegradationParamsSchema = Field(..., description="预紧力劣化模型参数")
+    leakage: LeakageParamsSchema = Field(..., description="泄漏率估算模型参数")
+    energy_carbon: EnergyCarbonParamsSchema = Field(..., description="能耗与碳排模型参数")
+
+
+class CarbonModelConfigUpdateRequest(BaseModel):
+    """碳排模型系数配置更新请求"""
+    degradation: Optional[DegradationParamsSchema] = Field(None, description="预紧力劣化模型参数（可选更新）")
+    leakage: Optional[LeakageParamsSchema] = Field(None, description="泄漏率估算模型参数（可选更新）")
+    energy_carbon: Optional[EnergyCarbonParamsSchema] = Field(None, description="能耗与碳排模型参数（可选更新）")
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+    description: Optional[str] = Field(None, description="变更说明")

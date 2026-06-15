@@ -95,6 +95,20 @@
             </svg>
             联邦学习
           </button>
+          <button
+            v-if="canViewCarbon"
+            class="nav-tab"
+            :class="{ active: currentView === 'carbon' }"
+            @click="switchView('carbon')"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2v4"></path>
+              <path d="M5 10l-1.9 6.7A2 2 0 005 19h14a2 2 0 001.9-2.3L19 10"></path>
+              <path d="M8 10V7a4 4 0 018 0v3"></path>
+              <path d="M12 14v3"></path>
+            </svg>
+            碳排分析
+          </button>
         </nav>
         <div class="realtime-status" :class="{ active: autoRefresh }" v-if="currentView === 'monitoring'">
           <span class="status-dot"></span>
@@ -197,7 +211,7 @@
       </div>
     </header>
 
-    <main class="app-main" :class="{ 'app-main-full': currentView === 'alert' || currentView === 'trend' || currentView === 'model' || currentView === 'config' }">
+    <main class="app-main" :class="{ 'app-main-full': currentView === 'alert' || currentView === 'trend' || currentView === 'model' || currentView === 'config' || currentView === 'federated' || currentView === 'carbon' }">
       <template v-if="currentView === 'monitoring'">
         <aside class="sidebar-left">
           <FilterPanel
@@ -261,6 +275,8 @@
       <ConfigurationCenter v-else-if="currentView === 'config'" />
 
       <FederatedLearning v-else-if="currentView === 'federated'" />
+
+      <CarbonEnergyAnalysis v-else-if="currentView === 'carbon'" />
     </main>
   </div>
 </template>
@@ -276,6 +292,7 @@ import TrendAnalysis from '@/components/TrendAnalysis.vue'
 import ModelManagement from '@/components/ModelManagement.vue'
 import ConfigCenter from '@/components/ConfigCenter.vue'
 import FederatedLearning from '@/components/FederatedLearning.vue'
+import CarbonEnergyAnalysis from '@/components/CarbonEnergyAnalysis.vue'
 import LoginView from '@/components/LoginView.vue'
 import { fetchTopology, fetchCollectors, fetchPositions } from '@/api/monitoring'
 import { fetchAlertStats } from '@/api/alert'
@@ -298,12 +315,13 @@ const {
   canViewModel,
   canViewConfig,
   canViewFederated,
+  canViewCarbon,
   canWrite,
   hasPermission,
   logout
 } = useAuth()
 
-type ViewName = 'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated'
+type ViewName = 'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon'
 
 const currentView = ref<ViewName>('monitoring')
 const showUserMenu = ref(false)
@@ -389,7 +407,8 @@ function switchView(view: ViewName) {
     trend: canViewTrend.value,
     model: canViewModel.value,
     config: canViewConfig.value,
-    federated: canViewFederated.value
+    federated: canViewFederated.value,
+    carbon: canViewCarbon.value
   }
   if (!allowed[view]) return
   currentView.value = view
@@ -403,7 +422,8 @@ function ensureValidView() {
     trend: canViewTrend.value,
     model: canViewModel.value,
     config: canViewConfig.value,
-    federated: canViewFederated.value
+    federated: canViewFederated.value,
+    carbon: canViewCarbon.value
   }
   if (!allowed[currentView.value]) {
     const firstAllowed = (Object.keys(allowed) as ViewName[]).find(v => allowed[v])

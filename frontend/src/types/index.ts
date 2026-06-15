@@ -792,13 +792,13 @@ export interface APIKeyLoginRequest {
 }
 
 // 角色到视图的映射（哪些角色可以看到哪些导航页面）
-export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated'>> = {
-  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated'],
-  admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated'],
-  operator: ['monitoring', 'alert', 'trend', 'model'],
-  viewer: ['monitoring', 'alert', 'trend'],
+export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon'>> = {
+  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon'],
+  admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon'],
+  operator: ['monitoring', 'alert', 'trend', 'model', 'carbon'],
+  viewer: ['monitoring', 'alert', 'trend', 'carbon'],
   anonymous: [],
-  api_key: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated']
+  api_key: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon']
 }
 
 // 角色到权限的映射
@@ -995,4 +995,231 @@ export interface FederatedRoundAggregateResponse {
   version?: number
   metrics?: Record<string, any>
   aggregated_at: string
+}
+
+// ==================== 碳排与能效分析相关类型 ====================
+
+export type CarbonRiskLevel = 'low' | 'medium' | 'high' | 'critical'
+
+export const CarbonRiskLevelMap: Record<CarbonRiskLevel, string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  critical: '严重'
+}
+
+export const CarbonRiskLevelColorMap: Record<CarbonRiskLevel, string> = {
+  low: '#22c55e',
+  medium: '#eab308',
+  high: '#f97316',
+  critical: '#ef4444'
+}
+
+export const CarbonRiskLevelBgColorMap: Record<CarbonRiskLevel, string> = {
+  low: '#dcfce7',
+  medium: '#fef9c3',
+  high: '#ffedd5',
+  critical: '#fee2e2'
+}
+
+export type DegradationTrend = 'stable' | 'gradual_decline' | 'accelerating_decline' | 'recovering' | 'insufficient_data'
+
+export const DegradationTrendMap: Record<DegradationTrend, string> = {
+  stable: '稳定',
+  gradual_decline: '缓慢劣化',
+  accelerating_decline: '加速劣化',
+  recovering: '恢复中',
+  insufficient_data: '数据不足'
+}
+
+export const DegradationTrendColorMap: Record<DegradationTrend, string> = {
+  stable: '#22c55e',
+  gradual_decline: '#eab308',
+  accelerating_decline: '#ef4444',
+  recovering: '#3b82f6',
+  insufficient_data: '#64748b'
+}
+
+export type CarbonTrend = 'increasing' | 'stable' | 'decreasing'
+
+export const CarbonTrendMap: Record<CarbonTrend, string> = {
+  increasing: '上升',
+  stable: '稳定',
+  decreasing: '下降'
+}
+
+export const CarbonTrendColorMap: Record<CarbonTrend, string> = {
+  increasing: '#ef4444',
+  stable: '#eab308',
+  decreasing: '#22c55e'
+}
+
+export type HILevel = 'excellent' | 'good' | 'fair' | 'poor' | 'critical'
+
+export const HILevelMap: Record<HILevel, string> = {
+  excellent: '优秀',
+  good: '良好',
+  fair: '一般',
+  poor: '较差',
+  critical: '危险'
+}
+
+export const HILevelColorMap: Record<HILevel, string> = {
+  excellent: '#22c55e',
+  good: '#84cc16',
+  fair: '#eab308',
+  poor: '#f97316',
+  critical: '#ef4444'
+}
+
+export interface CarbonRiskItem {
+  rank?: number
+  node_id: string
+  node_type: string
+  node_name: string
+  hi_score: number
+  hi_level: HILevel
+  carbon_risk_score: number
+  carbon_risk_level: CarbonRiskLevel
+  monthly_leakage_volume_m3: number
+  monthly_carbon_increment_kg: number
+  priority_score: number
+  trend: DegradationTrend
+  recommendations: string[]
+}
+
+export interface CarbonMonthlyRankingRequest {
+  nodes: Array<Record<string, any>>
+  top_n?: number
+}
+
+export interface CarbonMonthlyRankingResponse {
+  report_month: string
+  total_nodes: number
+  total_monthly_carbon_increment_kg: number
+  total_monthly_leakage_volume_m3: number
+  risk_distribution: Record<CarbonRiskLevel, number>
+  ranked_items: CarbonRiskItem[]
+  generated_at: string
+}
+
+export interface HICarbonDualItem {
+  node_id: string
+  node_type: string
+  node_name: string
+  hi_score: number
+  hi_level: HILevel
+  hi_trend: string
+  degradation_rate_per_month: number
+  estimated_leakage_rate_m3_hour: number
+  monthly_carbon_increment_kg: number
+  carbon_risk_level: CarbonRiskLevel
+  carbon_trend: CarbonTrend
+}
+
+export interface HICarbonDualViewRequest {
+  nodes: Array<Record<string, any>>
+}
+
+export interface HICarbonDualViewResponse {
+  report_month: string
+  total_nodes: number
+  items: HICarbonDualItem[]
+  generated_at: string
+}
+
+export interface DegradationParams {
+  nominal_preload: number
+  min_effective_preload_ratio: number
+  relaxation_rate_per_month: number
+  temperature_acceleration_factor: number
+  vibration_acceleration_factor: number
+  cycle_acceleration_factor: number
+}
+
+export interface LeakageParams {
+  base_leakage_rate_m3_per_hour: number
+  critical_leakage_threshold: number
+  preload_leakage_sensitivity: number
+  seal_aging_factor_per_year: number
+  pressure_sensitivity: number
+}
+
+export interface EnergyCarbonParams {
+  energy_per_leakage_unit: number
+  carbon_factor_electricity: number
+  carbon_factor_natural_gas: number
+  carbon_factor_steam: number
+  compressor_efficiency: number
+  recovery_rate: number
+  base_monthly_energy_kwh: number
+  base_monthly_carbon_kg: number
+}
+
+export interface CarbonModelConfigResponse {
+  degradation: DegradationParams
+  leakage: LeakageParams
+  energy_carbon: EnergyCarbonParams
+}
+
+export interface CarbonModelConfigUpdateRequest {
+  degradation?: Partial<DegradationParams>
+  leakage?: Partial<LeakageParams>
+  energy_carbon?: Partial<EnergyCarbonParams>
+  operator_id?: string
+  operator_name?: string
+  description?: string
+}
+
+export interface ESGReportSummary {
+  reporting_period: string
+  total_devices_analyzed: number
+  estimated_monthly_carbon_increment_kg: number
+  estimated_monthly_carbon_increment_tons: number
+  estimated_monthly_leakage_m3: number
+  average_carbon_per_device_kg: number
+  carbon_risk_severity: '高' | '中' | '低'
+  top5_contribution_ratio: number
+  risk_distribution: Record<CarbonRiskLevel, number>
+}
+
+export interface ESGTrendAnalysis {
+  overall_trend: 'deteriorating' | 'stable' | 'improving'
+  improving_count: number
+  stable_count: number
+  declining_count: number
+  key_observation: string
+}
+
+export const ESGTrendMap: Record<string, string> = {
+  deteriorating: '劣化中',
+  stable: '稳定',
+  improving: '改善中'
+}
+
+export interface ESGReportExportRequest {
+  nodes: Array<Record<string, any>>
+  format?: 'json' | 'csv' | 'html'
+  include_methodology?: boolean
+  top_n?: number
+}
+
+export interface ESGReportFragmentResponse {
+  report_period: string
+  generated_at: string
+  summary: ESGReportSummary
+  top_risk_items: CarbonRiskItem[]
+  trend_analysis: ESGTrendAnalysis
+  recommendations: string[]
+  methodology_note?: string
+  csv_content?: string
+}
+
+export type CarbonViewMode = 'ranking' | 'dual_view' | 'esg' | 'config'
+
+export const CarbonViewModeMap: Record<CarbonViewMode, string> = {
+  ranking: '月度碳排风险排行',
+  dual_view: 'HI + 碳排并列视图',
+  esg: 'ESG 报表导出',
+  config: '模型系数配置'
 }
