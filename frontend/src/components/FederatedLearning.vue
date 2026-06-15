@@ -567,7 +567,7 @@ const tabs = [
   { id: 'rounds', name: '轮次管理', icon: 'M12 2v6 M12 22v-6 M4.93 4.93l4.24 4.24 M14.83 14.83l4.24 4.24 M2 12h6 M16 12h6 M4.93 19.07l4.24-4.24 M14.83 9.17l4.24-4.24' },
   { id: 'models', name: '模型历史', icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8' },
   { id: 'privacy', name: '隐私保护', icon: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z M12 12m-3 0a3 3 0 1 0 6 0 3 3 0 1 0 -6 0' }
-]
+] as const
 
 const serverStatus = ref<FederatedServerStatus | null>(null)
 const modelHistory = ref<FederatedModelHistory | null>(null)
