@@ -170,8 +170,11 @@ class SDKBaseModel(BaseModel):
         lines.append("")
         return "\n".join(lines)
 
-    def _map_python_type(self, schema: Dict[str, Any]) -> str:
+    def _map_python_type(self, schema: Any) -> str:
         """映射 OpenAPI 类型到 Python 类型"""
+        if not isinstance(schema, dict):
+            return "Any"
+
         if "$ref" in schema:
             ref_name = schema["$ref"].split("/")[-1]
             return self._to_pascal_case(ref_name)
@@ -195,7 +198,7 @@ class SDKBaseModel(BaseModel):
             return f"List[{item_type}]"
         elif type_name == "object":
             additional = schema.get("additionalProperties", {})
-            if additional:
+            if isinstance(additional, dict) and additional:
                 value_type = self._map_python_type(additional)
                 return f"Dict[str, {value_type}]"
             return "Dict[str, Any]"
@@ -209,13 +212,15 @@ class SDKBaseModel(BaseModel):
 
         groups = self._parse_paths()
 
-        for group in groups:
+        for i, group in enumerate(groups):
             tag = group["tag"]
             operations = group["operations"]
-            file_name = self._to_snake_case(tag) + ".py"
-            class_name = self._to_pascal_case(tag) + "Client"
-            code = self._generate_api_client_class(class_name, tag, operations)
+            sanitized_tag = self._sanitize_tag(tag, i)
+            file_name = self._to_snake_case(sanitized_tag) + ".py"
+            class_name = self._to_pascal_case(sanitized_tag) + "Client"
+            code = self._generate_api_client_class(class_name, sanitized_tag, operations)
             (api_dir / file_name).write_text(code)
+            group["_sanitized_tag"] = sanitized_tag
 
         (api_dir / "__init__.py").write_text(
             self._generate_api_init(groups)
@@ -327,7 +332,7 @@ class SDKBaseModel(BaseModel):
 
         for i, param in enumerate(params):
             if i == len(params) - 1:
-                lines.append(f"        {param}", end="")
+                lines.append(f"        {param}")
             else:
                 lines.append(f"        {param},")
 
@@ -385,9 +390,9 @@ class SDKBaseModel(BaseModel):
         """生成 api __init__.py"""
         imports = []
         for group in groups:
-            tag = group["tag"]
-            module_name = self._to_snake_case(tag)
-            class_name = self._to_pascal_case(tag) + "Client"
+            sanitized_tag = group.get("_sanitized_tag", group["tag"])
+            module_name = self._to_snake_case(sanitized_tag)
+            class_name = self._to_pascal_case(sanitized_tag) + "Client"
             imports.append(f"from .{module_name} import {class_name}")
         return "\n".join(imports) + "\n"
 
@@ -396,13 +401,26 @@ class SDKBaseModel(BaseModel):
         pkg_name = self.config.python["module_name"]
         core_dir = output_dir / pkg_name / "core"
 
-        (core_dir / "__init__.py").write_text("")
+        (core_dir / "__init__.py").write_text(self._generate_core_init())
 
         (core_dir / "config.py").write_text(self._generate_core_config())
         (core_dir / "auth.py").write_text(self._generate_core_auth())
         (core_dir / "retry.py").write_text(self._generate_core_retry())
         (core_dir / "pagination.py").write_text(self._generate_core_pagination())
         (core_dir / "client.py").write_text(self._generate_core_client())
+
+    def _generate_core_init(self) -> str:
+        """生成 core __init__.py"""
+        return '''"""
+核心模块
+"""
+
+from .config import SDKConfig
+from .auth import AuthManager
+from .retry import RetryManager
+from .pagination import CursorPaginator
+from .client import BaseAPIClient
+'''
 
     def _generate_core_config(self) -> str:
         """生成配置模块"""
@@ -525,7 +543,7 @@ class RetryManager:
 
                 if attempt >= self.max_retries:
                     logger.warning(
-                        f"Max retries ({self.max_retries}) reached, giving up"
+                        f"Max retries ({{self.max_retries}}) reached, giving up"
                     )
                     raise
 
@@ -878,17 +896,17 @@ async def main():
         base_url="https://api.example.com",
         api_key="your-api-key",
     )
-    
+
     # 创建客户端
     client = 预测Client(config)
-    
+
     # 调用 API
     result = await client.predict_bolt(
         bolt_id="B001",
         data=[["2025-01-01", 400.0]]
     )
     print(result)
-    
+
     await client.close()
 
 asyncio.run(main())

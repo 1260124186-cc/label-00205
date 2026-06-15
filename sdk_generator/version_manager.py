@@ -53,20 +53,20 @@ class VersionManager:
     def __init__(
         self,
         api_version: str = "v1",
-        current_sdk_version: Optional[str] = None,
+        current_version: Optional[str] = None,
     ):
         """
         初始化版本管理器
 
         Args:
             api_version: API 版本（如 v1）
-            current_sdk_version: 当前 SDK 版本
+            current_version: 当前 SDK 版本
         """
         self.api_version = api_version
         self.api_major = self._parse_api_major(api_version)
 
-        if current_sdk_version:
-            self.current_version = self._parse_semver(current_sdk_version)
+        if current_version:
+            self.current_version = self._parse_semver(current_version)
         else:
             self.current_version = (self.api_major, 0, 0)
 

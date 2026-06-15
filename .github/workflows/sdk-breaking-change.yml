@@ -40,35 +40,37 @@ jobs:
 
       - name: Export old OpenAPI spec
         run: |
-          cd old/backend
           python -m sdk_generator.cli export \
-            --app-module main:create_app \
-            --output ../../old-openapi.json \
+            --app-module backend.main:create_app \
+            --output ../old-openapi.json \
             --format json \
             --api-version v1
+        working-directory: old
         env:
-          PYTHONPATH: .
+          PYTHONPATH: ${{ github.workspace }}/old
 
       - name: Export new OpenAPI spec
         run: |
-          cd new/backend
           python -m sdk_generator.cli export \
-            --app-module main:create_app \
-            --output ../../new-openapi.json \
+            --app-module backend.main:create_app \
+            --output ../new-openapi.json \
             --format json \
             --api-version v1
+        working-directory: new
         env:
-          PYTHONPATH: .
+          PYTHONPATH: ${{ github.workspace }}/new
 
       - name: Detect breaking changes
         id: breaking-change
         run: |
-          cd new
           python -m sdk_generator.cli breaking-change \
             ../old-openapi.json \
             ../new-openapi.json \
             --output breaking-change-report.json \
             --fail-on-breaking
+        working-directory: new
+        env:
+          PYTHONPATH: ${{ github.workspace }}/new
         continue-on-error: true
 
       - name: Upload breaking change report

@@ -105,8 +105,11 @@ class JavaSDKGenerator(BaseSDKGenerator):
         lines.append("}")
         return "\n".join(lines)
 
-    def _map_java_type(self, schema: Dict[str, Any]) -> str:
+    def _map_java_type(self, schema: Any) -> str:
         """映射 OpenAPI 类型到 Java 类型"""
+        if not isinstance(schema, dict):
+            return "Object"
+
         if "$ref" in schema:
             ref_name = schema["$ref"].split("/")[-1]
             return self._to_pascal_case(ref_name)
@@ -134,7 +137,7 @@ class JavaSDKGenerator(BaseSDKGenerator):
             return f"List<{item_type}>"
         elif type_name == "object":
             additional = schema.get("additionalProperties", {})
-            if additional:
+            if isinstance(additional, dict) and additional:
                 value_type = self._map_java_type(additional)
                 return f"Map<String, {value_type}>"
             return "Map<String, Object>"
@@ -147,12 +150,13 @@ class JavaSDKGenerator(BaseSDKGenerator):
         api_dir = pkg_dir / "api"
         groups = self._parse_paths()
 
-        for group in groups:
+        for i, group in enumerate(groups):
             tag = group["tag"]
             operations = group["operations"]
-            class_name = self._to_pascal_case(tag) + "Client"
+            sanitized_tag = self._sanitize_tag(tag, i)
+            class_name = self._to_pascal_case(sanitized_tag) + "Client"
             file_name = class_name + ".java"
-            code = self._generate_api_client_class(class_name, tag, operations)
+            code = self._generate_api_client_class(class_name, sanitized_tag, operations)
             (api_dir / file_name).write_text(code)
 
     def _generate_api_client_class(
@@ -167,6 +171,7 @@ class JavaSDKGenerator(BaseSDKGenerator):
         lines = [
             f"package {package_name}.api;",
             "",
+            f"import {package_name}.core.ApiClientConfig;",
             f"import {package_name}.core.BaseAPIClient;",
             f"import {package_name}.core.CursorPaginator;",
             f"import {package_name}.model.*;",
@@ -300,7 +305,8 @@ class JavaSDKGenerator(BaseSDKGenerator):
                 lines.append(f"                body,")
             else:
                 lines.append(f"                null,")
-            lines.append(f"                {return_type}.class")
+            raw_return_type = return_type.split("<")[0].split(" ")[-1]
+            lines.append(f"                {raw_return_type}.class")
             lines.append(f"        );")
 
         lines.append(f"    }}")
@@ -773,8 +779,10 @@ public abstract class BaseAPIClient {{
     def _generate_package_files(self, output_dir: Path) -> None:
         """生成包配置文件"""
         (output_dir / "pom.xml").write_text(self._generate_pom_xml())
-        (output_dir / ".mvn" / "maven.config").write_text("-s .mvn/settings.xml\n")
-        (output_dir / ".mvn" / "settings.xml").write_text(self._generate_maven_settings())
+        mvn_dir = output_dir / ".mvn"
+        mvn_dir.mkdir(parents=True, exist_ok=True)
+        (mvn_dir / "maven.config").write_text("-s .mvn/settings.xml\n")
+        (mvn_dir / "settings.xml").write_text(self._generate_maven_settings())
 
     def _generate_pom_xml(self) -> str:
         """生成 pom.xml"""

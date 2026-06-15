@@ -38,14 +38,13 @@ jobs:
 
       - name: Export OpenAPI spec
         run: |
-          cd backend
           python -m sdk_generator.cli export \
-            --app-module main:create_app \
-            --output ../openapi.json \
+            --app-module backend.main:create_app \
+            --output openapi.json \
             --format json \
             --api-version v1
         env:
-          PYTHONPATH: .
+          PYTHONPATH: ${{ github.workspace }}
 
       - name: Generate ${{ matrix.language }} SDK
         run: |
@@ -54,6 +53,8 @@ jobs:
             --output ./sdks \
             --api-version v1 \
             --base-url ${{ secrets.API_BASE_URL || 'https://api.example.com' }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
 
       - name: Set up Node.js
         if: matrix.language == 'typescript'

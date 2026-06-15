@@ -52,14 +52,25 @@ class GoSDKGenerator(BaseSDKGenerator):
 
     def _generate_struct(self, name: str, schema: Dict[str, Any]) -> str:
         """生成 Go struct"""
+        import re
+
         struct_name = self._to_pascal_case(name)
         properties = schema.get("properties", {})
         required = set(schema.get("required", []))
 
-        lines = [
-            f"// {struct_name} {schema.get('description', name)}",
-            f"type {struct_name} struct {{",
-        ]
+        description = schema.get("description", name)
+        description_lines = []
+        if description:
+            for line in str(description).split("\n"):
+                clean_line = re.sub(r"[^\x00-\x7F]+", "", line).strip()
+                if clean_line:
+                    description_lines.append(f"// {clean_line}")
+
+        lines = []
+        lines.extend(description_lines)
+        if not description_lines:
+            lines.append(f"// {struct_name}")
+        lines.append(f"type {struct_name} struct {{")
 
         for prop_name, prop_schema in properties.items():
             go_name = self._to_pascal_case(prop_name)
@@ -76,11 +87,15 @@ class GoSDKGenerator(BaseSDKGenerator):
         lines.append("}")
         return "\n".join(lines)
 
-    def _map_go_type(self, schema: Dict[str, Any]) -> str:
+    def _map_go_type(self, schema: Any, with_models_prefix: bool = False) -> str:
         """映射 OpenAPI 类型到 Go 类型"""
+        if not isinstance(schema, dict):
+            return "interface{}"
+
         if "$ref" in schema:
             ref_name = schema["$ref"].split("/")[-1]
-            return "*" + self._to_pascal_case(ref_name)
+            type_name = self._to_pascal_case(ref_name)
+            return f"*models.{type_name}" if with_models_prefix else f"*{type_name}"
 
         type_name = schema.get("type", "interface{}")
         format_name = schema.get("format", "")
@@ -101,13 +116,13 @@ class GoSDKGenerator(BaseSDKGenerator):
             return "bool"
         elif type_name == "array":
             items = schema.get("items", {})
-            item_type = self._map_go_type(items)
+            item_type = self._map_go_type(items, with_models_prefix)
             return "[]" + item_type.lstrip("*")
         elif type_name == "object":
             additional = schema.get("additionalProperties", {})
-            if additional:
-                value_type = self._map_go_type(additional)
-                return "map[string]" + value_type
+            if isinstance(additional, dict) and additional:
+                value_type = self._map_go_type(additional, with_models_prefix)
+                return f"map[string]{value_type}"
             return "map[string]interface{}"
         else:
             return "interface{}"
@@ -127,12 +142,13 @@ import "time"
         api_dir = output_dir / pkg_name / "api"
         groups = self._parse_paths()
 
-        for group in groups:
+        for i, group in enumerate(groups):
             tag = group["tag"]
             operations = group["operations"]
-            file_name = self._to_snake_case(tag) + ".go"
-            struct_name = self._to_pascal_case(tag) + "Client"
-            code = self._generate_api_client_file(struct_name, tag, operations)
+            sanitized_tag = self._sanitize_tag(tag, i)
+            file_name = self._to_snake_case(sanitized_tag) + ".go"
+            struct_name = self._to_pascal_case(sanitized_tag) + "Client"
+            code = self._generate_api_client_file(struct_name, sanitized_tag, operations)
             (api_dir / file_name).write_text(code)
 
     def _generate_api_client_file(
@@ -144,13 +160,33 @@ import "time"
         """生成单个 API 客户端文件"""
         pkg = self.config.go["package_name"]
 
+        needs_models = False
+        for op in operations:
+            operation = op["operation"]
+            if "requestBody" in operation:
+                needs_models = True
+            responses = operation.get("responses", {})
+            for code in ["200", "201", "202", "204"]:
+                if code in responses:
+                    content = responses[code].get("content", {})
+                    json_content = content.get("application/json", {})
+                    schema = json_content.get("schema", {})
+                    if "$ref" in schema:
+                        needs_models = True
+                    if schema.get("type") == "array" and "$ref" in schema.get("items", {}):
+                        needs_models = True
+
         lines = [
             "package api",
             "",
-            f'import "{pkg}/{pkg}/models"',
-            'import "fmt"',
-            'import "net/url"',
-            "",
+            "import \"context\"",
+            "import \"fmt\"",
+            "import \"net/url\"",
+        ]
+        if needs_models:
+            lines.append(f'import "{self.config.go["module_name"]}/{pkg}/models"')
+        lines.append("")
+        lines.extend([
             f"// {struct_name} {tag} API 客户端",
             f"type {struct_name} struct {{",
             "\tclient *BaseClient",
@@ -161,7 +197,7 @@ import "time"
             f"\treturn &{struct_name}{{client: client}}",
             "}",
             "",
-        ]
+        ])
 
         for op in operations:
             method_code = self._generate_api_method(op, struct_name)
@@ -200,7 +236,7 @@ import "time"
 
         for p in path_params:
             param_name = self._to_camel_case(p["name"])
-            param_type = self._map_go_type(p.get("schema", {})).lstrip("*")
+            param_type = self._map_go_type(p.get("schema", {}), with_models_prefix=True).lstrip("*")
             params_list.append(f"{param_name} {param_type}")
 
         if body_param:
@@ -209,12 +245,12 @@ import "time"
                 .get("application/json", {})
                 .get("schema", {})
             )
-            body_type = self._map_go_type(body_schema).lstrip("*")
+            body_type = self._map_go_type(body_schema, with_models_prefix=True).lstrip("*")
             params_list.append(f"body *{body_type}")
 
         for p in query_params:
             param_name = self._to_camel_case(p["name"])
-            param_type = self._map_go_type(p.get("schema", {})).lstrip("*")
+            param_type = self._map_go_type(p.get("schema", {}), with_models_prefix=True).lstrip("*")
             required = p.get("required", False)
             if not required:
                 param_type = "*" + param_type
@@ -233,7 +269,7 @@ import "time"
             json_content = content.get("application/json", {})
             schema = json_content.get("schema", {})
             if schema:
-                return_type = self._map_go_type(schema).lstrip("*")
+                return_type = self._map_go_type(schema, with_models_prefix=True).lstrip("*")
 
         method_path = operation["path"]
         for p in path_params:
@@ -247,10 +283,7 @@ import "time"
         ]
 
         for i, param in enumerate(params_list):
-            if i < len(params_list) - 1:
-                lines.append(f"\t{param},")
-            else:
-                lines.append(f"\t{param}")
+            lines.append(f"\t{param},")
 
         if is_paginated:
             lines.append(f") (*CursorPaginator, error) {{")
@@ -577,10 +610,7 @@ func (c *BaseClient) Request(
         return f'''package api
 
 import (
-	"context"
-	"net/url"
-
-	"{pkg}/{pkg}/internal/client"
+	"{self.config.go["module_name"]}/{pkg}/internal/client"
 )
 
 // BaseClient 基础 API 客户端
@@ -753,12 +783,11 @@ func (p *CursorPaginator) All(ctx context.Context, items interface{{}}, limit ..
 
 import (
 	"{go_cfg["module_name"]}/{pkg_name}/api"
-	"{go_cfg["module_name"]}/{pkg_name}/models"
 )
 
 // SDK 入口别名
 type Config = api.Config
-type Client = api.Client
+type Client = api.BaseClient
 
 // NewClient 创建 SDK 客户端
 func NewClient(config Config) *Client {{
@@ -769,11 +798,6 @@ func NewClient(config Config) *Client {{
 func DefaultConfig() Config {{
 	return api.DefaultConfig()
 }}
-
-// 导出所有模型和 API
-var (
-	Models = models.AllModels
-)
 ''')
 
     def _generate_readme(self, output_dir: Path) -> None:

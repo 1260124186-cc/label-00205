@@ -151,7 +151,11 @@ class BaseSDKGenerator(ABC):
 
     def _to_pascal_case(self, name: str) -> str:
         """转换为 PascalCase"""
-        parts = re.sub(r"[^a-zA-Z0-9]", "_", name).split("_")
+        name_str = str(name)
+        name_str = re.sub(r"[^a-zA-Z0-9]", "_", name_str)
+        name_str = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name_str)
+        name_str = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name_str)
+        parts = name_str.split("_")
         return "".join(part.capitalize() for part in parts if part)
 
     def _to_camel_case(self, name: str) -> str:
@@ -160,14 +164,96 @@ class BaseSDKGenerator(ABC):
         return pascal[0].lower() + pascal[1:] if pascal else ""
 
     def _to_snake_case(self, name: str) -> str:
-        """转换为 snake_case"""
+        """转换为 snake_case，同时处理特殊字符"""
+        name = re.sub(r"[^a-zA-Z0-9_]", "_", str(name))
         name = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
         name = re.sub("([a-z0-9])([A-Z])", r"\1_\2", name)
-        return name.lower()
+        name = re.sub(r"_+", "_", name)
+        return name.lower().strip("_")
 
     def _to_kebab_case(self, name: str) -> str:
         """转换为 kebab-case"""
         return self._to_snake_case(name).replace("_", "-")
+
+    def _safe_filename(self, name: str) -> str:
+        """
+        生成安全的文件名，确保不包含中文、空格和特殊字符。
+        对于中文标签，转换为 api_group_<序号> 的形式。
+        """
+        import re
+        import hashlib
+
+        name_str = str(name).strip()
+
+        if not name_str:
+            return "api"
+
+        if re.match(r"^[a-zA-Z0-9_]+$", name_str):
+            return name_str.lower()
+
+        if re.search(r"[^\x00-\x7F]", name_str):
+            hash_digest = hashlib.md5(name_str.encode("utf-8")).hexdigest()[:8]
+            safe_name = self._to_snake_case(
+                re.sub(r"[^\x00-\x7F]", "", name_str)
+            )
+            if not safe_name or len(safe_name) < 3:
+                safe_name = "api_group"
+            return f"{safe_name}_{hash_digest}"
+
+        safe_name = re.sub(r"[^a-zA-Z0-9]", "_", name_str)
+        safe_name = re.sub(r"_+", "_", safe_name).strip("_")
+        return safe_name.lower()
+
+    def _sanitize_tag(self, tag: str, index: int = 0) -> str:
+        """
+        清理标签名，确保可用于文件名和类名。
+        对于中文标签，返回英文描述或序号形式。
+        """
+        import re
+
+        tag_str = str(tag).strip()
+
+        if not re.search(r"[^\x00-\x7F]", tag_str):
+            return tag_str
+
+        tag_mappings = {
+            "预测": "Prediction",
+            "风险评估": "RiskAssessment",
+            "模型管理": "ModelManagement",
+            "配置": "Config",
+            "联邦学习": "FederatedLearning",
+            "告警管理": "AlertManagement",
+            "告警订阅": "AlertSubscription",
+            "通知渠道": "NotificationChannel",
+            "工单管理": "WorkOrder",
+            "工单统计": "WorkOrderStats",
+            "CMMS集成": "CMMSIntegration",
+            "合规审计": "ComplianceAudit",
+            "数据质量": "DataQuality",
+            "边缘计算": "EdgeComputing",
+            "多租户": "MultiTenant",
+            "组织架构": "Organization",
+            "配额管理": "QuotaManagement",
+            "租户用户": "TenantUser",
+            "租户API Key": "TenantApiKey",
+            "知识库CBR": "KnowledgeBase",
+            "健康度评分": "HealthScore",
+            "流式预测": "StreamPrediction",
+            "配置中心": "ConfigCenter",
+            "调度器": "Scheduler",
+            "异常管理": "AnomalyManagement",
+            "API密钥管理": "ApiKeyManagement",
+            "API审计日志": "ApiAuditLog",
+            "LLM智能诊断": "LLMDiagnosis",
+            "碳排与能效分析": "CarbonAnalysis",
+            "系统": "System",
+            "监控": "Monitoring",
+        }
+
+        if tag_str in tag_mappings:
+            return tag_mappings[tag_str]
+
+        return f"ApiGroup{index + 1}"
 
     def _get_type_mapping(self) -> Dict[str, str]:
         """获取 OpenAPI 类型到目标语言的映射"""

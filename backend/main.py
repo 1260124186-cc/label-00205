@@ -45,14 +45,14 @@ def setup_logging() -> None:
     log_config = config.get('logging', {})
     log_level = log_config.get('level', 'INFO')
     log_file = log_config.get('file', './logs/app.log')
-    
+
     # 确保日志目录存在
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # 配置结构化日志
     setup_structured_logging()
-    
+
     # 添加文件处理器
     log_format_file = (
         "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
@@ -62,7 +62,7 @@ def setup_logging() -> None:
         "bolt_id={extra[bolt_id]} | "
         "{message}"
     )
-    
+
     logger.add(
         log_file,
         format=log_format_file,
@@ -71,7 +71,7 @@ def setup_logging() -> None:
         retention=log_config.get('backup_count', 5),
         encoding='utf-8'
     )
-    
+
     logger.info(f"日志系统初始化完成，级别: {log_level}")
 
 
@@ -82,20 +82,20 @@ async def lifespan(app: FastAPI):
     """
     # 启动时
     logger.info(f"螺栓预紧力预测系统启动中... 版本: {__version__}")
-    
+
     # 显示设备信息
     device_info = get_all_device_info()
     logger.info(f"计算设备: {device_info}")
-    
+
     # 创建数据表
     try:
         db_manager.create_tables()
     except Exception as e:
         logger.warning(f"数据表创建失败（数据库可能未配置）: {e}")
-    
+
     # 启动调度器
     scheduler.start()
-    
+
     # 启动流式预测引擎（如果配置启用）
     try:
         stream_enabled = config.get('stream_prediction.enabled', False)
@@ -106,14 +106,14 @@ async def lifespan(app: FastAPI):
             logger.info("流式预测引擎已启动")
     except Exception as e:
         logger.warning(f"流式预测引擎启动失败: {e}")
-    
+
     logger.info("系统启动完成")
-    
+
     yield
-    
+
     # 关闭时
     logger.info("系统关闭中...")
-    
+
     # 停止流式预测引擎
     try:
         from app.streaming import get_stream_engine
@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
             logger.info("流式预测引擎已停止")
     except Exception as e:
         logger.warning(f"流式预测引擎停止失败: {e}")
-    
+
     scheduler.stop()
     db_manager.close()
     logger.info("系统已关闭")
@@ -132,7 +132,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     """
     创建FastAPI应用
-    
+
     Returns:
         FastAPI: 应用实例
     """
@@ -171,10 +171,10 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan
     )
-    
+
     # 请求上下文中间件（必须放在最前面）
     app.add_middleware(RequestContextMiddleware)
-    
+
     # CORS中间件
     app.add_middleware(
         CORSMiddleware,
@@ -183,12 +183,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"]
     )
-    
+
     # 注册路由
     app.include_router(router, prefix="/api/v1")
 
     from app.api.schemas import HealthResponse, HealthComponentStatus
-    from app import __version__
 
     @app.get("/health", response_model=HealthResponse, tags=["系统"], summary="健康检查（公开免鉴权）")
     async def health_check():
@@ -211,13 +210,13 @@ def create_app() -> FastAPI:
             timestamp=datetime.now(),
             components=component_status
         )
-    
+
     # Prometheus metrics 端点
     @app.get("/metrics", tags=["监控"])
     async def get_metrics():
         """
         获取 Prometheus 格式的监控指标
-        
+
         返回系统运行指标，包括：
         - HTTP 请求数和延迟
         - 预测请求数和延迟
@@ -231,7 +230,7 @@ def create_app() -> FastAPI:
             content=metrics_text,
             media_type="text/plain; version=0.0.4; charset=utf-8"
         )
-    
+
     return app
 
 
@@ -240,12 +239,12 @@ def train_models() -> None:
     训练所有模型
     """
     logger.info("开始训练模型...")
-    
+
     from app.services.training_service import TrainingService
-    
+
     service = TrainingService()
     results = service.train_from_csv()
-    
+
     logger.info(f"训练完成: {results}")
 
 
@@ -254,15 +253,15 @@ def run_prediction() -> None:
     执行一次预测
     """
     logger.info("开始执行预测...")
-    
+
     from app.services.prediction_service import PredictionService
-    
+
     service = PredictionService()
-    
+
     # 批量预测
     service.batch_predict_from_db('bolt')
     service.batch_predict_from_db('flange')
-    
+
     logger.info("预测完成")
 
 
@@ -295,30 +294,30 @@ def main():
         default=None,
         help='API服务端口'
     )
-    
+
     args = parser.parse_args()
-    
+
     # 配置日志
     setup_logging()
-    
+
     if args.train:
         train_models()
         return
-    
+
     if args.predict:
         run_prediction()
         return
-    
+
     # 启动API服务
     api_config = config.get('api', {})
     host = args.host or api_config.get('host', '0.0.0.0')
     port = args.port or api_config.get('port', 8000)
     debug = api_config.get('debug', False)
-    
+
     logger.info(f"启动API服务: {host}:{port}")
-    
+
     app = create_app()
-    
+
     uvicorn.run(
         app,
         host=host,

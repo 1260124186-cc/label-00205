@@ -78,11 +78,15 @@ class TypeScriptSDKGenerator(BaseSDKGenerator):
         lines.append("}")
         return "\n".join(lines)
 
-    def _map_ts_type(self, schema: Dict[str, Any]) -> str:
+    def _map_ts_type(self, schema: Any, with_models_prefix: bool = False) -> str:
         """映射 OpenAPI 类型到 TypeScript 类型"""
+        if not isinstance(schema, dict):
+            return "any"
+
         if "$ref" in schema:
             ref_name = schema["$ref"].split("/")[-1]
-            return self._to_pascal_case(ref_name)
+            type_name = self._to_pascal_case(ref_name)
+            return f"Models.{type_name}" if with_models_prefix else type_name
 
         type_name = schema.get("type", "any")
         format_name = schema.get("format", "")
@@ -99,12 +103,12 @@ class TypeScriptSDKGenerator(BaseSDKGenerator):
             return "boolean"
         elif type_name == "array":
             items = schema.get("items", {})
-            item_type = self._map_ts_type(items)
+            item_type = self._map_ts_type(items, with_models_prefix)
             return f"{item_type}[]"
         elif type_name == "object":
             additional = schema.get("additionalProperties", {})
-            if additional:
-                value_type = self._map_ts_type(additional)
+            if isinstance(additional, dict) and additional:
+                value_type = self._map_ts_type(additional, with_models_prefix)
                 return f"Record<string, {value_type}>"
             return "Record<string, any>"
         else:
@@ -120,13 +124,15 @@ class TypeScriptSDKGenerator(BaseSDKGenerator):
         api_dir = output_dir / "src" / "api"
         groups = self._parse_paths()
 
-        for group in groups:
+        for i, group in enumerate(groups):
             tag = group["tag"]
             operations = group["operations"]
-            file_name = self._to_camel_case(tag) + ".ts"
-            class_name = self._to_pascal_case(tag) + "Client"
-            code = self._generate_api_client_class(class_name, tag, operations)
+            sanitized_tag = self._sanitize_tag(tag, i)
+            file_name = self._to_camel_case(sanitized_tag) + ".ts"
+            class_name = self._to_pascal_case(sanitized_tag) + "Client"
+            code = self._generate_api_client_class(class_name, sanitized_tag, operations)
             (api_dir / file_name).write_text(code)
+            group["_sanitized_tag"] = sanitized_tag
 
         (api_dir / "index.ts").write_text(self._generate_api_index(groups))
 
@@ -179,7 +185,7 @@ class TypeScriptSDKGenerator(BaseSDKGenerator):
         params_list = []
         for p in path_params:
             param_name = self._to_camel_case(p["name"])
-            param_type = self._map_ts_type(p.get("schema", {}))
+            param_type = self._map_ts_type(p.get("schema", {}), with_models_prefix=True)
             params_list.append(f"{param_name}: {param_type}")
 
         if body_param:
@@ -188,12 +194,12 @@ class TypeScriptSDKGenerator(BaseSDKGenerator):
                 .get("application/json", {})
                 .get("schema", {})
             )
-            body_type = self._map_ts_type(body_schema)
+            body_type = self._map_ts_type(body_schema, with_models_prefix=True)
             params_list.append(f"body: {body_type}")
 
         for p in query_params:
             param_name = self._to_camel_case(p["name"])
-            param_type = self._map_ts_type(p.get("schema", {}))
+            param_type = self._map_ts_type(p.get("schema", {}), with_models_prefix=True)
             required = p.get("required", False)
             if required:
                 params_list.append(f"{param_name}: {param_type}")
@@ -213,7 +219,7 @@ class TypeScriptSDKGenerator(BaseSDKGenerator):
             json_content = content.get("application/json", {})
             schema = json_content.get("schema", {})
             if schema:
-                return_type = self._map_ts_type(schema)
+                return_type = self._map_ts_type(schema, with_models_prefix=True)
 
         method_path = operation["path"]
         for p in path_params:
@@ -283,9 +289,9 @@ class TypeScriptSDKGenerator(BaseSDKGenerator):
         """生成 api index.ts"""
         exports = []
         for group in groups:
-            tag = group["tag"]
-            file_name = self._to_camel_case(tag)
-            class_name = self._to_pascal_case(tag) + "Client"
+            sanitized_tag = group.get("_sanitized_tag", group["tag"])
+            file_name = self._to_camel_case(sanitized_tag)
+            class_name = self._to_pascal_case(sanitized_tag) + "Client"
             exports.append(f"export {{ {class_name} }} from './{file_name}';")
         return "\n".join(exports) + "\n"
 

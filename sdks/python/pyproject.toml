@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bolt_prediction_sdk"
+version = "1.0.0"
+description = "螺栓预紧力预测系统 Python SDK"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "SDK Generator"},
+]
+dependencies = [
+    "httpx>=0.26.0",
+    "pydantic>=2.0.0",
+    "tenacity>=8.2.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/bolt-prediction/sdk-python"
+
+[tool.setuptools.packages.find]
+include = ["bolt_prediction_sdk*"]
