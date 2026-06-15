@@ -792,13 +792,13 @@ export interface APIKeyLoginRequest {
 }
 
 // 角色到视图的映射（哪些角色可以看到哪些导航页面）
-export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config'>> = {
-  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config'],
-  admin: ['monitoring', 'alert', 'trend', 'model', 'config'],
+export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated'>> = {
+  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated'],
+  admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated'],
   operator: ['monitoring', 'alert', 'trend', 'model'],
   viewer: ['monitoring', 'alert', 'trend'],
   anonymous: [],
-  api_key: ['monitoring', 'alert', 'trend', 'model', 'config']
+  api_key: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated']
 }
 
 // 角色到权限的映射
@@ -809,4 +809,190 @@ export const RolePermissionMap: Record<UserRole, Permission[]> = {
   viewer: ['read'],
   anonymous: [],
   api_key: ['read']
+}
+
+// ==================== 联邦学习相关类型 ====================
+
+export type PrivacyMechanism = 'none' | 'dp' | 'secagg' | 'combined'
+
+export const PrivacyMechanismMap: Record<PrivacyMechanism, string> = {
+  none: '无保护',
+  dp: '差分隐私',
+  secagg: '安全聚合',
+  combined: '组合保护'
+}
+
+export type AggregationStrategy = 'fedavg' | 'weighted_avg' | 'median' | 'trimmed_mean' | 'fedprox' | 'fedopt'
+
+export const AggregationStrategyMap: Record<AggregationStrategy, string> = {
+  fedavg: 'FedAvg (联邦平均)',
+  weighted_avg: '加权平均',
+  median: '中位数聚合',
+  trimmed_mean: '修剪均值',
+  fedprox: 'FedProx',
+  fedopt: 'FedOpt'
+}
+
+export type RoundStatus = 'not_started' | 'waiting' | 'aggregating' | 'completed' | 'failed'
+
+export const RoundStatusMap: Record<RoundStatus, string> = {
+  not_started: '未开始',
+  waiting: '等待更新',
+  aggregating: '聚合中',
+  completed: '已完成',
+  failed: '失败'
+}
+
+export const RoundStatusColorMap: Record<RoundStatus, string> = {
+  not_started: '#64748b',
+  waiting: '#eab308',
+  aggregating: '#3b82f6',
+  completed: '#22c55e',
+  failed: '#ef4444'
+}
+
+export type UpdateType = 'weights' | 'gradients' | 'difference'
+
+export const UpdateTypeMap: Record<UpdateType, string> = {
+  weights: '完整权重',
+  gradients: '梯度',
+  difference: '权重差异'
+}
+
+export interface FederatedClient {
+  client_id: string
+  factory_name?: string
+  location?: string
+  registered_at: string
+  last_seen: string
+  rounds_participated: number
+  total_samples: number
+  is_active: boolean
+  info?: Record<string, any>
+}
+
+export interface FederatedClientStatus {
+  client_id: string
+  factory_id: string
+  model_type: string | null
+  node_id: string | null
+  current_round: number
+  has_global_model: boolean
+  has_local_model: boolean
+  training_count: number
+  privacy_mechanism: string
+  update_type: string
+  two_level_arch_enabled: boolean
+  last_update_time: string | null
+}
+
+export interface FederatedServerStatus {
+  registered_clients: number
+  active_clients: number
+  total_rounds: number
+  completed_rounds: number
+  failed_rounds: number
+  aggregation_strategy: string
+  managed_models: string[]
+  current_round: FederatedRound | null
+}
+
+export interface FederatedRound {
+  round_id: number
+  model_type: string
+  node_id: string
+  status: RoundStatus
+  start_time: string
+  end_time?: string
+  expected_clients: string[]
+  received_updates: number
+  metrics?: Record<string, any>
+}
+
+export interface FederatedModelVersion {
+  version: number
+  round_id: number
+  model_type: string
+  node_id: string
+  created_at: string
+  metrics: Record<string, number>
+  num_clients: number
+}
+
+export interface FederatedModelHistory {
+  model_type: string
+  node_id: string
+  history: FederatedModelVersion[]
+}
+
+export interface FederatedPrivacyConfig {
+  mechanism: PrivacyMechanism
+  epsilon: number
+  delta: number
+  noise_scale: number
+  clip_norm: number
+  num_parties: number
+  secret_share_threshold: number
+}
+
+export interface FederatedAggregatorConfig {
+  strategy: AggregationStrategy
+  trim_ratio: number
+  mu: number
+  server_learning_rate: number
+  min_clients_per_round: number
+  enable_outlier_detection: boolean
+}
+
+export interface FederatedLocalTrainRequest {
+  client_id: string
+  model_type: string
+  node_id: string
+  local_epochs?: number
+  fine_tune: boolean
+  train_data?: any[]
+  train_labels?: number[]
+}
+
+export interface FederatedLocalTrainResponse {
+  client_id: string
+  model_type: string
+  node_id: string
+  status: string
+  message: string
+  num_samples: number
+  training_time: number
+  metrics: Record<string, number>
+}
+
+export interface FederatedRoundStartRequest {
+  model_type: string
+  node_id: string
+  expected_clients?: string[]
+}
+
+export interface FederatedRoundStartResponse {
+  round_id: number
+  model_type: string
+  node_id: string
+  status: string
+  expected_clients: string[]
+  started_at: string
+}
+
+export interface FederatedRoundAggregateRequest {
+  model_type: string
+  node_id: string
+}
+
+export interface FederatedRoundAggregateResponse {
+  round_id: number
+  model_type: string
+  node_id: string
+  status: string
+  message: string
+  num_clients_aggregated: number
+  version?: number
+  metrics?: Record<string, any>
+  aggregated_at: string
 }

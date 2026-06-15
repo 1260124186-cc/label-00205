@@ -29,7 +29,7 @@ export function useAuth() {
   const displayName = computed<string>(() => currentUser.value?.display_name || '未登录')
   const authMethod = computed(() => currentUser.value?.auth_method || 'none')
 
-  const availableViews = computed<Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config'>>(() => {
+  const availableViews = computed<Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated'>>(() => {
     const role = userRole.value
     return RoleViewPermissions[role] || []
   })
@@ -39,6 +39,7 @@ export function useAuth() {
   const canViewTrend = computed(() => availableViews.value.includes('trend'))
   const canViewModel = computed(() => availableViews.value.includes('model'))
   const canViewConfig = computed(() => availableViews.value.includes('config'))
+  const canViewFederated = computed(() => availableViews.value.includes('federated'))
 
   const canWrite = computed(() => {
     const perms = permissions.value
@@ -206,6 +207,7 @@ export function useAuth() {
     canViewTrend,
     canViewModel,
     canViewConfig,
+    canViewFederated,
     canWrite,
     isAdmin,
     isOperator,

@@ -27,13 +27,14 @@
     server.distribute_model(global_model)
 """
 
-from app.federated.privacy import PrivacyEngine, DifferentialPrivacy, SecureAggregator
+from app.federated.privacy import PrivacyEngine, DifferentialPrivacy, SecureAggregator, create_privacy_engine
 from app.federated.aggregator import (
     ModelAggregator,
     FedAvgAggregator,
     WeightedAvgAggregator,
     MedianAggregator,
-    TrimmedMeanAggregator
+    TrimmedMeanAggregator,
+    create_aggregator
 )
 from app.federated.client import FederatedClient
 from app.federated.server import FederatedServer
@@ -42,11 +43,13 @@ __all__ = [
     'PrivacyEngine',
     'DifferentialPrivacy',
     'SecureAggregator',
+    'create_privacy_engine',
     'ModelAggregator',
     'FedAvgAggregator',
     'WeightedAvgAggregator',
     'MedianAggregator',
     'TrimmedMeanAggregator',
+    'create_aggregator',
     'FederatedClient',
     'FederatedServer',
 ]

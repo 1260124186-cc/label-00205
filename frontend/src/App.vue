@@ -81,6 +81,20 @@
             </svg>
             配置中心
           </button>
+          <button
+            v-if="canViewFederated"
+            class="nav-tab"
+            :class="{ active: currentView === 'federated' }"
+            @click="switchView('federated')"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+              <path d="M2 17l10 5 10-5"></path>
+              <path d="M2 12l10 5 10-5"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+            联邦学习
+          </button>
         </nav>
         <div class="realtime-status" :class="{ active: autoRefresh }" v-if="currentView === 'monitoring'">
           <span class="status-dot"></span>
@@ -245,6 +259,8 @@
       <ModelManagement v-else-if="currentView === 'model'" />
 
       <ConfigurationCenter v-else-if="currentView === 'config'" />
+
+      <FederatedLearning v-else-if="currentView === 'federated'" />
     </main>
   </div>
 </template>
@@ -259,6 +275,7 @@ import AlertCenter from '@/components/AlertCenter.vue'
 import TrendAnalysis from '@/components/TrendAnalysis.vue'
 import ModelManagement from '@/components/ModelManagement.vue'
 import ConfigCenter from '@/components/ConfigCenter.vue'
+import FederatedLearning from '@/components/FederatedLearning.vue'
 import LoginView from '@/components/LoginView.vue'
 import { fetchTopology, fetchCollectors, fetchPositions } from '@/api/monitoring'
 import { fetchAlertStats } from '@/api/alert'
@@ -280,12 +297,13 @@ const {
   canViewTrend,
   canViewModel,
   canViewConfig,
+  canViewFederated,
   canWrite,
   hasPermission,
   logout
 } = useAuth()
 
-type ViewName = 'monitoring' | 'alert' | 'trend' | 'model' | 'config'
+type ViewName = 'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated'
 
 const currentView = ref<ViewName>('monitoring')
 const showUserMenu = ref(false)
@@ -370,7 +388,8 @@ function switchView(view: ViewName) {
     alert: canViewAlert.value,
     trend: canViewTrend.value,
     model: canViewModel.value,
-    config: canViewConfig.value
+    config: canViewConfig.value,
+    federated: canViewFederated.value
   }
   if (!allowed[view]) return
   currentView.value = view
@@ -383,7 +402,8 @@ function ensureValidView() {
     alert: canViewAlert.value,
     trend: canViewTrend.value,
     model: canViewModel.value,
-    config: canViewConfig.value
+    config: canViewConfig.value,
+    federated: canViewFederated.value
   }
   if (!allowed[currentView.value]) {
     const firstAllowed = (Object.keys(allowed) as ViewName[]).find(v => allowed[v])
