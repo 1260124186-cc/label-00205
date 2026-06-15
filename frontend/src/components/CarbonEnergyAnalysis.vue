@@ -42,15 +42,14 @@
         <div class="ranking-view">
           <div class="summary-cards">
             <div class="summary-card">
-              <div class="summary-icon" style="color: color: var(--color-blue);">
-              </div>
+              <div class="summary-icon"></div>
               <div class="summary-label">报告期</div>
               <div class="summary-value">{{ rankingReport.report_month || '--' }}</div>
             </div>
             <div class="summary-card accent-blue">
               <div class="summary-label">月度碳排增量</div>
               <div class="summary-value">
-                <span class="summary-big">{{ (rankingReport.total_monthly_carbon_increment_kg?.toFixed?.(2) || '0.00' }}</span>
+                <span class="summary-big">{{ rankingCarbonKg }}</span>
                 <span class="summary-unit">kgCO₂e</span>
               </div>
               <div class="summary-sub">估算值，不用于精确计量</div>
@@ -58,7 +57,7 @@
             <div class="summary-card accent-orange">
               <div class="summary-label">月度泄漏量</div>
               <div class="summary-value">
-                <span class="summary-big">{{ (rankingReport.total_monthly_leakage_volume_m3?.toFixed?.(4) || '0.0000' }}</span>
+                <span class="summary-big">{{ rankingLeakageM3 }}</span>
                 <span class="summary-unit">m³</span>
               </div>
               <div class="summary-sub">基于预紧力劣化估算</div>
@@ -272,45 +271,45 @@
               <div class="esg-sum-card main">
                 <div class="esg-sum-label">月度碳排增量估算</div>
                 <div class="esg-sum-value">
-                  <span class="big">{{ esgReport.summary?.estimated_monthly_carbon_increment_kg?.toFixed?.(2) || '0.00' }}</span>
+                  <span class="big">{{ esgCarbonKg }}</span>
                   <span class="unit">kgCO₂e</span>
                 </div>
                 <div class="esg-sum-sub">
-                  ≈ {{ esgReport.summary?.estimated_monthly_carbon_increment_tons?.toFixed?.(4) || '0.0000' }} 吨
+                  ≈ {{ esgCarbonTons }} 吨
                 </div>
               </div>
               <div class="esg-sum-card">
                 <div class="esg-sum-label">装置平均碳排</div>
                 <div class="esg-sum-value">
-                  <span class="big">{{ esgReport.summary?.average_carbon_per_device_kg?.toFixed?.(3) || '0.000' }}</span>
+                  <span class="big">{{ esgAvgPerDevice }}</span>
                   <span class="unit">kg/台</span>
                 </div>
               </div>
               <div class="esg-sum-card">
                 <div class="esg-sum-label">TOP5 贡献占比</div>
                 <div class="esg-sum-value">
-                  <span class="big">{{ ((esgReport.summary?.top5_contribution_ratio || 0) * 100).toFixed(1) }}</span>
+                  <span class="big">{{ esgTop5Pct }}</span>
                   <span class="unit">%</span>
                 </div>
                 <div class="esg-sum-sub">
                   风险严重度：
                   <span
                     class="severity-tag"
-                    :class="esgReport.summary?.carbon_risk_severity"
-                  >{{ esgReport.summary?.carbon_risk_severity || '-' }}</span>
+                    :class="esgSeverityClass"
+                  >{{ esgSeverity }}</span>
                 </div>
               </div>
               <div class="esg-sum-card">
                 <div class="esg-sum-label">趋势</div>
                 <div class="esg-sum-value trend">
-                  <span :class="esgReport.trend_analysis?.overall_trend">
-                    {{ ESGTrendMap[esgReport.trend_analysis?.overall_trend || 'stable'] }}
+                  <span :class="esgOverallTrend">
+                    {{ esgOverallTrendLabel }}
                   </span>
                 </div>
                 <div class="esg-sum-sub">
-                  改善 {{ esgReport.trend_analysis?.improving_count || 0 }}
-                  · 稳定 {{ esgReport.trend_analysis?.stable_count || 0 }}
-                  · 劣化 {{ esgReport.trend_analysis?.declining_count || 0 }}
+                  改善 {{ esgImprovingCount }}
+                  · 稳定 {{ esgStableCount }}
+                  · 劣化 {{ esgDecliningCount }}
                 </div>
               </div>
             </div>
@@ -346,7 +345,7 @@
               <line x1="12" y1="16" x2="12" y2="12"></line>
               <line x1="12" y1="8" x2="12.01" y2="8"></line>
             </svg>
-            <span>{{ esgReport.trend_analysis?.key_observation || '正在分析...' }}</span>
+            <span>{{ esgKeyObservation }}</span>
           </div>
 
           <div class="esg-section">
@@ -635,6 +634,44 @@ function nodeTypeLabel(t: string): string {
   const map: Record<string, string> = { device: '装置', flange: '法兰', bolt: '螺栓' }
   return map[t] || t
 }
+
+function fmt2(v: number | undefined | null): string {
+  return v !== undefined && v !== null && !isNaN(v) ? v.toFixed(2) : '0.00'
+}
+function fmt3(v: number | undefined | null): string {
+  return v !== undefined && v !== null && !isNaN(v) ? v.toFixed(3) : '0.000'
+}
+function fmt4(v: number | undefined | null): string {
+  return v !== undefined && v !== null && !isNaN(v) ? v.toFixed(4) : '0.0000'
+}
+function fmt5(v: number | undefined | null): string {
+  return v !== undefined && v !== null && !isNaN(v) ? v.toFixed(5) : '0.00000'
+}
+
+const rankingCarbonKg = computed(() => fmt2(rankingReport.total_monthly_carbon_increment_kg))
+const rankingLeakageM3 = computed(() => fmt4(rankingReport.total_monthly_leakage_volume_m3))
+
+const esgCarbonKg = computed(() => fmt2(esgReport.summary?.estimated_monthly_carbon_increment_kg))
+const esgCarbonTons = computed(() => fmt4(esgReport.summary?.estimated_monthly_carbon_increment_tons))
+const esgAvgPerDevice = computed(() => fmt3(esgReport.summary?.average_carbon_per_device_kg))
+const esgTop5Pct = computed(() => {
+  const r = esgReport.summary?.top5_contribution_ratio ?? 0
+  return (r * 100).toFixed(1)
+})
+const esgSeverity = computed(() => esgReport.summary?.carbon_risk_severity || '-')
+const esgSeverityClass = computed(() => {
+  const s = esgReport.summary?.carbon_risk_severity
+  if (s === '高') return 'severity-high'
+  if (s === '中') return 'severity-medium'
+  if (s === '低') return 'severity-low'
+  return ''
+})
+const esgOverallTrend = computed(() => esgReport.trend_analysis?.overall_trend || 'stable')
+const esgOverallTrendLabel = computed(() => ESGTrendMap[esgOverallTrend.value] || '稳定')
+const esgImprovingCount = computed(() => esgReport.trend_analysis?.improving_count || 0)
+const esgStableCount = computed(() => esgReport.trend_analysis?.stable_count || 0)
+const esgDecliningCount = computed(() => esgReport.trend_analysis?.declining_count || 0)
+const esgKeyObservation = computed(() => esgReport.trend_analysis?.key_observation || '正在分析...')
 
 async function ensureNodes(forceRefresh = false): Promise<CarbonNodeInput[]> {
   if (nodesReady.value && carbonNodes.value.length > 0 && !forceRefresh) {
@@ -1169,7 +1206,7 @@ onMounted(async () => {
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.15);
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.15));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1339,7 +1376,7 @@ onMounted(async () => {
 
 .esg-sum-card.main {
   background: linear-gradient(135deg, rgba(34, 197, 94, 0.08),
-    rgba(59, 130, 246, 0.06);
+    rgba(59, 130, 246, 0.06));
   border: 1px solid rgba(34, 197, 94, 0.25);
 }
 
