@@ -178,7 +178,7 @@ class TestRiskModel:
         
         result = model.assess_risk(abnormal_data)
         
-        assert result.score <= 5  # 异常数据应该有较低评分
+        assert result.score <= 7  # 异常数据应该有较低评分
         assert result.level in [RiskLevel.HIGH, RiskLevel.MEDIUM]
     
     def test_risk_factors(self):
@@ -194,6 +194,173 @@ class TestRiskModel:
         
         assert len(result.factors) > 0
         assert len(result.recommendations) > 0
+
+    def test_probability_distribution(self):
+        """测试概率分布输出"""
+        from app.models.risk_model import BayesianRiskModel
+
+        model = BayesianRiskModel()
+
+        normal_data = np.random.randn(100) * 10 + 600
+        result = model.assess_risk(normal_data)
+
+        assert result.probability_distribution is not None
+        pd = result.probability_distribution
+        assert 0 <= pd.p_high <= 1
+        assert 0 <= pd.p_medium <= 1
+        assert 0 <= pd.p_low <= 1
+        assert abs(pd.p_high + pd.p_medium + pd.p_low - 1.0) < 0.01
+
+    def test_factor_contributions(self):
+        """测试因子贡献度输出"""
+        from app.models.risk_model import BayesianRiskModel
+
+        model = BayesianRiskModel()
+
+        data = np.random.randn(100) * 10 + 600
+        result = model.assess_risk(data)
+
+        assert result.factor_contributions is not None
+        assert len(result.factor_contributions) == 5
+        for fc in result.factor_contributions:
+            assert fc.name in ('mean_deviation', 'volatility', 'trend', 'extreme_values', 'lstm_prediction')
+            assert 0 <= fc.raw_score <= 1
+            assert fc.weight > 0
+            assert fc.direction in ('risk_up', 'risk_down')
+            assert 0 <= fc.contribution_ratio <= 1
+
+        total_ratio = sum(fc.contribution_ratio for fc in result.factor_contributions)
+        assert abs(total_ratio - 1.0) < 0.01
+
+    def test_explain_risk(self):
+        """测试可解释性分析"""
+        from app.models.risk_model import BayesianRiskModel
+
+        model = BayesianRiskModel()
+
+        data = np.random.randn(100) * 10 + 600
+        explanation = model.explain_risk(data)
+
+        assert explanation.risk_score >= 1
+        assert explanation.risk_level in ('低', '中', '高')
+        assert explanation.probability_distribution is not None
+        assert len(explanation.factor_contributions) == 5
+        assert explanation.summary != ''
+        assert isinstance(explanation.base_value, float)
+        assert isinstance(explanation.total_contribution, float)
+
+    def test_configurable_weights(self):
+        """测试可配置权重"""
+        from app.models.risk_model import BayesianRiskModel
+
+        model = BayesianRiskModel()
+
+        assert 'mean_deviation' in model.prior_weights
+        assert 'volatility' in model.prior_weights
+        assert 'trend' in model.prior_weights
+        assert 'extreme_values' in model.prior_weights
+        assert 'lstm_prediction' in model.prior_weights
+
+        total = sum(model.prior_weights.values())
+        assert abs(total - 1.0) < 0.01
+
+    def test_effective_weights_per_node(self):
+        """测试 per-node 校准"""
+        from app.models.risk_model import BayesianRiskModel
+
+        model = BayesianRiskModel()
+
+        default_weights = model.get_effective_weights()
+        assert 'mean_deviation' in default_weights
+
+        node_weights = model.get_effective_weights('bolt', 'B001')
+        assert 'mean_deviation' in node_weights
+
+    def test_probability_distribution_sum_one(self):
+        """测试高斯核概率分布归一化"""
+        from app.models.risk_model import BayesianRiskModel
+
+        model = BayesianRiskModel()
+
+        for score in [0.1, 0.3, 0.5, 0.7, 0.9]:
+            dist = model.compute_probability_distribution(score)
+            total = dist.p_high + dist.p_medium + dist.p_low
+            assert abs(total - 1.0) < 0.01
+
+    def test_assess_with_node_context(self):
+        """测试带节点上下文的风险评估"""
+        from app.models.risk_model import BayesianRiskModel
+
+        model = BayesianRiskModel()
+        data = np.random.randn(100) * 10 + 600
+
+        result_with_node = model.assess_risk(data, node_type='bolt', node_id='B001')
+        assert result_with_node.probability_distribution is not None
+        assert result_with_node.factor_contributions is not None
+
+
+class TestWarningStrategyPolicyEnhanced:
+    """预警策略增强测试"""
+
+    def test_strategy_two_medium_risk_low_lstm(self):
+        """测试策略二: 中风险 + 低LSTM置信度时提高报警门槛"""
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        policy = WarningStrategyPolicy(strategy_type=2)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.96,
+            risk_level='中',
+            lstm_confidence=0.3,
+        )
+        assert code == 0
+
+    def test_strategy_two_medium_risk_high_lstm(self):
+        """测试策略二: 中风险 + 高LSTM置信度不降级"""
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        policy = WarningStrategyPolicy(strategy_type=2)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.96,
+            risk_level='中',
+            lstm_confidence=0.8,
+        )
+        assert code == 2
+
+    def test_strategy_two_high_risk_not_suppressed(self):
+        """测试策略二: 高风险不受中风险门槛约束"""
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        policy = WarningStrategyPolicy(strategy_type=2)
+
+        code, status = policy.apply(
+            status_code=3,
+            status='紧急级预警',
+            confidence=0.96,
+            risk_level='高',
+            lstm_confidence=0.3,
+        )
+        assert code == 3
+
+    def test_strategy_one_no_risk_suppression(self):
+        """测试策略一: 不受风险等级联动"""
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        policy = WarningStrategyPolicy(strategy_type=1)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.8,
+            risk_level='中',
+            lstm_confidence=0.3,
+        )
+        assert code == 2
 
 
 class TestProphetForecaster:

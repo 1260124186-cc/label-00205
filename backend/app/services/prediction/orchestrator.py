@@ -405,11 +405,15 @@ class PredictionOrchestrator:
             data,
             lstm_probs=probs,
             lstm_class=original_status_code,
+            node_type='bolt',
+            node_id=bolt_id,
         )
 
         # Step 5: 应用预警策略
         final_status_code, final_status = self.warning_policy.apply(
-            original_status_code, original_status, confidence
+            original_status_code, original_status, confidence,
+            risk_level=risk_assessment.level.value,
+            lstm_confidence=float(confidence),
         )
 
         # 推荐措施（优先用模型建议，兜底使用风险评估建议）
@@ -761,12 +765,15 @@ class PredictionOrchestrator:
         # Step 3: 风险评估（使用所有螺栓数据拼接）
         all_data = np.concatenate(multi_bolt_data)
         risk_assessment = self.risk_model.assess_risk(
-            all_data, lstm_class=original_status_code
+            all_data, lstm_class=original_status_code,
+            node_type='flange', node_id=flange_id,
         )
 
         # Step 4: 应用预警策略
         final_status_code, final_status = self.warning_policy.apply(
-            original_status_code, original_status, confidence
+            original_status_code, original_status, confidence,
+            risk_level=risk_assessment.level.value,
+            lstm_confidence=float(confidence),
         )
 
         # 推荐措施
@@ -1072,14 +1079,18 @@ class PredictionOrchestrator:
     ) -> Dict[str, Any]:
         """
         单独的风险评估接口（不经过模型和策略）
-        
+
         Args:
             node_id: 节点ID
             node_type: 节点类型 bolt/flange
             data: 预紧力数据
             generate_diagnosis: 是否生成 LLM 智能诊断报告（默认 False）
         """
-        assessment = self.risk_model.assess_risk(data)
+        assessment = self.risk_model.assess_risk(
+            data,
+            node_type=node_type,
+            node_id=node_id,
+        )
         result = {
             'node_id': node_id,
             'node_type': node_type,
@@ -1090,17 +1101,33 @@ class PredictionOrchestrator:
             'recommendations': assessment.recommendations,
             'confidence': float(assessment.confidence),
         }
-        
-        # LLM 智能诊断报告（可选）
+
+        if assessment.probability_distribution is not None:
+            result['probability_distribution'] = assessment.probability_distribution.to_dict()
+
+        if assessment.factor_contributions is not None:
+            result['factor_contributions'] = [
+                {
+                    'name': fc.name,
+                    'display_name': fc.display_name,
+                    'raw_score': fc.raw_score,
+                    'weight': fc.weight,
+                    'weighted_score': fc.weighted_score,
+                    'contribution_ratio': fc.contribution_ratio,
+                    'direction': fc.direction,
+                }
+                for fc in assessment.factor_contributions
+            ]
+
         if generate_diagnosis:
             try:
                 from app.services.report import get_diagnosis_report_service
                 diagnosis_service = get_diagnosis_report_service()
-                
+
                 recent_values = None
                 if data is not None and len(data) > 0:
                     recent_values = [float(v) for v in data[-20:]]
-                
+
                 diagnosis_report = diagnosis_service.generate_single_report(
                     status=assessment.level.value,
                     risk_score=float(assessment.score),
@@ -1111,7 +1138,7 @@ class PredictionOrchestrator:
                     recent_values=recent_values,
                     historical_incidents=None,
                 )
-                
+
                 result['diagnosis_report'] = {
                     'diagnosis_summary': diagnosis_report.diagnosis_summary,
                     'recommended_actions': diagnosis_report.recommended_actions,
@@ -1121,7 +1148,7 @@ class PredictionOrchestrator:
                     'latency_ms': diagnosis_report.latency_ms,
                     'is_fallback': diagnosis_report.is_fallback,
                 }
-                
+
                 logger.info(
                     f"LLM诊断报告生成完成: {node_type} {node_id}, "
                     f"紧急程度={result['diagnosis_report']['urgency_level']}, "
@@ -1131,8 +1158,32 @@ class PredictionOrchestrator:
             except Exception as e:
                 logger.warning(f"LLM诊断报告生成失败，跳过: {e}")
                 result['diagnosis_report'] = None
-        
+
         return result
+
+    def explain_risk(
+        self,
+        node_id: str,
+        node_type: str,
+        data: np.ndarray,
+    ) -> Dict[str, Any]:
+        """
+        风险评估可解释性分析接口
+
+        Args:
+            node_id: 节点ID
+            node_type: 节点类型 bolt/flange
+            data: 预紧力数据
+
+        Returns:
+            Dict: 可解释性分析结果
+        """
+        explanation = self.risk_model.explain_risk(
+            data,
+            node_type=node_type,
+            node_id=node_id,
+        )
+        return explanation.to_dict()
 
     # ---------- 月度趋势预测 ----------
 

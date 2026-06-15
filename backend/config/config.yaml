@@ -96,6 +96,7 @@ warning_strategy:
   strategy_2:
     false_negative_threshold: 0.10    # 漏报率阈值
     confidence_threshold: 0.95        # 置信度阈值
+    medium_risk_lstm_confidence_threshold: 0.6  # 中风险+低LSTM置信度时提高报警门槛
 
 # 风险评估配置
 risk_assessment:
@@ -103,13 +104,21 @@ risk_assessment:
   high_risk_threshold: 3      # 1-3分为高风险
   medium_risk_threshold: 7    # 4-7分为中风险
   # 8-10分为低风险
-  
+
   # 预紧力阈值 (可由模型动态调整)
   preload_thresholds:
     min_normal: 400           # 正常最小值
     max_normal: 800           # 正常最大值
     warning_deviation: 0.1    # 预警偏差比例
     critical_deviation: 0.2   # 紧急偏差比例
+
+  # 先验权重 (总和应为1.0，可通过 API per-node 覆盖)
+  prior_weights:
+    mean_deviation: 0.25      # 均值偏离
+    volatility: 0.20          # 波动性
+    trend: 0.20               # 趋势
+    extreme_values: 0.15      # 极值
+    lstm_prediction: 0.20     # LSTM预测
 
 # 定时任务配置
 scheduler:

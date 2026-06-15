@@ -244,6 +244,22 @@ class FlangePredictionResponse(BaseModel):
 
 # ==================== 风险评估 ====================
 
+class RiskProbabilityDistributionSchema(BaseModel):
+    p_high: float = Field(..., description="高风险概率")
+    p_medium: float = Field(..., description="中风险概率")
+    p_low: float = Field(..., description="低风险概率")
+
+
+class FactorContributionSchema(BaseModel):
+    name: str = Field(..., description="因子名称")
+    display_name: str = Field(..., description="因子显示名")
+    raw_score: float = Field(..., description="原始评分")
+    weight: float = Field(..., description="权重")
+    weighted_score: float = Field(..., description="加权评分")
+    contribution_ratio: float = Field(..., description="贡献度占比")
+    direction: str = Field(..., description="方向: risk_up/risk_down")
+
+
 class RiskAssessmentRequest(BaseModel):
     """风险评估请求"""
     node_id: str = Field(..., description="节点ID（螺栓或法兰面）")
@@ -261,6 +277,51 @@ class RiskAssessmentResponse(BaseModel):
     diagnosis: str
     recommendations: List[str]
     confidence: float
+    probability_distribution: Optional[RiskProbabilityDistributionSchema] = Field(
+        None, description="风险概率分布 P(高/中/低)"
+    )
+    factor_contributions: Optional[List[FactorContributionSchema]] = Field(
+        None, description="各因子贡献度"
+    )
+
+
+class RiskAssessExplainRequest(BaseModel):
+    node_id: str = Field(..., description="节点ID（螺栓或法兰面）")
+    node_type: str = Field(..., description="节点类型: bolt/flange")
+    data: List[List[Any]] = Field(..., description="预紧力时序数据")
+
+
+class RiskAssessExplainResponse(BaseModel):
+    node_id: str
+    node_type: str
+    risk_score: float
+    risk_level: str
+    probability_distribution: RiskProbabilityDistributionSchema
+    factor_contributions: List[FactorContributionSchema]
+    base_value: float = Field(..., description="基准值（所有因子评分均值）")
+    total_contribution: float = Field(..., description="总贡献度偏移")
+    summary: str = Field(..., description="可读性总结")
+
+
+class RiskCalibrationUpdateRequest(BaseModel):
+    node_type: str = Field(..., description="节点类型 bolt/flange/production_line")
+    node_id: str = Field(..., description="节点ID")
+    prior_weights: Optional[Dict[str, float]] = Field(None, description="自定义权重覆盖")
+    risk_thresholds: Optional[Dict[str, Any]] = Field(None, description="自定义阈值覆盖")
+    description: Optional[str] = Field(None, description="变更说明")
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+
+
+class RiskCalibrationResponse(BaseModel):
+    node_type: str
+    node_id: str
+    prior_weights: Dict[str, float]
+    risk_thresholds: Dict[str, Any]
+    version: int = 1
+    is_active: bool = True
+    description: Optional[str] = None
+    create_time: Optional[datetime] = None
 
 
 # ==================== 月度预测 ====================

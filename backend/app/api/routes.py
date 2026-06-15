@@ -32,6 +32,9 @@ from app.api.schemas import (
     BoltPredictionRequest, BoltPredictionResponse,
     FlangePredictionRequest, FlangePredictionResponse,
     RiskAssessmentRequest, RiskAssessmentResponse,
+    RiskAssessExplainRequest, RiskAssessExplainResponse,
+    RiskProbabilityDistributionSchema, FactorContributionSchema,
+    RiskCalibrationUpdateRequest, RiskCalibrationResponse,
     MonthlyForecastRequest, MonthlyForecastResponse,
     TrainingRequest, TrainingResponse,
     ModelInfoResponse,
@@ -434,7 +437,7 @@ async def assess_risk(
     """
     评估节点（螺栓或法兰面）的风险
 
-    返回风险评分(1-10)和风险等级(低/中/高)。
+    返回风险评分(1-10)、风险等级(低/中/高)、概率分布P(高/中/低)和各因子贡献度。
 
     校验模式:
     - strict: 严格模式，数据不合规直接拒绝
@@ -444,10 +447,8 @@ async def assess_risk(
         service = get_prediction_service()
         validator = get_validator()
 
-        # 确定校验模式
         mode = ValidationMode.LENIENT if validation_mode.lower() == 'lenient' else ValidationMode.STRICT
 
-        # 数据校验
         validation_result = validator.validate_risk_assessment(
             node_id=request.node_id,
             node_type=request.node_type,
@@ -462,16 +463,29 @@ async def assess_risk(
                 detail=error_response
             )
 
-        # 使用校验清洗后的数据
         cleaned = validation_result.cleaned_data
         values = cleaned['values']
 
-        # 执行评估
         result = service.assess_risk(
             node_id=request.node_id,
             node_type=request.node_type,
             data=values
         )
+
+        prob_dist = None
+        if 'probability_distribution' in result and result['probability_distribution']:
+            pd = result['probability_distribution']
+            prob_dist = RiskProbabilityDistributionSchema(
+                p_high=pd.get('p_high', 0),
+                p_medium=pd.get('p_medium', 0),
+                p_low=pd.get('p_low', 0),
+            )
+
+        factor_contribs = None
+        if 'factor_contributions' in result and result['factor_contributions']:
+            factor_contribs = [
+                FactorContributionSchema(**fc) for fc in result['factor_contributions']
+            ]
 
         return RiskAssessmentResponse(
             node_id=request.node_id,
@@ -481,13 +495,231 @@ async def assess_risk(
             factors=result['factors'],
             diagnosis=result['diagnosis'],
             recommendations=result['recommendations'],
-            confidence=result['confidence']
+            confidence=result['confidence'],
+            probability_distribution=prob_dist,
+            factor_contributions=factor_contribs,
         )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"风险评估失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/risk/assess/explain",
+    response_model=RiskAssessExplainResponse,
+    tags=["风险评估"],
+    summary="风险评估可解释性分析"
+)
+async def assess_risk_explain(
+    request: RiskAssessExplainRequest,
+    validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式")
+):
+    """
+    风险评估可解释性分析（类似 SHAP）
+
+    返回各因子对风险评分的贡献度，包含：
+    - 概率分布 P(高/中/低)
+    - 各因子贡献度（原始评分、权重、加权评分、贡献占比、方向）
+    - 基准值与总贡献偏移
+    - 可读性总结
+    """
+    try:
+        service = get_prediction_service()
+        validator = get_validator()
+
+        mode = ValidationMode.LENIENT if validation_mode.lower() == 'lenient' else ValidationMode.STRICT
+
+        validation_result = validator.validate_risk_assessment(
+            node_id=request.node_id,
+            node_type=request.node_type,
+            data=request.data,
+            mode=mode
+        )
+
+        if not validation_result.is_valid:
+            error_response = format_validation_errors(validation_result)
+            raise HTTPException(
+                status_code=400,
+                detail=error_response
+            )
+
+        cleaned = validation_result.cleaned_data
+        values = cleaned['values']
+
+        result = service.explain_risk(
+            node_id=request.node_id,
+            node_type=request.node_type,
+            data=values,
+        )
+
+        pd = result['probability_distribution']
+        prob_dist = RiskProbabilityDistributionSchema(
+            p_high=pd.get('p_high', 0),
+            p_medium=pd.get('p_medium', 0),
+            p_low=pd.get('p_low', 0),
+        )
+
+        factor_contribs = [
+            FactorContributionSchema(**fc) for fc in result['factor_contributions']
+        ]
+
+        return RiskAssessExplainResponse(
+            node_id=request.node_id,
+            node_type=request.node_type,
+            risk_score=result['risk_score'],
+            risk_level=result['risk_level'],
+            probability_distribution=prob_dist,
+            factor_contributions=factor_contribs,
+            base_value=result['base_value'],
+            total_contribution=result['total_contribution'],
+            summary=result['summary'],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"风险评估可解释性分析失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/risk/calibration",
+    response_model=RiskCalibrationResponse,
+    tags=["风险评估"],
+    summary="更新节点级风险校准配置"
+)
+async def update_risk_calibration(request: RiskCalibrationUpdateRequest):
+    """
+    更新节点级风险模型校准（权重/阈值覆盖）
+
+    - 设置后该节点使用自定义权重和阈值
+    - 不设置则使用全局配置
+    - 支持版本管理与回滚
+    """
+    try:
+        import json
+        from app.utils.database import get_db
+        from app.models.risk_model import invalidate_node_calibration_cache
+
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=503, detail="数据库不可用")
+
+            try:
+                db.execute("SELECT 1 FROM sc_risk_calibration LIMIT 1")
+            except Exception:
+                db.execute("""
+                    CREATE TABLE IF NOT EXISTS sc_risk_calibration (
+                        id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                        node_type VARCHAR(64) NOT NULL,
+                        node_id VARCHAR(128) NOT NULL,
+                        weights TEXT,
+                        thresholds TEXT,
+                        version INT NOT NULL DEFAULT 1,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        description VARCHAR(512),
+                        operator_id VARCHAR(64),
+                        operator_name VARCHAR(64),
+                        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_node (node_type, node_id, is_active)
+                    )
+                """)
+                db.commit()
+
+            active = db.execute(
+                "SELECT id, version FROM sc_risk_calibration "
+                "WHERE node_type = :nt AND node_id = :nid AND is_active = 1 "
+                "ORDER BY version DESC LIMIT 1",
+                {"nt": request.node_type, "nid": request.node_id},
+            ).first()
+
+            new_version = 1
+            if active:
+                new_version = active[1] + 1
+                db.execute(
+                    "UPDATE sc_risk_calibration SET is_active = 0 "
+                    "WHERE node_type = :nt AND node_id = :nid AND is_active = 1",
+                    {"nt": request.node_type, "nid": request.node_id},
+                )
+
+            weights_json = json.dumps(request.prior_weights, ensure_ascii=False) if request.prior_weights else None
+            thresholds_json = json.dumps(request.risk_thresholds, ensure_ascii=False) if request.risk_thresholds else None
+
+            db.execute(
+                "INSERT INTO sc_risk_calibration "
+                "(node_type, node_id, weights, thresholds, version, is_active, description, operator_id, operator_name) "
+                "VALUES (:nt, :nid, :w, :t, :v, 1, :desc, :oid, :oname)",
+                {
+                    "nt": request.node_type,
+                    "nid": request.node_id,
+                    "w": weights_json,
+                    "t": thresholds_json,
+                    "v": new_version,
+                    "desc": request.description,
+                    "oid": request.operator_id,
+                    "oname": request.operator_name,
+                },
+            )
+            db.commit()
+
+        invalidate_node_calibration_cache()
+
+        from app.models.risk_model import BayesianRiskModel
+        model = BayesianRiskModel()
+        eff_weights = model.get_effective_weights(request.node_type, request.node_id)
+        eff_thresholds = model.get_effective_thresholds(request.node_type, request.node_id)
+
+        return RiskCalibrationResponse(
+            node_type=request.node_type,
+            node_id=request.node_id,
+            prior_weights=eff_weights,
+            risk_thresholds=eff_thresholds,
+            version=new_version,
+            is_active=True,
+            description=request.description,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新风险校准配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/calibration",
+    response_model=RiskCalibrationResponse,
+    tags=["风险评估"],
+    summary="查询节点级风险校准配置"
+)
+async def get_risk_calibration(
+    node_type: str = Query(..., description="节点类型 bolt/flange/production_line"),
+    node_id: str = Query(..., description="节点ID"),
+):
+    """
+    查询节点级风险模型校准配置
+
+    返回该节点生效的权重和阈值配置（含节点级覆盖）。
+    """
+    try:
+        from app.models.risk_model import BayesianRiskModel
+        model = BayesianRiskModel()
+        eff_weights = model.get_effective_weights(node_type, node_id)
+        eff_thresholds = model.get_effective_thresholds(node_type, node_id)
+
+        return RiskCalibrationResponse(
+            node_type=node_type,
+            node_id=node_id,
+            prior_weights=eff_weights,
+            risk_thresholds=eff_thresholds,
+        )
+
+    except Exception as e:
+        logger.error(f"查询风险校准配置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

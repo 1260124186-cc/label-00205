@@ -7,6 +7,10 @@
 策略源优先级：
 1. 数据库 sc_strategy_config（动态配置，定时任务与实时 API 共用）
 2. YAML 配置文件 warning_strategy（兜底默认值）
+
+策略二增强：
+当 risk_level=中 且 lstm_confidence 低于 lstm_confidence_threshold 时，
+提高报警门槛（将 status_code 降级为 0）。
 """
 
 from typing import Tuple, Optional
@@ -17,16 +21,6 @@ from app.utils.config import config
 
 
 class WarningStrategyPolicy:
-    """
-    预警策略策略类（Strategy Pattern）
-
-    支持两种策略：
-    - 策略1（应报尽报）: 置信度 ≥ 阈值则按原值输出，否则降一级
-    - 策略2（精准报警）: 置信度 ≥ 高阈值才按原值输出，否则仅报告正常
-
-    策略参数从数据库 sc_strategy_config 读取（节点级可覆盖全局），
-    数据库不可用时回退到 YAML 配置。
-    """
 
     STRATEGY_REPORT_ALL = 1
     STRATEGY_PRECISE = 2
@@ -42,6 +36,10 @@ class WarningStrategyPolicy:
         self.strategy_2_threshold = None
         self._node_type = node_type
         self._node_id = node_id
+
+        self.medium_risk_lstm_threshold = config.get(
+            'warning_strategy.strategy_2.medium_risk_lstm_confidence_threshold', 0.6
+        )
 
         db_loaded = False
         if strategy_type is None:
@@ -84,6 +82,8 @@ class WarningStrategyPolicy:
         confidence: float,
         node_type: Optional[str] = None,
         node_id: Optional[str] = None,
+        risk_level: Optional[str] = None,
+        lstm_confidence: Optional[float] = None,
     ) -> Tuple[int, str]:
         if node_type and node_id and (
             node_type != self._node_type or node_id != self._node_id
@@ -102,17 +102,23 @@ class WarningStrategyPolicy:
             if st == self.STRATEGY_REPORT_ALL:
                 return self._apply_with_threshold(status_code, confidence, ct, mode='report_all')
             else:
-                return self._apply_with_threshold(status_code, confidence, ct, mode='precise')
+                return self._apply_with_threshold(
+                    status_code, confidence, ct, mode='precise',
+                    risk_level=risk_level, lstm_confidence=lstm_confidence,
+                )
 
         if self.strategy_type == self.STRATEGY_REPORT_ALL:
             return self._apply_report_all(status_code, confidence)
         else:
-            return self._apply_precise(status_code, confidence)
+            return self._apply_precise(
+                status_code, confidence,
+                risk_level=risk_level, lstm_confidence=lstm_confidence,
+            )
 
     def _apply_report_all(
         self,
         status_code: int,
-        confidence: float
+        confidence: float,
     ) -> Tuple[int, str]:
         if confidence >= self.strategy_1_threshold:
             new_code = status_code
@@ -123,12 +129,23 @@ class WarningStrategyPolicy:
     def _apply_precise(
         self,
         status_code: int,
-        confidence: float
+        confidence: float,
+        risk_level: Optional[str] = None,
+        lstm_confidence: Optional[float] = None,
     ) -> Tuple[int, str]:
         if confidence >= self.strategy_2_threshold:
             new_code = status_code
         else:
             new_code = 0
+
+        if new_code > 0 and risk_level in ('中', 'medium') and lstm_confidence is not None:
+            if lstm_confidence < self.medium_risk_lstm_threshold:
+                new_code = 0
+                logger.info(
+                    f"策略二联动: 中风险 + LSTM置信度{lstm_confidence:.3f} < "
+                    f"{self.medium_risk_lstm_threshold}，报警门槛提高，降级为正常"
+                )
+
         return new_code, STATUS_LABELS.get(new_code, '正常')
 
     @staticmethod
@@ -137,6 +154,8 @@ class WarningStrategyPolicy:
         confidence: float,
         threshold: float,
         mode: str = 'report_all',
+        risk_level: Optional[str] = None,
+        lstm_confidence: Optional[float] = None,
     ) -> Tuple[int, str]:
         if mode == 'report_all':
             if confidence >= threshold:
@@ -148,4 +167,12 @@ class WarningStrategyPolicy:
                 new_code = status_code
             else:
                 new_code = 0
+
+            if new_code > 0 and risk_level in ('中', 'medium') and lstm_confidence is not None:
+                med_threshold = config.get(
+                    'warning_strategy.strategy_2.medium_risk_lstm_confidence_threshold', 0.6
+                )
+                if lstm_confidence < med_threshold:
+                    new_code = 0
+
         return new_code, STATUS_LABELS.get(new_code, '正常')
