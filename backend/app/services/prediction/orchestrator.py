@@ -25,6 +25,7 @@ from app.models.bolt_lstm import BoltLSTMModel, STATUS_LABELS
 from app.models.flange_attention import FlangeAttentionModel
 from app.models.risk_model import BayesianRiskModel, RiskAssessment
 from app.models.prophet_forecaster import ProphetForecaster
+from app.models.fault_classifier import FaultClassifier, FaultType, FaultClassificationResult
 from app.services.preprocessing import DataPreprocessor
 from app.services.feature_engineering import FeatureEngineer
 from app.services.prediction.rule_classifier import RuleBasedClassifier
@@ -88,6 +89,7 @@ class PredictionOrchestrator:
         self.rule_classifier = rule_classifier or RuleBasedClassifier()
         self.warning_policy = warning_policy or WarningStrategyPolicy()
         self.repository = repository or PredictionRepository()
+        self.fault_classifier = FaultClassifier()
 
         # 模型缓存：按版本缓存 {node_id: {version: model}}
         self.bolt_models: Dict[str, Dict[str, BoltLSTMModel]] = {}
@@ -486,6 +488,25 @@ class PredictionOrchestrator:
             except Exception as e:
                 logger.warning(f"CBR知识库检索失败，跳过: {e}")
 
+        fault_detail = None
+        if final_status_code >= 3 and not is_shadow:
+            try:
+                fault_result = self.fault_classifier.classify(data)
+                fault_detail = self._build_fault_detail(fault_result)
+                if fault_result.fault_type != FaultType.NORMAL and fault_result.fault_type != FaultType.UNKNOWN:
+                    fault_recs = fault_result.recommendations
+                    existing_recs = set(risk_assessment.recommendations)
+                    for rec in fault_recs:
+                        if rec and rec not in existing_recs:
+                            risk_assessment.recommendations.append(rec)
+                    logger.info(
+                        f"故障分类完成: 螺栓 {bolt_id}, "
+                        f"fault_type={fault_result.fault_type.value}, "
+                        f"confidence={fault_result.confidence:.3f}"
+                    )
+            except Exception as e:
+                logger.warning(f"故障分类失败，跳过: {e}")
+
         result = {
             'bolt_id': bolt_id,
             'status': final_status,
@@ -512,6 +533,7 @@ class PredictionOrchestrator:
                 for c in similar_cases
             ] if similar_cases else [],
             'rag_context': rag_context,
+            'fault_detail': fault_detail,
         }
 
         # Step 5: 审计快照
@@ -880,6 +902,25 @@ class PredictionOrchestrator:
             except Exception as e:
                 logger.warning(f"CBR知识库检索失败，跳过: {e}")
 
+        fault_detail = None
+        if final_status_code >= 3 and not is_shadow:
+            try:
+                fault_result = self.fault_classifier.classify(all_data)
+                fault_detail = self._build_fault_detail(fault_result)
+                if fault_result.fault_type != FaultType.NORMAL and fault_result.fault_type != FaultType.UNKNOWN:
+                    fault_recs = fault_result.recommendations
+                    existing_recs = set(risk_assessment.recommendations)
+                    for rec in fault_recs:
+                        if rec and rec not in existing_recs:
+                            risk_assessment.recommendations.append(rec)
+                    logger.info(
+                        f"故障分类完成: 法兰面 {flange_id}, "
+                        f"fault_type={fault_result.fault_type.value}, "
+                        f"confidence={fault_result.confidence:.3f}"
+                    )
+            except Exception as e:
+                logger.warning(f"故障分类失败，跳过: {e}")
+
         result = {
             'flange_id': flange_id,
             'status': final_status,
@@ -928,6 +969,7 @@ class PredictionOrchestrator:
                 if correlation_analysis else None
             ),
             'root_cause_measures': root_cause_measures if root_cause_measures else None,
+            'fault_detail': fault_detail,
         }
 
         # Step 5: 审计快照
@@ -1067,6 +1109,34 @@ class PredictionOrchestrator:
             return status_code
         except Exception:
             return 0
+
+    def _build_fault_detail(self, fault_result: FaultClassificationResult) -> Dict[str, Any]:
+        """
+        构建故障详情对象，用于API响应
+
+        Args:
+            fault_result: FaultClassifier 分类结果
+
+        Returns:
+            Dict: 包含 fault_type、fault_confidence、evidence 和 pattern 数据
+        """
+        pattern = fault_result.pattern
+        return {
+            'fault_type': fault_result.fault_type.value,
+            'fault_confidence': float(fault_result.confidence),
+            'fault_name': fault_result.fault_name,
+            'severity': fault_result.severity,
+            'evidence': fault_result.evidence,
+            'recommendations': fault_result.recommendations,
+            'pattern': {
+                'trend_slope': pattern.trend_slope,
+                'volatility': pattern.volatility,
+                'sudden_changes': pattern.sudden_changes,
+                'min_value': pattern.min_value,
+                'max_value': pattern.max_value,
+                'mean_value': pattern.mean_value,
+            },
+        }
 
     # ---------- 风险评估（独立接口） ----------
 

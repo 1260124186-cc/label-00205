@@ -309,6 +309,73 @@ class FractureDetector:
         return is_fracture, score, evidence
 
 
+class FatigueDetector:
+    def __init__(self, thresholds: Dict[str, float] = None):
+        self.thresholds = thresholds or {
+            'min_cycles_fluctuation': 0.15,
+            'decline_acceleration': -0.01,
+            'max_volatility': 0.25,
+        }
+
+    def detect(self, pattern: FaultPattern) -> Tuple[bool, float, List[str]]:
+        evidence = []
+        score = 0.0
+
+        if pattern.volatility > self.thresholds['min_cycles_fluctuation']:
+            score += 0.3
+            evidence.append(f"预紧力周期性波动明显，波动率={pattern.volatility:.4f}")
+
+        if pattern.trend_slope < self.thresholds['decline_acceleration']:
+            score += 0.3
+            evidence.append(f"预紧力呈加速下降趋势，斜率={pattern.trend_slope:.4f}")
+
+        decline_ratio = (pattern.max_value - pattern.min_value) / (pattern.max_value + 1e-8)
+        if 0.05 < decline_ratio < 0.3:
+            score += 0.2
+            evidence.append(f"预紧力呈渐进式下降，幅度={decline_ratio*100:.1f}%")
+
+        if pattern.volatility < self.thresholds['max_volatility']:
+            score += 0.2
+            evidence.append("波动率在疲劳退化范围内")
+
+        is_fatigue = score >= 0.5
+        return is_fatigue, score, evidence
+
+
+class CorrosionDetector:
+    def __init__(self, min_normal: float = 400):
+        self.min_normal = min_normal
+        self.corrosion_threshold = min_normal * 0.6
+
+    def detect(self, pattern: FaultPattern, data: np.ndarray) -> Tuple[bool, float, List[str]]:
+        evidence = []
+        score = 0.0
+
+        if pattern.mean_value < self.corrosion_threshold and pattern.trend_slope < -0.3:
+            score += 0.3
+            evidence.append(f"预紧力持续偏低，均值={pattern.mean_value:.1f}，呈下降趋势")
+
+        decline_ratio = (pattern.max_value - pattern.min_value) / (pattern.max_value + 1e-8)
+        if 0.1 < decline_ratio < 0.4 and pattern.sudden_changes < 2:
+            score += 0.3
+            evidence.append(f"预紧力缓慢下降{decline_ratio*100:.1f}%，无明显突变")
+
+        if pattern.volatility < 0.15 and pattern.trend_slope < -0.2:
+            score += 0.2
+            evidence.append("波动较小但持续下降，疑似腐蚀劣化")
+
+        if len(data) > 20:
+            recent_mean = np.mean(data[-10:])
+            older_mean = np.mean(data[:10])
+            gradual_decline = (older_mean - recent_mean) / (older_mean + 1e-8)
+            if gradual_decline > 0.1:
+                score += 0.2
+                evidence.append(f"长期渐进式下降{gradual_decline*100:.1f}%")
+
+        is_corrosion = score >= 0.5
+        return is_corrosion, score, evidence
+
+
 class FaultClassifier:
     """
     故障类型分类器
@@ -326,6 +393,8 @@ class FaultClassifier:
         self.loosening_detector = LooseningDetector()
         self.overload_detector = OverloadDetector(max_normal)
         self.fracture_detector = FractureDetector(min_normal)
+        self.fatigue_detector = FatigueDetector()
+        self.corrosion_detector = CorrosionDetector()
         
         # 故障处理建议
         self.recommendations = {
@@ -334,22 +403,34 @@ class FaultClassifier:
                 "按计划执行定期维护"
             ],
             FaultType.LOOSENING: [
-                "立即检查螺栓扭矩",
-                "重新拧紧到规定扭矩",
+                "复紧螺栓至规定扭矩",
                 "检查垫圈和螺纹状态",
-                "缩短监测周期"
+                "缩短监测周期加强跟踪",
+                "分析松动原因防止复发"
             ],
             FaultType.OVERLOAD: [
-                "立即停机检查",
-                "分析过载原因",
-                "检查相邻螺栓状态",
-                "评估是否需要更换"
+                "降压运行并检查载荷",
+                "排查过载原因并消除",
+                "检查相邻螺栓受力状态",
+                "评估是否需要更换螺栓"
             ],
             FaultType.FRACTURE: [
                 "紧急停机",
-                "更换损坏螺栓",
-                "全面检查法兰面所有螺栓",
+                "更换断裂螺栓",
+                "全面检查同法兰面所有螺栓",
                 "分析断裂原因防止再次发生"
+            ],
+            FaultType.FATIGUE: [
+                "安排更换疲劳螺栓",
+                "缩短检测周期",
+                "分析疲劳载荷谱优化工况",
+                "评估同批次螺栓寿命"
+            ],
+            FaultType.CORROSION: [
+                "清理腐蚀并做防腐处理",
+                "评估腐蚀导致的截面损失",
+                "检查环境防护措施",
+                "制定防腐维护计划"
             ],
             FaultType.UNKNOWN: [
                 "进行人工检查",
@@ -377,12 +458,15 @@ class FaultClassifier:
         loosening_result = self.loosening_detector.detect(pattern)
         overload_result = self.overload_detector.detect(pattern, data)
         fracture_result = self.fracture_detector.detect(pattern, data)
-        
-        # 选择最可能的故障类型
+        fatigue_result = self.fatigue_detector.detect(pattern)
+        corrosion_result = self.corrosion_detector.detect(pattern, data)
+
         results = [
             (FaultType.LOOSENING, loosening_result[1], loosening_result[2]),
             (FaultType.OVERLOAD, overload_result[1], overload_result[2]),
-            (FaultType.FRACTURE, fracture_result[1], fracture_result[2])
+            (FaultType.FRACTURE, fracture_result[1], fracture_result[2]),
+            (FaultType.FATIGUE, fatigue_result[1], fatigue_result[2]),
+            (FaultType.CORROSION, corrosion_result[1], corrosion_result[2]),
         ]
         
         # 按置信度排序
@@ -422,6 +506,8 @@ class FaultClassifier:
             FaultType.LOOSENING: 4,
             FaultType.OVERLOAD: 6,
             FaultType.FRACTURE: 9,
+            FaultType.FATIGUE: 5,
+            FaultType.CORROSION: 5,
             FaultType.UNKNOWN: 3
         }.get(fault_type, 5)
         

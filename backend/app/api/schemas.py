@@ -69,6 +69,27 @@ class BoltPredictionRequest(BaseModel):
         }
 
 
+class FaultPatternSchema(BaseModel):
+    """故障模式特征"""
+    trend_slope: float = Field(..., description="趋势斜率")
+    volatility: float = Field(..., description="波动率")
+    sudden_changes: int = Field(..., description="骤降/突变点数量")
+    min_value: float = Field(..., description="最小值")
+    max_value: float = Field(..., description="最大值")
+    mean_value: float = Field(..., description="平均值")
+
+
+class FaultDetailSchema(BaseModel):
+    """故障类型细分详情"""
+    fault_type: str = Field(..., description="故障类型: loosening/overload/fracture/fatigue/corrosion")
+    fault_confidence: float = Field(..., description="故障分类置信度")
+    fault_name: str = Field(..., description="故障类型中文名")
+    severity: int = Field(..., description="严重程度 1-10")
+    evidence: List[str] = Field(default_factory=list, description="判定依据")
+    recommendations: List[str] = Field(default_factory=list, description="故障类型差异化推荐措施")
+    pattern: Optional[FaultPatternSchema] = Field(None, description="故障模式特征证据")
+
+
 class BoltPredictionResponse(BaseModel):
     """
     螺栓预测响应
@@ -99,6 +120,7 @@ class BoltPredictionResponse(BaseModel):
     model_version: Optional[str] = Field(None, description="模型版本号")
     shadow_version: Optional[str] = Field(None, description="Shadow模式版本号")
     shadow_result: Optional[Dict[str, Any]] = Field(None, description="Shadow模式预测结果")
+    fault_detail: Optional[FaultDetailSchema] = Field(None, description="故障类型细分详情")
 
 
 # ==================== 法兰面预测 ====================
@@ -240,6 +262,7 @@ class FlangePredictionResponse(BaseModel):
     model_version: Optional[str] = Field(None, description="模型版本号")
     shadow_version: Optional[str] = Field(None, description="Shadow模式版本号")
     shadow_result: Optional[Dict[str, Any]] = Field(None, description="Shadow模式预测结果")
+    fault_detail: Optional[FaultDetailSchema] = Field(None, description="故障类型细分详情")
 
 
 # ==================== 风险评估 ====================

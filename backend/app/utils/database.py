@@ -109,6 +109,9 @@ class AbnormalPrediction(Base):
     confidence = Column(Float, comment='预测置信度')
     rec_measures = Column(String(1000), comment='推荐措施')
     recent_time = Column(DateTime, comment='状态时间')
+    fault_type = Column(String(10), comment='故障类型：loosening/overload/fracture/fatigue/corrosion')
+    fault_confidence = Column(Float, comment='故障分类置信度')
+    fault_evidence = Column(Text, comment='故障证据JSON')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     # 索引
@@ -141,6 +144,9 @@ class MonthPrediction(Base):
     end_time = Column(DateTime, comment='预计发生结束时间')
     confidence = Column(Float, comment='预测置信度')
     rec_measures = Column(String(1000), comment='推荐措施')
+    fault_type = Column(String(10), comment='故障类型：loosening/overload/fracture/fatigue/corrosion')
+    fault_confidence = Column(Float, comment='故障分类置信度')
+    fault_evidence = Column(Text, comment='故障证据JSON')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
 

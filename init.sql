@@ -39,11 +39,15 @@ CREATE TABLE IF NOT EXISTS sci_abnormal_prediction (
     confidence FLOAT COMMENT '预测置信度',
     rec_measures VARCHAR(1000) COMMENT '推荐措施',
     recent_time DATETIME COMMENT '状态时间',
+    fault_type VARCHAR(10) COMMENT '故障类型：loosening/overload/fracture/fatigue/corrosion',
+    fault_confidence FLOAT COMMENT '故障分类置信度',
+    fault_evidence TEXT COMMENT '故障证据JSON',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_node_type (node_type),
     INDEX idx_bolt_id (bolt_id),
     INDEX idx_flm_id (flm_id),
-    INDEX idx_year_month (year_month)
+    INDEX idx_year_month (year_month),
+    INDEX idx_fault_type (fault_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='异常预测结果表';
 
 -- ============================================================
@@ -60,6 +64,9 @@ CREATE TABLE IF NOT EXISTS ci_month_prediction_details (
     end_time DATETIME COMMENT '预计发生结束时间',
     confidence FLOAT COMMENT '预测置信度',
     rec_measures VARCHAR(1000) COMMENT '推荐措施',
+    fault_type VARCHAR(10) COMMENT '故障类型：loosening/overload/fracture/fatigue/corrosion',
+    fault_confidence FLOAT COMMENT '故障分类置信度',
+    fault_evidence TEXT COMMENT '故障证据JSON',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_node_type (node_type),
     INDEX idx_bolt_id (bolt_id),
@@ -493,6 +500,112 @@ CREATE TABLE IF NOT EXISTS sc_api_audit_logs (
     INDEX idx_api_audit_time (create_time),
     INDEX idx_api_audit_method (method)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='API审计日志表';
+
+-- ============================================================
+-- 故障类型细分 - 扩展预测结果表字段
+-- ============================================================
+
+SET @dbname = DATABASE();
+
+-- sci_abnormal_prediction: fault_type
+SET @tablename = 'sci_abnormal_prediction';
+SET @columnname = 'fault_type';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(10) COMMENT ''故障类型：loosening/overload/fracture/fatigue/corrosion''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- sci_abnormal_prediction: fault_confidence
+SET @columnname = 'fault_confidence';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' FLOAT COMMENT ''故障分类置信度''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- sci_abnormal_prediction: fault_evidence
+SET @columnname = 'fault_evidence';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' TEXT COMMENT ''故障证据JSON''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- sci_abnormal_prediction: fault_type index
+SET @indexname = 'idx_fault_type';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND index_name = @indexname) > 0,
+  'SELECT 1',
+  CONCAT('CREATE INDEX ', @indexname, ' ON ', @tablename, ' (fault_type)')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- ci_month_prediction_details: fault_type
+SET @tablename = 'ci_month_prediction_details';
+SET @columnname = 'fault_type';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(10) COMMENT ''故障类型：loosening/overload/fracture/fatigue/corrosion''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- ci_month_prediction_details: fault_confidence
+SET @columnname = 'fault_confidence';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' FLOAT COMMENT ''故障分类置信度''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- ci_month_prediction_details: fault_evidence
+SET @columnname = 'fault_evidence';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' TEXT COMMENT ''故障证据JSON''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
 
 -- 显示创建的表
 SHOW TABLES;

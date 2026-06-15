@@ -8,6 +8,7 @@
 """
 
 import numpy as np
+import json
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from loguru import logger
@@ -209,15 +210,24 @@ class PredictionRepository:
     # ---------- 结果持久化 ----------
 
     def save_bolt_prediction(self, bolt_id: str, result: Dict[str, Any]) -> None:
-        """
-        保存螺栓异常预测结果
-
-        Args:
-            bolt_id: 螺栓ID
-            result: 预测结果字典
-        """
         try:
             with get_db() as db:
+                fault_detail = result.get('fault_detail')
+                fault_type_val = fault_detail.get('fault_type') if fault_detail else None
+                fault_confidence_val = fault_detail.get('fault_confidence') if fault_detail else None
+                fault_evidence_val = None
+                if fault_detail:
+                    fault_evidence_val = json.dumps(
+                        {
+                            'evidence': fault_detail.get('evidence', []),
+                            'pattern': fault_detail.get('pattern', {}),
+                            'recommendations': fault_detail.get('recommendations', []),
+                            'fault_name': fault_detail.get('fault_name', ''),
+                            'severity': fault_detail.get('severity', 0),
+                        },
+                        ensure_ascii=False,
+                    )
+
                 prediction = AbnormalPrediction(
                     bolt_id=int(bolt_id) if bolt_id.isdigit() else None,
                     node_type='螺栓',
@@ -226,6 +236,9 @@ class PredictionRepository:
                     confidence=result['confidence'],
                     rec_measures=', '.join(result['recommendations']),
                     recent_time=result.get('recent_time'),
+                    fault_type=fault_type_val,
+                    fault_confidence=fault_confidence_val,
+                    fault_evidence=fault_evidence_val,
                     create_time=datetime.now()
                 )
                 db.add(prediction)
@@ -234,13 +247,6 @@ class PredictionRepository:
             logger.error(f"保存螺栓预测失败 [{bolt_id}]: {e}")
 
     def save_flange_prediction(self, flange_id: str, result: Dict[str, Any]) -> None:
-        """
-        保存法兰面异常预测结果
-
-        Args:
-            flange_id: 法兰面ID
-            result: 预测结果字典
-        """
         try:
             with get_db() as db:
                 recommendations = result.get('recommendations', [])
@@ -255,6 +261,22 @@ class PredictionRepository:
                 if len(rec_measures_str) > 1000:
                     rec_measures_str = rec_measures_str[:997] + '...'
 
+                fault_detail = result.get('fault_detail')
+                fault_type_val = fault_detail.get('fault_type') if fault_detail else None
+                fault_confidence_val = fault_detail.get('fault_confidence') if fault_detail else None
+                fault_evidence_val = None
+                if fault_detail:
+                    fault_evidence_val = json.dumps(
+                        {
+                            'evidence': fault_detail.get('evidence', []),
+                            'pattern': fault_detail.get('pattern', {}),
+                            'recommendations': fault_detail.get('recommendations', []),
+                            'fault_name': fault_detail.get('fault_name', ''),
+                            'severity': fault_detail.get('severity', 0),
+                        },
+                        ensure_ascii=False,
+                    )
+
                 prediction = AbnormalPrediction(
                     flm_id=flange_id,
                     node_type='法兰面',
@@ -262,6 +284,9 @@ class PredictionRepository:
                     pw_type=result['status'],
                     confidence=result['confidence'],
                     rec_measures=rec_measures_str,
+                    fault_type=fault_type_val,
+                    fault_confidence=fault_confidence_val,
+                    fault_evidence=fault_evidence_val,
                     create_time=datetime.now()
                 )
                 db.add(prediction)

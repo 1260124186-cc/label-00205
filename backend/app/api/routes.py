@@ -150,6 +150,7 @@ from app.api.schemas import (
     ReportGenerateRequest, ReportStatisticsSchema,
     PeriodicReportResponse, BatchReportGenerateRequest,
     BatchReportResponse,
+    FaultDetailSchema, FaultPatternSchema,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -309,6 +310,22 @@ async def predict_bolt(
         )
 
         # 添加校验信息到响应头
+        fault_detail_obj = None
+        if result.get('fault_detail'):
+            fd = result['fault_detail']
+            pattern_obj = None
+            if fd.get('pattern'):
+                pattern_obj = FaultPatternSchema(**fd['pattern'])
+            fault_detail_obj = FaultDetailSchema(
+                fault_type=fd['fault_type'],
+                fault_confidence=fd['fault_confidence'],
+                fault_name=fd.get('fault_name', ''),
+                severity=fd.get('severity', 0),
+                evidence=fd.get('evidence', []),
+                recommendations=fd.get('recommendations', []),
+                pattern=pattern_obj,
+            )
+
         response = BoltPredictionResponse(
             bolt_id=bolt_id,
             status=result['status'],
@@ -322,6 +339,7 @@ async def predict_bolt(
             model_version=result.get('model_version'),
             shadow_version=result.get('shadow_version'),
             shadow_result=result.get('shadow_result'),
+            fault_detail=fault_detail_obj,
         )
 
         return response
@@ -392,6 +410,22 @@ async def predict_flange(
             shadow_version=shadow_version,
         )
 
+        fault_detail_obj = None
+        if result.get('fault_detail'):
+            fd = result['fault_detail']
+            pattern_obj = None
+            if fd.get('pattern'):
+                pattern_obj = FaultPatternSchema(**fd['pattern'])
+            fault_detail_obj = FaultDetailSchema(
+                fault_type=fd['fault_type'],
+                fault_confidence=fd['fault_confidence'],
+                fault_name=fd.get('fault_name', ''),
+                severity=fd.get('severity', 0),
+                evidence=fd.get('evidence', []),
+                recommendations=fd.get('recommendations', []),
+                pattern=pattern_obj,
+            )
+
         return FlangePredictionResponse(
             flange_id=flange_id,
             status=result['status'],
@@ -413,6 +447,7 @@ async def predict_flange(
             model_version=result.get('model_version'),
             shadow_version=result.get('shadow_version'),
             shadow_result=result.get('shadow_result'),
+            fault_detail=fault_detail_obj,
         )
 
     except HTTPException:
