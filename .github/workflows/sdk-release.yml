@@ -1,0 +1,322 @@
+name: Release SDKs
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 1.2.0)'
+        required: true
+        default: '1.0.0'
+      bump_type:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sdk_generator/requirements.txt
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION=${GITHUB_REF_NAME#v}
+          else
+            VERSION=${{ github.event.inputs.version }}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+
+  release-python:
+    name: Release Python SDK
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sdk_generator/requirements.txt
+          pip install -r backend/requirements.txt
+          pip install twine wheel setuptools
+
+      - name: Export OpenAPI spec
+        run: |
+          cd backend
+          python -m sdk_generator.cli export \
+            --app-module main:create_app \
+            --output ../openapi.json \
+            --format json \
+            --api-version v1
+        env:
+          PYTHONPATH: .
+
+      - name: Generate Python SDK
+        run: |
+          python -m sdk_generator.cli generate openapi.json \
+            --language python \
+            --output ./sdks \
+            --api-version v1 \
+            --base-url ${{ secrets.API_BASE_URL || 'https://api.example.com' }}
+
+      - name: Update version
+        run: |
+          python -m sdk_generator.cli version \
+            --current-version 0.0.0 \
+            --api-version v1 \
+            --bump-type patch \
+            --sdk-dir ./sdks \
+            --update-files
+
+      - name: Build package
+        run: |
+          cd sdks/python
+          python setup.py sdist bdist_wheel
+
+      - name: Publish to private PyPI
+        env:
+          TWINE_REPOSITORY_URL: ${{ secrets.PYPI_REPO_URL }}
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          cd sdks/python
+          twine upload dist/*
+
+      - name: Upload Python SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdk-${{ needs.prepare-release.outputs.version }}
+          path: sdks/python/dist/
+
+  release-typescript:
+    name: Release TypeScript SDK
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sdk_generator/requirements.txt
+          pip install -r backend/requirements.txt
+
+      - name: Export OpenAPI spec
+        run: |
+          cd backend
+          python -m sdk_generator.cli export \
+            --app-module main:create_app \
+            --output ../openapi.json \
+            --format json \
+            --api-version v1
+        env:
+          PYTHONPATH: .
+
+      - name: Generate TypeScript SDK
+        run: |
+          python -m sdk_generator.cli generate openapi.json \
+            --language typescript \
+            --output ./sdks \
+            --api-version v1 \
+            --base-url ${{ secrets.API_BASE_URL || 'https://api.example.com' }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: ${{ secrets.NPM_REGISTRY || 'https://registry.npmjs.org' }}
+          scope: ${{ secrets.NPM_SCOPE || 'bolt-prediction' }}
+
+      - name: Build and publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd sdks/typescript
+          npm version ${{ needs.prepare-release.outputs.version }} --no-git-tag-version
+          npm install
+          npm run build
+          npm publish --access restricted
+
+      - name: Upload TypeScript SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: typescript-sdk-${{ needs.prepare-release.outputs.version }}
+          path: sdks/typescript/dist/
+
+  release-java:
+    name: Release Java SDK
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sdk_generator/requirements.txt
+          pip install -r backend/requirements.txt
+
+      - name: Export OpenAPI spec
+        run: |
+          cd backend
+          python -m sdk_generator.cli export \
+            --app-module main:create_app \
+            --output ../openapi.json \
+            --format json \
+            --api-version v1
+        env:
+          PYTHONPATH: .
+
+      - name: Generate Java SDK
+        run: |
+          python -m sdk_generator.cli generate openapi.json \
+            --language java \
+            --output ./sdks \
+            --api-version v1 \
+            --base-url ${{ secrets.API_BASE_URL || 'https://api.example.com' }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          server-id: private-repo
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_PASSWORD
+
+      - name: Publish to private Maven
+        env:
+          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+        run: |
+          cd sdks/java
+          mvn versions:set -DnewVersion=${{ needs.prepare-release.outputs.version }}
+          mvn clean deploy -DskipTests -s .mvn/settings.xml
+
+      - name: Upload Java SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-sdk-${{ needs.prepare-release.outputs.version }}
+          path: sdks/java/target/*.jar
+
+  release-go:
+    name: Release Go SDK
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sdk_generator/requirements.txt
+          pip install -r backend/requirements.txt
+
+      - name: Export OpenAPI spec
+        run: |
+          cd backend
+          python -m sdk_generator.cli export \
+            --app-module main:create_app \
+            --output ../openapi.json \
+            --format json \
+            --api-version v1
+        env:
+          PYTHONPATH: .
+
+      - name: Generate Go SDK
+        run: |
+          python -m sdk_generator.cli generate openapi.json \
+            --language go \
+            --output ./sdks \
+            --api-version v1 \
+            --base-url ${{ secrets.API_BASE_URL || 'https://api.example.com' }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build Go SDK
+        run: |
+          cd sdks/go
+          go build ./...
+          go test ./...
+
+      - name: Create release tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag v${{ needs.prepare-release.outputs.version }}
+          git push origin v${{ needs.prepare-release.outputs.version }}
+
+      - name: Upload Go SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-sdk-${{ needs.prepare-release.outputs.version }}
+          path: sdks/go/
+
+  release-summary:
+    name: Release Summary
+    needs: [prepare-release, release-python, release-typescript, release-java, release-go]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Release Summary
+        run: |
+          echo "## SDK 发布完成 v${{ needs.prepare-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Python SDK ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- TypeScript SDK ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Java SDK ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Go SDK ✅" >> $GITHUB_STEP_SUMMARY

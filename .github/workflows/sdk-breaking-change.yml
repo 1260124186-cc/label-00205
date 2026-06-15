@@ -1,0 +1,116 @@
+name: SDK Breaking Change Detection
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'v*'
+    paths:
+      - 'backend/app/api/**'
+      - 'backend/app/models/**'
+      - 'backend/main.py'
+
+jobs:
+  detect-breaking-changes:
+    name: Detect Breaking Changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v4
+        with:
+          path: new
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: old
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          cd new
+          python -m pip install --upgrade pip
+          pip install -r sdk_generator/requirements.txt
+          pip install -r backend/requirements.txt
+
+      - name: Export old OpenAPI spec
+        run: |
+          cd old/backend
+          python -m sdk_generator.cli export \
+            --app-module main:create_app \
+            --output ../../old-openapi.json \
+            --format json \
+            --api-version v1
+        env:
+          PYTHONPATH: .
+
+      - name: Export new OpenAPI spec
+        run: |
+          cd new/backend
+          python -m sdk_generator.cli export \
+            --app-module main:create_app \
+            --output ../../new-openapi.json \
+            --format json \
+            --api-version v1
+        env:
+          PYTHONPATH: .
+
+      - name: Detect breaking changes
+        id: breaking-change
+        run: |
+          cd new
+          python -m sdk_generator.cli breaking-change \
+            ../old-openapi.json \
+            ../new-openapi.json \
+            --output breaking-change-report.json \
+            --fail-on-breaking
+        continue-on-error: true
+
+      - name: Upload breaking change report
+        uses: actions/upload-artifact@v4
+        with:
+          name: breaking-change-report
+          path: breaking-change-report.json
+
+      - name: Comment PR with breaking change summary
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report = null;
+            try {
+              report = JSON.parse(fs.readFileSync('breaking-change-report.json', 'utf8'));
+            } catch (e) {
+              console.log('No report found');
+              return;
+            }
+
+            const summary = `
+            ### 🔄 API 变更检测结果
+
+            **总变更数:** ${report.total_changes}
+            **破坏性变更:** ${report.breaking_changes.length} 🔴
+            **弃用变更:** ${report.deprecated_changes.length} 🟡
+            **新增变更:** ${report.additive_changes.length} 🟢
+
+            ${report.has_breaking_changes ? '⚠️ **检测到破坏性变更，请在合并前仔细评估！**' : '✅ 未检测到破坏性变更'}
+            `;
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Fail if breaking changes detected
+        if: steps.breaking-change.outcome == 'failure'
+        run: |
+          echo "检测到破坏性变更，请修复后重试"
+          exit 1

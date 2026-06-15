@@ -1,0 +1,121 @@
+name: Generate SDKs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/app/api/**'
+      - 'backend/app/models/**'
+      - 'backend/main.py'
+      - 'sdk_generator/**'
+  workflow_dispatch:
+
+jobs:
+  generate-sdks:
+    name: Generate All SDKs
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        language: [python, typescript, java, go]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sdk_generator/requirements.txt
+          pip install -r backend/requirements.txt
+
+      - name: Export OpenAPI spec
+        run: |
+          cd backend
+          python -m sdk_generator.cli export \
+            --app-module main:create_app \
+            --output ../openapi.json \
+            --format json \
+            --api-version v1
+        env:
+          PYTHONPATH: .
+
+      - name: Generate ${{ matrix.language }} SDK
+        run: |
+          python -m sdk_generator.cli generate openapi.json \
+            --language ${{ matrix.language }} \
+            --output ./sdks \
+            --api-version v1 \
+            --base-url ${{ secrets.API_BASE_URL || 'https://api.example.com' }}
+
+      - name: Set up Node.js
+        if: matrix.language == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: ${{ secrets.NPM_REGISTRY || 'https://registry.npmjs.org' }}
+
+      - name: Build TypeScript SDK
+        if: matrix.language == 'typescript'
+        run: |
+          cd sdks/typescript
+          npm install
+          npm run build
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build Go SDK
+        if: matrix.language == 'go'
+        run: |
+          cd sdks/go
+          go build ./...
+
+      - name: Set up JDK
+        if: matrix.language == 'java'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Build Java SDK
+        if: matrix.language == 'java'
+        run: |
+          cd sdks/java
+          mvn clean package -DskipTests
+
+      - name: Build Python SDK
+        if: matrix.language == 'python'
+        run: |
+          cd sdks/python
+          python setup.py sdist bdist_wheel
+
+      - name: Upload SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-${{ matrix.language }}
+          path: sdks/${{ matrix.language }}/
+
+  generate-all:
+    name: Generate All SDKs Summary
+    needs: generate-sdks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "## SDK 生成完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Python SDK ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- TypeScript SDK ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Java SDK ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Go SDK ✅" >> $GITHUB_STEP_SUMMARY
