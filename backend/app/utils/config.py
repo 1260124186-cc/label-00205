@@ -133,15 +133,24 @@ class Config:
                 'master_key': ''
             },
             'llm': {
+                'enabled': False,
                 'provider': 'local',
                 'openai': {
                     'api_key': '',
                     'model': 'gpt-3.5-turbo',
-                    'base_url': 'https://api.openai.com/v1'
+                    'base_url': 'https://api.openai.com/v1',
+                    'max_tokens': 2000,
+                    'temperature': 0.7
                 },
                 'qwen': {
                     'api_key': '',
-                    'model': 'qwen-turbo'
+                    'model': 'qwen-turbo',
+                    'max_tokens': 2000,
+                    'temperature': 0.7
+                },
+                'report': {
+                    'diagnosis_summary_max_length': 200,
+                    'enable_fallback': True
                 }
             },
             'audit': {

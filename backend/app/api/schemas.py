@@ -3100,3 +3100,92 @@ class RateLimitStatusResponse(BaseModel):
     limit: int = Field(..., description="速率限制（请求/小时）")
     remaining: int = Field(..., description="剩余请求次数")
     used: int = Field(..., description="已使用请求次数")
+
+
+# ============================================================
+# LLM 智能诊断报告
+# ============================================================
+
+class DiagnosisReportRequest(BaseModel):
+    """
+    单次诊断报告生成请求
+    """
+    status: str = Field(..., description="状态：正常/关注级预警/检查级预警/紧急级预警/故障")
+    risk_score: float = Field(..., description="风险评分(0-10)，分数越低风险越高")
+    node_type: str = Field("bolt", description="节点类型：bolt/flange")
+    node_id: Optional[str] = Field(None, description="节点ID")
+    fault_type: Optional[str] = Field(None, description="故障类型：loosening/preload_decrease/severe_anomaly/failure")
+    trend: Optional[str] = Field(None, description="趋势：stable/decreasing/increasing/fluctuating")
+    recent_values: Optional[List[float]] = Field(None, description="近期预紧力数值列表")
+    historical_incidents: Optional[int] = Field(None, description="历史同类事件数")
+
+
+class DiagnosisReportResponse(BaseModel):
+    """
+    诊断报告响应
+    """
+    diagnosis_summary: str = Field(..., description="诊断摘要（200字内）")
+    recommended_actions: List[str] = Field(..., description="推荐处置措施（分步骤）")
+    urgency_level: str = Field(..., description="紧急程度：low/medium/high/critical")
+    model: str = Field(..., description="使用的模型")
+    tokens_used: int = Field(0, description="Token用量")
+    latency_ms: float = Field(0.0, description="生成延迟（毫秒）")
+    is_fallback: bool = Field(False, description="是否使用降级模板")
+
+
+class ReportGenerateRequest(BaseModel):
+    """
+    周期报告生成请求（周报/月报）
+    """
+    node_type: str = Field(..., description="节点类型：bolt/flange")
+    node_id: str = Field(..., description="节点ID（螺栓ID或法兰面ID）")
+    report_type: str = Field("weekly", description="报告类型：weekly/monthly")
+    use_llm: Optional[bool] = Field(True, description="是否使用LLM生成（默认True，不可用时自动降级）")
+
+
+class ReportStatisticsSchema(BaseModel):
+    """报告统计数据"""
+    prediction_count: int = Field(0, description="预测次数")
+    avg_risk_score: float = Field(0.0, description="平均风险评分")
+    min_risk_score: float = Field(0.0, description="最低风险评分（最高风险）")
+    max_risk_score: float = Field(0.0, description="最高风险评分（最低风险）")
+    status_distribution: Dict[str, int] = Field(default_factory=dict, description="状态分布")
+    trend: str = Field("stable", description="整体趋势")
+    max_status: str = Field("正常", description="周期内最高状态")
+    fault_types: List[str] = Field(default_factory=list, description="出现的故障类型")
+
+
+class PeriodicReportResponse(BaseModel):
+    """
+    周期报告响应（周报/月报）
+    """
+    report_type: str = Field(..., description="报告类型：weekly/monthly")
+    node_id: str = Field(..., description="节点ID")
+    node_type: str = Field(..., description="节点类型")
+    period_start: datetime = Field(..., description="统计周期开始时间")
+    period_end: datetime = Field(..., description="统计周期结束时间")
+    diagnosis_summary: str = Field(..., description="诊断摘要")
+    recommended_actions: List[str] = Field(..., description="推荐处置措施")
+    urgency_level: str = Field(..., description="整体紧急程度：low/medium/high/critical")
+    statistics: ReportStatisticsSchema = Field(..., description="统计数据")
+    generated_at: datetime = Field(..., description="生成时间")
+    model: str = Field(..., description="使用的模型")
+    is_fallback: bool = Field(False, description="是否使用降级模板")
+
+
+class BatchReportGenerateRequest(BaseModel):
+    """
+    批量生成报告请求
+    """
+    node_type: str = Field(..., description="节点类型：bolt/flange")
+    node_ids: List[str] = Field(..., description="节点ID列表")
+    report_type: str = Field("weekly", description="报告类型：weekly/monthly")
+
+
+class BatchReportResponse(BaseModel):
+    """批量报告响应"""
+    total: int = Field(0, description="总数")
+    success: int = Field(0, description="成功数量")
+    failed: int = Field(0, description="失败数量")
+    results: List[PeriodicReportResponse] = Field(default_factory=list, description="成功的报告列表")
+    errors: Dict[str, str] = Field(default_factory=dict, description="失败的节点及错误信息")

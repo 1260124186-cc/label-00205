@@ -182,14 +182,22 @@ auth:
 
 # 大模型配置
 llm:
+  enabled: false              # LLM 智能诊断全局开关
   provider: "local"           # local, openai, qwen
   openai:
     api_key: ""               # OpenAI API密钥
     model: "gpt-3.5-turbo"
     base_url: "https://api.openai.com/v1"
+    max_tokens: 2000
+    temperature: 0.7
   qwen:
     api_key: ""               # 通义千问API密钥
     model: "qwen-turbo"
+    max_tokens: 2000
+    temperature: 0.7
+  report:
+    diagnosis_summary_max_length: 200  # 诊断摘要最大字数
+    enable_fallback: true               # LLM 不可用时是否回退到模板
 
 # 模型版本管理
 model_version:

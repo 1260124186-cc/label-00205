@@ -222,6 +222,7 @@ class PredictionOrchestrator:
         save_to_db: bool = True,
         version: Optional[str] = None,
         shadow_version: Optional[str] = None,
+        generate_diagnosis: bool = False,
     ) -> Dict[str, Any]:
         """
         螺栓状态预测（完整流水线）
@@ -235,14 +236,15 @@ class PredictionOrchestrator:
             save_to_db: 是否保存到数据库
             version: 使用指定版本的模型（None 表示当前活动版本）
             shadow_version: 影子版本号（Shadow Mode），仅运行预测不写库，用于A/B对比
+            generate_diagnosis: 是否生成 LLM 智能诊断报告（默认 False）
 
         Returns:
-            预测结果字典，包含 shadow_result（如果指定了 shadow_version）
+            预测结果字典，包含 shadow_result（如果指定了 shadow_version）和 diagnosis_report（如果启用）
         """
         start_time = time.time()
         set_bolt_id(str(bolt_id))
         
-        logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}, version={version or 'active'}, shadow_version={shadow_version}")
+        logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}, version={version or 'active'}, shadow_version={shadow_version}, generate_diagnosis={generate_diagnosis}")
 
         # 主版本预测
         main_result = self._run_bolt_prediction(
@@ -252,6 +254,7 @@ class PredictionOrchestrator:
             version=version,
             save_to_db=save_to_db,
             is_shadow=False,
+            generate_diagnosis=generate_diagnosis,
         )
 
         # Shadow Mode：副版本仅预测，不写库，不触发告警
@@ -264,6 +267,7 @@ class PredictionOrchestrator:
                     version=shadow_version,
                     save_to_db=False,
                     is_shadow=True,
+                    generate_diagnosis=False,
                 )
                 main_result['shadow_result'] = shadow_result
                 main_result['shadow_version'] = shadow_version
@@ -289,6 +293,7 @@ class PredictionOrchestrator:
         version: Optional[str],
         save_to_db: bool,
         is_shadow: bool = False,
+        generate_diagnosis: bool = False,
     ) -> Dict[str, Any]:
         """
         执行单次螺栓预测（核心预测流水线）
@@ -300,6 +305,7 @@ class PredictionOrchestrator:
             version: 模型版本号
             save_to_db: 是否保存到数据库
             is_shadow: 是否为影子模式（仅记录日志，不触发告警）
+            generate_diagnosis: 是否生成 LLM 智能诊断报告
 
         Returns:
             预测结果字典
@@ -548,6 +554,55 @@ class PredictionOrchestrator:
             model_type=model_type
         )
 
+        # Step 8: LLM 智能诊断报告（可选）
+        if generate_diagnosis and not is_shadow:
+            try:
+                from app.services.report import get_diagnosis_report_service
+                diagnosis_service = get_diagnosis_report_service()
+                
+                fault_type_mapping = {
+                    1: 'loosening',
+                    2: 'preload_decrease',
+                    3: 'severe_anomaly',
+                    4: 'failure',
+                }
+                fault_type = fault_type_mapping.get(final_status_code)
+                
+                recent_values = None
+                if data is not None and len(data) > 0:
+                    recent_values = [float(v) for v in data[-20:]]
+                
+                diagnosis_report = diagnosis_service.generate_single_report(
+                    status=final_status,
+                    risk_score=float(risk_assessment.score),
+                    node_type='bolt',
+                    node_id=str(bolt_id),
+                    fault_type=fault_type,
+                    trend=None,
+                    recent_values=recent_values,
+                    historical_incidents=None,
+                )
+                
+                result['diagnosis_report'] = {
+                    'diagnosis_summary': diagnosis_report.diagnosis_summary,
+                    'recommended_actions': diagnosis_report.recommended_actions,
+                    'urgency_level': diagnosis_report.urgency_level.value if hasattr(diagnosis_report.urgency_level, 'value') else diagnosis_report.urgency_level,
+                    'model': diagnosis_report.model,
+                    'tokens_used': diagnosis_report.tokens_used,
+                    'latency_ms': diagnosis_report.latency_ms,
+                    'is_fallback': diagnosis_report.is_fallback,
+                }
+                
+                logger.info(
+                    f"LLM诊断报告生成完成: 螺栓 {bolt_id}, "
+                    f"紧急程度={result['diagnosis_report']['urgency_level']}, "
+                    f"模型={diagnosis_report.model}, "
+                    f"耗时={diagnosis_report.latency_ms:.2f}ms"
+                )
+            except Exception as e:
+                logger.warning(f"LLM诊断报告生成失败，跳过: {e}")
+                result['diagnosis_report'] = None
+
         return result
 
     # ---------- 法兰面预测 ----------
@@ -562,6 +617,7 @@ class PredictionOrchestrator:
         enable_correlation_analysis: bool = True,
         version: Optional[str] = None,
         shadow_version: Optional[str] = None,
+        generate_diagnosis: bool = False,
     ) -> Dict[str, Any]:
         """
         法兰面状态预测（完整流水线）
@@ -577,16 +633,17 @@ class PredictionOrchestrator:
             enable_correlation_analysis: 是否启用关联分析（Granger因果、根因定位等）
             version: 使用指定版本的模型（None 表示当前活动版本）
             shadow_version: 影子版本号（Shadow Mode），仅运行预测不写库，用于A/B对比
+            generate_diagnosis: 是否生成 LLM 智能诊断报告（默认 False）
 
         Returns:
-            预测结果字典，包含 shadow_result（如果指定了 shadow_version）
+            预测结果字典，包含 shadow_result（如果指定了 shadow_version）和 diagnosis_report（如果启用）
         """
         start_time = time.time()
         set_bolt_id(str(flange_id))
 
         logger.info(
             f"开始法兰面预测: {flange_id}, 螺栓数: {len(multi_bolt_data) if multi_bolt_data else (len(bolt_data_dict) if bolt_data_dict else 0)}, "
-            f"version={version or 'active'}, shadow_version={shadow_version}"
+            f"version={version or 'active'}, shadow_version={shadow_version}, generate_diagnosis={generate_diagnosis}"
         )
 
         # 主版本预测
@@ -599,6 +656,7 @@ class PredictionOrchestrator:
             version=version,
             save_to_db=save_to_db,
             is_shadow=False,
+            generate_diagnosis=generate_diagnosis,
         )
 
         # Shadow Mode：副版本仅预测，不写库，不触发告警
@@ -613,6 +671,7 @@ class PredictionOrchestrator:
                     version=shadow_version,
                     save_to_db=False,
                     is_shadow=True,
+                    generate_diagnosis=False,
                 )
                 main_result['shadow_result'] = shadow_result
                 main_result['shadow_version'] = shadow_version
@@ -640,6 +699,7 @@ class PredictionOrchestrator:
         version: Optional[str],
         save_to_db: bool,
         is_shadow: bool = False,
+        generate_diagnosis: bool = False,
     ) -> Dict[str, Any]:
         """
         执行单次法兰面预测（核心预测流水线）
@@ -652,6 +712,8 @@ class PredictionOrchestrator:
             enable_correlation_analysis: 是否启用关联分析
             version: 模型版本号
             save_to_db: 是否保存到数据库
+            is_shadow: 是否为影子模式
+            generate_diagnosis: 是否生成 LLM 智能诊断报告
             is_shadow: 是否为影子模式
 
         Returns:
@@ -907,6 +969,59 @@ class PredictionOrchestrator:
             model_type=model_type
         )
 
+        # Step 8: LLM 智能诊断报告（可选）
+        if generate_diagnosis and not is_shadow:
+            try:
+                from app.services.report import get_diagnosis_report_service
+                diagnosis_service = get_diagnosis_report_service()
+                
+                fault_type_mapping = {
+                    1: 'loosening',
+                    2: 'preload_decrease',
+                    3: 'severe_anomaly',
+                    4: 'failure',
+                }
+                fault_type = fault_type_mapping.get(final_status_code)
+                
+                recent_values = None
+                if multi_bolt_data is not None and len(multi_bolt_data) > 0:
+                    all_values = []
+                    for bolt_data in multi_bolt_data:
+                        if bolt_data is not None and len(bolt_data) > 0:
+                            all_values.extend([float(v) for v in bolt_data[-10:]])
+                    recent_values = all_values[:30]
+                
+                diagnosis_report = diagnosis_service.generate_single_report(
+                    status=final_status,
+                    risk_score=float(risk_assessment.score),
+                    node_type='flange',
+                    node_id=str(flange_id),
+                    fault_type=fault_type,
+                    trend=None,
+                    recent_values=recent_values,
+                    historical_incidents=None,
+                )
+                
+                result['diagnosis_report'] = {
+                    'diagnosis_summary': diagnosis_report.diagnosis_summary,
+                    'recommended_actions': diagnosis_report.recommended_actions,
+                    'urgency_level': diagnosis_report.urgency_level.value if hasattr(diagnosis_report.urgency_level, 'value') else diagnosis_report.urgency_level,
+                    'model': diagnosis_report.model,
+                    'tokens_used': diagnosis_report.tokens_used,
+                    'latency_ms': diagnosis_report.latency_ms,
+                    'is_fallback': diagnosis_report.is_fallback,
+                }
+                
+                logger.info(
+                    f"LLM诊断报告生成完成: 法兰面 {flange_id}, "
+                    f"紧急程度={result['diagnosis_report']['urgency_level']}, "
+                    f"模型={diagnosis_report.model}, "
+                    f"耗时={diagnosis_report.latency_ms:.2f}ms"
+                )
+            except Exception as e:
+                logger.warning(f"LLM诊断报告生成失败，跳过: {e}")
+                result['diagnosis_report'] = None
+
         return result
 
     def _estimate_single_bolt_status(self, data: np.ndarray) -> int:
@@ -953,12 +1068,19 @@ class PredictionOrchestrator:
         node_id: str,
         node_type: str,
         data: np.ndarray,
+        generate_diagnosis: bool = False,
     ) -> Dict[str, Any]:
         """
         单独的风险评估接口（不经过模型和策略）
+        
+        Args:
+            node_id: 节点ID
+            node_type: 节点类型 bolt/flange
+            data: 预紧力数据
+            generate_diagnosis: 是否生成 LLM 智能诊断报告（默认 False）
         """
         assessment = self.risk_model.assess_risk(data)
-        return {
+        result = {
             'node_id': node_id,
             'node_type': node_type,
             'risk_score': float(assessment.score),
@@ -968,6 +1090,49 @@ class PredictionOrchestrator:
             'recommendations': assessment.recommendations,
             'confidence': float(assessment.confidence),
         }
+        
+        # LLM 智能诊断报告（可选）
+        if generate_diagnosis:
+            try:
+                from app.services.report import get_diagnosis_report_service
+                diagnosis_service = get_diagnosis_report_service()
+                
+                recent_values = None
+                if data is not None and len(data) > 0:
+                    recent_values = [float(v) for v in data[-20:]]
+                
+                diagnosis_report = diagnosis_service.generate_single_report(
+                    status=assessment.level.value,
+                    risk_score=float(assessment.score),
+                    node_type=node_type,
+                    node_id=str(node_id),
+                    fault_type=None,
+                    trend=None,
+                    recent_values=recent_values,
+                    historical_incidents=None,
+                )
+                
+                result['diagnosis_report'] = {
+                    'diagnosis_summary': diagnosis_report.diagnosis_summary,
+                    'recommended_actions': diagnosis_report.recommended_actions,
+                    'urgency_level': diagnosis_report.urgency_level.value if hasattr(diagnosis_report.urgency_level, 'value') else diagnosis_report.urgency_level,
+                    'model': diagnosis_report.model,
+                    'tokens_used': diagnosis_report.tokens_used,
+                    'latency_ms': diagnosis_report.latency_ms,
+                    'is_fallback': diagnosis_report.is_fallback,
+                }
+                
+                logger.info(
+                    f"LLM诊断报告生成完成: {node_type} {node_id}, "
+                    f"紧急程度={result['diagnosis_report']['urgency_level']}, "
+                    f"模型={diagnosis_report.model}, "
+                    f"耗时={diagnosis_report.latency_ms:.2f}ms"
+                )
+            except Exception as e:
+                logger.warning(f"LLM诊断报告生成失败，跳过: {e}")
+                result['diagnosis_report'] = None
+        
+        return result
 
     # ---------- 月度趋势预测 ----------
 

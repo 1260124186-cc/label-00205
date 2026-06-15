@@ -143,6 +143,10 @@ from app.api.schemas import (
     APIKeyRotateResponse, APIKeyRevokeResponse,
     APIAuditLogResponse, APIAuditLogListResponse,
     RateLimitStatusResponse,
+    DiagnosisReportRequest, DiagnosisReportResponse,
+    ReportGenerateRequest, ReportStatisticsSchema,
+    PeriodicReportResponse, BatchReportGenerateRequest,
+    BatchReportResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -8325,4 +8329,209 @@ async def query_audit_logs(
         raise
     except Exception as e:
         logger.error(f"查询审计日志失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== LLM 智能诊断报告 ====================
+
+_diagnosis_report_service = None
+
+
+def _get_diagnosis_report_service():
+    """获取诊断报告服务实例"""
+    global _diagnosis_report_service
+    if _diagnosis_report_service is None:
+        from app.services.report import get_diagnosis_report_service
+        _diagnosis_report_service = get_diagnosis_report_service()
+    return _diagnosis_report_service
+
+
+@router.post(
+    "/report/diagnosis",
+    response_model=DiagnosisReportResponse,
+    tags=["LLM智能诊断"],
+    summary="生成单次诊断报告"
+)
+async def generate_diagnosis_report(request: DiagnosisReportRequest):
+    """
+    生成单次诊断报告（可选调用 LLM）
+
+    输入结构化数据，输出诊断摘要、推荐措施和紧急程度。
+    LLM 不可用时自动降级到模板生成。
+    """
+    try:
+        service = _get_diagnosis_report_service()
+
+        report = await service.generate_single_report_async(
+            status=request.status,
+            risk_score=request.risk_score,
+            node_type=request.node_type,
+            node_id=request.node_id or "",
+            fault_type=request.fault_type,
+            trend=request.trend,
+            recent_values=request.recent_values,
+            historical_incidents=request.historical_incidents,
+        )
+
+        return DiagnosisReportResponse(
+            diagnosis_summary=report.diagnosis_summary,
+            recommended_actions=report.recommended_actions,
+            urgency_level=report.urgency_level.value if hasattr(report.urgency_level, 'value') else report.urgency_level,
+            model=report.model,
+            tokens_used=report.tokens_used,
+            latency_ms=report.latency_ms,
+            is_fallback=report.is_fallback,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成诊断报告失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/report/generate",
+    response_model=PeriodicReportResponse,
+    tags=["LLM智能诊断"],
+    summary="生成周期报告（周报/月报）"
+)
+async def generate_periodic_report(request: ReportGenerateRequest):
+    """
+    按 bolt_id/flange_id 聚合近期预测生成周报/月报
+
+    - report_type: weekly（周报）/ monthly（月报）
+    - use_llm: 是否使用 LLM 生成（默认 True，不可用时自动降级）
+    """
+    try:
+        service = _get_diagnosis_report_service()
+
+        report = await service.generate_periodic_report_async(
+            node_type=request.node_type,
+            node_id=request.node_id,
+            report_type=request.report_type,
+            use_llm=request.use_llm if request.use_llm is not None else True,
+        )
+
+        return PeriodicReportResponse(
+            report_type=report.report_type.value if hasattr(report.report_type, 'value') else report.report_type,
+            node_id=report.node_id,
+            node_type=report.node_type,
+            period_start=report.period_start,
+            period_end=report.period_end,
+            diagnosis_summary=report.diagnosis_summary,
+            recommended_actions=report.recommended_actions,
+            urgency_level=report.urgency_level.value if hasattr(report.urgency_level, 'value') else report.urgency_level,
+            statistics=ReportStatisticsSchema(
+                prediction_count=report.statistics.prediction_count,
+                avg_risk_score=report.statistics.avg_risk_score,
+                min_risk_score=report.statistics.min_risk_score,
+                max_risk_score=report.statistics.max_risk_score,
+                status_distribution=report.statistics.status_distribution,
+                trend=report.statistics.trend,
+                max_status=report.statistics.max_status,
+                fault_types=report.statistics.fault_types,
+            ),
+            generated_at=report.generated_at,
+            model=report.model,
+            is_fallback=report.is_fallback,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成周期报告失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/report/batch-generate",
+    response_model=BatchReportResponse,
+    tags=["LLM智能诊断"],
+    summary="批量生成周期报告"
+)
+async def batch_generate_periodic_reports(request: BatchReportGenerateRequest):
+    """
+    批量生成多个节点的周期报告（周报/月报）
+    """
+    try:
+        service = _get_diagnosis_report_service()
+
+        results = []
+        errors = {}
+        success_count = 0
+        failed_count = 0
+
+        for node_id in request.node_ids:
+            try:
+                report = await service.generate_periodic_report_async(
+                    node_type=request.node_type,
+                    node_id=node_id,
+                    report_type=request.report_type,
+                    use_llm=True,
+                )
+
+                results.append(PeriodicReportResponse(
+                    report_type=report.report_type.value if hasattr(report.report_type, 'value') else report.report_type,
+                    node_id=report.node_id,
+                    node_type=report.node_type,
+                    period_start=report.period_start,
+                    period_end=report.period_end,
+                    diagnosis_summary=report.diagnosis_summary,
+                    recommended_actions=report.recommended_actions,
+                    urgency_level=report.urgency_level.value if hasattr(report.urgency_level, 'value') else report.urgency_level,
+                    statistics=ReportStatisticsSchema(
+                        prediction_count=report.statistics.prediction_count,
+                        avg_risk_score=report.statistics.avg_risk_score,
+                        min_risk_score=report.statistics.min_risk_score,
+                        max_risk_score=report.statistics.max_risk_score,
+                        status_distribution=report.statistics.status_distribution,
+                        trend=report.statistics.trend,
+                        max_status=report.statistics.max_status,
+                        fault_types=report.statistics.fault_types,
+                    ),
+                    generated_at=report.generated_at,
+                    model=report.model,
+                    is_fallback=report.is_fallback,
+                ))
+                success_count += 1
+            except Exception as e:
+                errors[node_id] = str(e)
+                failed_count += 1
+
+        return BatchReportResponse(
+            total=len(request.node_ids),
+            success=success_count,
+            failed=failed_count,
+            results=results,
+            errors=errors,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量生成报告失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/report/config",
+    tags=["LLM智能诊断"],
+    summary="获取 LLM 配置状态"
+)
+async def get_llm_config_status():
+    """
+    获取 LLM 配置状态，包括是否启用、当前 provider、支持的功能等
+    """
+    try:
+        from app.core.llm_client import LLMClient
+
+        llm_client = LLMClient()
+
+        return {
+            "enabled": llm_client.is_enabled(),
+            "provider": llm_client.provider,
+            "supported_providers": list(llm_client._clients.keys()),
+            "fallback_available": "local" in llm_client._clients,
+            "message": "LLM 诊断功能已启用" if llm_client.is_enabled() else "LLM 诊断功能已禁用，将使用模板降级",
+        }
+    except Exception as e:
+        logger.error(f"获取 LLM 配置状态失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
