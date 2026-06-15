@@ -609,6 +609,94 @@ class StrategyConfigResponse(BaseModel):
     updated_at: datetime
 
 
+class StrategyConfigUpdateRequest(BaseModel):
+    """预警策略动态配置更新请求"""
+    scope: str = Field('global', description="作用域: global/bolt/flange/production_line")
+    node_type: Optional[str] = Field(None, description="节点类型 bolt/flange/production_line，scope非global时必填")
+    node_id: Optional[str] = Field(None, description="节点ID，scope非global时必填")
+    strategy_type: int = Field(..., ge=1, le=2, description="策略类型: 1=应报尽报, 2=精准报警")
+    confidence_threshold: Optional[float] = Field(None, ge=0, le=1, description="置信度阈值")
+    false_positive_threshold: Optional[float] = Field(None, ge=0, le=1, description="误报容忍度")
+    false_negative_threshold: Optional[float] = Field(None, ge=0, le=1, description="漏报容忍度")
+    description: Optional[str] = Field(None, description="变更说明")
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+
+
+class StrategyConfigItemResponse(BaseModel):
+    """单条策略配置响应"""
+    id: int
+    scope: str = 'global'
+    node_type: Optional[str] = None
+    node_id: Optional[str] = None
+    strategy_type: int
+    confidence_threshold: float
+    false_positive_threshold: Optional[float] = None
+    false_negative_threshold: Optional[float] = None
+    version: int = 1
+    is_active: bool = True
+    description: Optional[str] = None
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+
+class EffectiveStrategyResponse(BaseModel):
+    """当前生效策略响应（含全局和节点覆盖）"""
+    global_config: StrategyConfigItemResponse
+    node_overrides: List[StrategyConfigItemResponse] = Field(default_factory=list)
+    effective: StrategyConfigItemResponse
+
+
+class StrategyConfigListResponse(BaseModel):
+    """策略配置列表响应"""
+    total: int
+    items: List[StrategyConfigItemResponse]
+
+
+class StrategyRollbackRequest(BaseModel):
+    """策略回滚请求"""
+    target_version: int = Field(..., ge=1, description="回滚目标版本号")
+    scope: str = Field('global', description="作用域")
+    node_type: Optional[str] = Field(None, description="节点类型")
+    node_id: Optional[str] = Field(None, description="节点ID")
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+
+
+class StrategyAuditLogResponse(BaseModel):
+    """策略审计日志响应"""
+    id: int
+    config_id: int
+    scope: str
+    node_type: Optional[str] = None
+    node_id: Optional[str] = None
+    action: str
+    old_value: Optional[Dict[str, Any]] = None
+    new_value: Optional[Dict[str, Any]] = None
+    version_before: Optional[int] = None
+    version_after: Optional[int] = None
+    change_summary: Optional[str] = None
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    create_time: Optional[datetime] = None
+
+
+class StrategyAuditLogListResponse(BaseModel):
+    """策略审计日志列表响应"""
+    total: int
+    items: List[StrategyAuditLogResponse]
+
+
+class StrategyNodeOverrideDeleteRequest(BaseModel):
+    """删除节点级策略覆盖请求"""
+    node_type: str = Field(..., description="节点类型 bolt/flange/production_line")
+    node_id: str = Field(..., description="节点ID")
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+
+
 # ==================== 联邦学习 ====================
 
 class FederatedClientRegisterRequest(BaseModel):

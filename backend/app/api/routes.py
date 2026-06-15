@@ -36,6 +36,10 @@ from app.api.schemas import (
     TrainingRequest, TrainingResponse,
     ModelInfoResponse,
     StrategyConfigRequest, StrategyConfigResponse,
+    StrategyConfigUpdateRequest, StrategyConfigItemResponse,
+    EffectiveStrategyResponse, StrategyConfigListResponse,
+    StrategyRollbackRequest, StrategyAuditLogResponse,
+    StrategyAuditLogListResponse, StrategyNodeOverrideDeleteRequest,
     FederatedClientRegisterRequest, FederatedClientRegisterResponse,
     FederatedGlobalModelRequest, FederatedGlobalModelResponse,
     FederatedUpdateUploadRequest, FederatedUpdateUploadResponse,
@@ -1183,44 +1187,259 @@ async def import_labels_from_db(request: LabelImportDBRequest):
 
 # ==================== 策略配置 ====================
 
-@router.post(
+@router.get(
     "/strategy/config",
-    response_model=StrategyConfigResponse,
+    response_model=EffectiveStrategyResponse,
     tags=["配置"],
-    summary="配置预警策略"
+    summary="查询当前生效策略"
 )
-async def config_strategy(request: StrategyConfigRequest):
+async def get_strategy_config(
+    node_type: Optional[str] = Query(None, description="节点类型 bolt/flange/production_line"),
+    node_id: Optional[str] = Query(None, description="节点ID"),
+):
     """
-    配置预警策略
+    查询当前生效的预警策略
 
-    策略1: 应报尽报，可能误报
-    策略2: 精准报警，可能漏报
+    - 不传参数：返回全局策略
+    - 传入 node_type + node_id：返回该节点的生效策略（含节点覆盖）
+    - 节点级覆盖优先于全局策略
     """
     try:
-        # 更新配置（这里简化处理，实际应该持久化）
-        strategy_config = config.get('warning_strategy', {})
+        from app.services.prediction.strategy_config_service import (
+            get_strategy_config_service,
+        )
+        service = get_strategy_config_service()
 
-        strategy_type = request.strategy_type
+        global_cfg = service.get_effective()
+        global_item = StrategyConfigItemResponse(**global_cfg)
 
-        if strategy_type == 1:
-            confidence_threshold = request.confidence_threshold or 0.7
-            false_positive_threshold = request.false_positive_threshold or 0.05
-            false_negative_threshold = None
+        node_overrides = []
+        if node_type and node_id:
+            override_cfg = service.get_effective(node_type, node_id)
+            if override_cfg.get('scope') != 'global':
+                node_overrides.append(StrategyConfigItemResponse(**override_cfg))
+            effective_cfg = override_cfg
         else:
-            confidence_threshold = request.confidence_threshold or 0.95
-            false_positive_threshold = None
-            false_negative_threshold = request.false_negative_threshold or 0.10
+            effective_cfg = global_cfg
 
-        return StrategyConfigResponse(
-            strategy_type=strategy_type,
-            confidence_threshold=confidence_threshold,
-            false_positive_threshold=false_positive_threshold,
-            false_negative_threshold=false_negative_threshold,
-            updated_at=datetime.now()
+        effective_item = StrategyConfigItemResponse(**effective_cfg)
+
+        return EffectiveStrategyResponse(
+            global_config=global_item,
+            node_overrides=node_overrides,
+            effective=effective_item,
         )
 
     except Exception as e:
-        logger.error(f"策略配置失败: {e}")
+        logger.error(f"查询策略配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/strategy/config",
+    response_model=StrategyConfigItemResponse,
+    tags=["配置"],
+    summary="更新预警策略（立即生效）"
+)
+async def update_strategy_config(request: StrategyConfigUpdateRequest):
+    """
+    更新预警策略配置，更新后立即生效
+
+    - scope=global: 更新全局策略
+    - scope=bolt/flange/production_line + node_type + node_id: 创建/更新节点级覆盖
+    - 节点级覆盖优先于全局策略
+    - 每次更新自动生成新版本，旧版本保留可回滚
+    - 所有变更记录审计日志
+    """
+    try:
+        if request.scope != 'global' and (not request.node_type or not request.node_id):
+            raise HTTPException(
+                status_code=400,
+                detail="scope非global时，node_type和node_id为必填"
+            )
+
+        from app.services.prediction.strategy_config_service import (
+            get_strategy_config_service,
+        )
+        service = get_strategy_config_service()
+
+        result = service.update_config(
+            scope=request.scope,
+            node_type=request.node_type if request.scope != 'global' else None,
+            node_id=request.node_id if request.scope != 'global' else None,
+            strategy_type=request.strategy_type,
+            confidence_threshold=request.confidence_threshold,
+            false_positive_threshold=request.false_positive_threshold,
+            false_negative_threshold=request.false_negative_threshold,
+            description=request.description,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+        )
+
+        if result is None:
+            raise HTTPException(status_code=500, detail="策略配置更新失败")
+
+        return StrategyConfigItemResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"策略配置更新失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/strategy/config/list",
+    response_model=StrategyConfigListResponse,
+    tags=["配置"],
+    summary="列出策略配置（含历史版本）"
+)
+async def list_strategy_configs(
+    scope: Optional[str] = Query(None, description="作用域过滤"),
+    node_type: Optional[str] = Query(None, description="节点类型过滤"),
+    node_id: Optional[str] = Query(None, description="节点ID过滤"),
+    is_active: Optional[bool] = Query(None, description="是否仅当前生效"),
+    limit: int = Query(100, ge=1, le=500, description="返回数量限制"),
+):
+    try:
+        from app.services.prediction.strategy_config_service import (
+            get_strategy_config_service,
+        )
+        service = get_strategy_config_service()
+
+        items = service.list_configs(
+            scope=scope,
+            node_type=node_type,
+            node_id=node_id,
+            is_active=is_active,
+            limit=limit,
+        )
+
+        return StrategyConfigListResponse(
+            total=len(items),
+            items=[StrategyConfigItemResponse(**i) for i in items],
+        )
+
+    except Exception as e:
+        logger.error(f"列出策略配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/strategy/config/rollback",
+    response_model=StrategyConfigItemResponse,
+    tags=["配置"],
+    summary="回滚策略到历史版本"
+)
+async def rollback_strategy_config(request: StrategyRollbackRequest):
+    """
+    回滚策略配置到指定版本
+
+    - 回滚基于历史版本创建新版本（版本号自增）
+    - 操作记录审计日志
+    """
+    try:
+        from app.services.prediction.strategy_config_service import (
+            get_strategy_config_service,
+        )
+        service = get_strategy_config_service()
+
+        result = service.rollback(
+            target_version=request.target_version,
+            scope=request.scope,
+            node_type=request.node_type,
+            node_id=request.node_id,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+        )
+
+        if result is None:
+            raise HTTPException(status_code=404, detail="回滚目标版本不存在")
+
+        return StrategyConfigItemResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"策略回滚失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/strategy/config/audit",
+    response_model=StrategyAuditLogListResponse,
+    tags=["配置"],
+    summary="查询策略变更审计日志"
+)
+async def get_strategy_audit_logs(
+    scope: Optional[str] = Query(None, description="作用域过滤"),
+    node_type: Optional[str] = Query(None, description="节点类型过滤"),
+    node_id: Optional[str] = Query(None, description="节点ID过滤"),
+    action: Optional[str] = Query(None, description="操作类型过滤: create/update/rollback"),
+    operator_id: Optional[str] = Query(None, description="操作人ID过滤"),
+    limit: int = Query(50, ge=1, le=200, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    try:
+        from app.services.prediction.strategy_config_service import (
+            get_strategy_config_service,
+        )
+        service = get_strategy_config_service()
+
+        items = service.get_audit_logs(
+            scope=scope,
+            node_type=node_type,
+            node_id=node_id,
+            action=action,
+            operator_id=operator_id,
+            limit=limit,
+            offset=offset,
+        )
+
+        return StrategyAuditLogListResponse(
+            total=len(items),
+            items=[StrategyAuditLogResponse(**i) for i in items],
+        )
+
+    except Exception as e:
+        logger.error(f"查询策略审计日志失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/strategy/config/override",
+    tags=["配置"],
+    summary="删除节点级策略覆盖"
+)
+async def delete_strategy_override(request: StrategyNodeOverrideDeleteRequest):
+    """
+    删除节点级策略覆盖，该节点回退到全局策略
+
+    - 仅删除节点级覆盖，不影响全局策略
+    - 操作记录审计日志
+    """
+    try:
+        from app.services.prediction.strategy_config_service import (
+            get_strategy_config_service,
+        )
+        service = get_strategy_config_service()
+
+        success = service.delete_node_override(
+            node_type=request.node_type,
+            node_id=request.node_id,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+        )
+
+        if not success:
+            raise HTTPException(status_code=404, detail="未找到该节点的策略覆盖")
+
+        return {"message": f"已删除 {request.node_type}/{request.node_id} 的策略覆盖，回退到全局策略"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除节点策略覆盖失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

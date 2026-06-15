@@ -1514,6 +1514,62 @@ class AnomalyData(Base):
     )
 
 
+class StrategyConfig(Base):
+    __tablename__ = 'sc_strategy_config'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    scope = Column(String(20), nullable=False, default='global', comment='作用域 global/bolt/flange/production_line')
+    node_type = Column(String(20), comment='节点类型 bolt/flange/production_line，global时为NULL')
+    node_id = Column(String(100), comment='节点ID，global时为NULL')
+    strategy_type = Column(Integer, nullable=False, default=1, comment='策略类型 1=应报尽报 2=精准报警')
+    confidence_threshold = Column(Float, nullable=False, default=0.7, comment='置信度阈值 0-1')
+    false_positive_threshold = Column(Float, comment='误报容忍度 0-1')
+    false_negative_threshold = Column(Float, comment='漏报容忍度 0-1')
+    version = Column(Integer, nullable=False, default=1, comment='版本号，每次更新自增')
+    is_active = Column(Boolean, default=True, comment='是否为当前生效版本')
+    description = Column(String(500), comment='变更说明')
+    operator_id = Column(String(50), comment='操作人ID')
+    operator_name = Column(String(100), comment='操作人姓名')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_strategy_scope', 'scope', 'node_type', 'node_id'),
+        Index('idx_strategy_active', 'is_active'),
+        Index('idx_strategy_version', 'scope', 'node_type', 'node_id', 'version'),
+        Index('idx_strategy_tenant', 'tenant_id'),
+    )
+
+
+class StrategyAuditLog(Base):
+    __tablename__ = 'sc_strategy_audit_log'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    config_id = Column(BigInteger, nullable=False, comment='关联策略配置ID')
+    scope = Column(String(20), nullable=False, comment='作用域 global/bolt/flange/production_line')
+    node_type = Column(String(20), comment='节点类型')
+    node_id = Column(String(100), comment='节点ID')
+    action = Column(String(30), nullable=False, comment='操作类型 create/update/rollback')
+    old_value = Column(Text, comment='变更前值 JSON')
+    new_value = Column(Text, comment='变更后值 JSON')
+    version_before = Column(Integer, comment='变更前版本号')
+    version_after = Column(Integer, comment='变更后版本号')
+    change_summary = Column(String(500), comment='变更摘要')
+    operator_id = Column(String(50), comment='操作人ID')
+    operator_name = Column(String(100), comment='操作人姓名')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_audit_config', 'config_id'),
+        Index('idx_audit_scope', 'scope', 'node_type', 'node_id'),
+        Index('idx_audit_action', 'action'),
+        Index('idx_audit_time', 'create_time'),
+        Index('idx_audit_operator', 'operator_id'),
+    )
+
+
 class ManualLabelData(Base):
     """
     人工标注数据表模型

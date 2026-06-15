@@ -1051,3 +1051,57 @@ DEALLOCATE PREPARE alterIfNotExists;
 
 -- 显示异常表字段
 SHOW COLUMNS FROM sc_anomaly_data;
+
+-- ============================================================
+-- 预警策略动态配置与持久化
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS sc_strategy_config (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    scope VARCHAR(20) NOT NULL DEFAULT 'global' COMMENT '作用域 global/bolt/flange/production_line',
+    node_type VARCHAR(20) COMMENT '节点类型 bolt/flange/production_line，global时为NULL',
+    node_id VARCHAR(100) COMMENT '节点ID，global时为NULL',
+    strategy_type INT NOT NULL DEFAULT 1 COMMENT '策略类型 1=应报尽报 2=精准报警',
+    confidence_threshold DOUBLE NOT NULL DEFAULT 0.7 COMMENT '置信度阈值 0-1',
+    false_positive_threshold DOUBLE COMMENT '误报容忍度 0-1',
+    false_negative_threshold DOUBLE COMMENT '漏报容忍度 0-1',
+    version INT NOT NULL DEFAULT 1 COMMENT '版本号，每次更新自增',
+    is_active TINYINT(1) DEFAULT 1 COMMENT '是否为当前生效版本',
+    description VARCHAR(500) COMMENT '变更说明',
+    operator_id VARCHAR(50) COMMENT '操作人ID',
+    operator_name VARCHAR(100) COMMENT '操作人姓名',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_strategy_scope (scope, node_type, node_id),
+    INDEX idx_strategy_active (is_active),
+    INDEX idx_strategy_version (scope, node_type, node_id, version),
+    INDEX idx_strategy_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='预警策略配置表';
+
+CREATE TABLE IF NOT EXISTS sc_strategy_audit_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    config_id BIGINT NOT NULL COMMENT '关联策略配置ID',
+    scope VARCHAR(20) NOT NULL COMMENT '作用域 global/bolt/flange/production_line',
+    node_type VARCHAR(20) COMMENT '节点类型',
+    node_id VARCHAR(100) COMMENT '节点ID',
+    action VARCHAR(30) NOT NULL COMMENT '操作类型 create/update/rollback',
+    old_value TEXT COMMENT '变更前值 JSON',
+    new_value TEXT COMMENT '变更后值 JSON',
+    version_before INT COMMENT '变更前版本号',
+    version_after INT COMMENT '变更后版本号',
+    change_summary VARCHAR(500) COMMENT '变更摘要',
+    operator_id VARCHAR(50) COMMENT '操作人ID',
+    operator_name VARCHAR(100) COMMENT '操作人姓名',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_audit_config (config_id),
+    INDEX idx_audit_scope (scope, node_type, node_id),
+    INDEX idx_audit_action (action),
+    INDEX idx_audit_time (create_time),
+    INDEX idx_audit_operator (operator_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='预警策略审计日志表';
+
+INSERT INTO sc_strategy_config (scope, strategy_type, confidence_threshold, false_positive_threshold, false_negative_threshold, version, is_active, description) VALUES
+('global', 1, 0.7, 0.05, NULL, 1, 1, '默认全局策略：应报尽报'),
+('global', 2, 0.95, NULL, 0.10, 1, 0, '默认全局策略：精准报警（备用）');

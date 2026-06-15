@@ -13,7 +13,12 @@ import type {
   ThresholdConfig,
   ScheduledJob,
   SchedulerJobUpdateRequest,
-  ConfigCenterResponse
+  ConfigCenterResponse,
+  StrategyConfigItem,
+  EffectiveStrategyResponse,
+  StrategyConfigUpdateRequest,
+  StrategyRollbackRequest,
+  StrategyAuditLog
 } from '@/types'
 import {
   getMockAlertRules,
@@ -397,6 +402,195 @@ export async function triggerSchedulerJob(jobId: string): Promise<boolean> {
     return true
   } catch (err) {
     console.error('触发调度任务失败:', err)
+    return false
+  }
+}
+
+// ==================== 预警策略动态配置 API ====================
+
+const strategyApi = axios.create({
+  baseURL: '/api',
+  timeout: 10000
+})
+
+export async function fetchEffectiveStrategy(
+  nodeType?: string,
+  nodeId?: string
+): Promise<EffectiveStrategyResponse | null> {
+  if (USE_MOCK) {
+    const mockGlobal: StrategyConfigItem = {
+      id: 1,
+      scope: 'global',
+      node_type: null,
+      node_id: null,
+      strategy_type: 1,
+      confidence_threshold: 0.7,
+      false_positive_threshold: 0.05,
+      false_negative_threshold: null,
+      version: 1,
+      is_active: true,
+      description: '默认全局策略：应报尽报',
+      operator_id: null,
+      operator_name: null,
+      create_time: new Date().toISOString(),
+      update_time: new Date().toISOString()
+    }
+    return Promise.resolve({
+      global_config: mockGlobal,
+      node_overrides: [],
+      effective: mockGlobal
+    })
+  }
+  try {
+    const params: Record<string, string> = {}
+    if (nodeType) params.node_type = nodeType
+    if (nodeId) params.node_id = nodeId
+    const res = await strategyApi.get<EffectiveStrategyResponse>('/strategy/config', { params })
+    return res.data
+  } catch (err) {
+    console.error('查询生效策略失败:', err)
+    return null
+  }
+}
+
+export async function updateStrategyConfig(
+  data: StrategyConfigUpdateRequest
+): Promise<StrategyConfigItem | null> {
+  if (USE_MOCK) {
+    return Promise.resolve({
+      id: Date.now(),
+      scope: data.scope || 'global',
+      node_type: data.node_type || null,
+      node_id: data.node_id || null,
+      strategy_type: data.strategy_type,
+      confidence_threshold: data.confidence_threshold || (data.strategy_type === 1 ? 0.7 : 0.95),
+      false_positive_threshold: data.strategy_type === 1 ? (data.false_positive_threshold ?? 0.05) : null,
+      false_negative_threshold: data.strategy_type === 2 ? (data.false_negative_threshold ?? 0.10) : null,
+      version: 2,
+      is_active: true,
+      description: data.description || '策略更新',
+      operator_id: data.operator_id || null,
+      operator_name: data.operator_name || null,
+      create_time: new Date().toISOString(),
+      update_time: new Date().toISOString()
+    })
+  }
+  try {
+    const res = await strategyApi.post<StrategyConfigItem>('/strategy/config', data)
+    return res.data
+  } catch (err) {
+    console.error('更新策略配置失败:', err)
+    return null
+  }
+}
+
+export async function listStrategyConfigs(
+  scope?: string,
+  nodeType?: string,
+  nodeId?: string,
+  isActive?: boolean
+): Promise<{ total: number; items: StrategyConfigItem[] }> {
+  if (USE_MOCK) {
+    const mockItem: StrategyConfigItem = {
+      id: 1,
+      scope: 'global',
+      node_type: null,
+      node_id: null,
+      strategy_type: 1,
+      confidence_threshold: 0.7,
+      false_positive_threshold: 0.05,
+      false_negative_threshold: null,
+      version: 1,
+      is_active: true,
+      description: '默认全局策略',
+      operator_id: null,
+      operator_name: null,
+      create_time: new Date().toISOString(),
+      update_time: new Date().toISOString()
+    }
+    return Promise.resolve({ total: 1, items: [mockItem] })
+  }
+  try {
+    const params: Record<string, string | boolean> = {}
+    if (scope) params.scope = scope
+    if (nodeType) params.node_type = nodeType
+    if (nodeId) params.node_id = nodeId
+    if (isActive !== undefined) params.is_active = isActive
+    const res = await strategyApi.get<{ total: number; items: StrategyConfigItem[] }>('/strategy/config/list', { params })
+    return res.data
+  } catch (err) {
+    console.error('列出策略配置失败:', err)
+    return { total: 0, items: [] }
+  }
+}
+
+export async function rollbackStrategy(
+  data: StrategyRollbackRequest
+): Promise<StrategyConfigItem | null> {
+  if (USE_MOCK) {
+    return Promise.resolve({
+      id: Date.now(),
+      scope: data.scope || 'global',
+      node_type: data.node_type || null,
+      node_id: data.node_id || null,
+      strategy_type: 1,
+      confidence_threshold: 0.7,
+      false_positive_threshold: 0.05,
+      false_negative_threshold: null,
+      version: data.target_version + 1,
+      is_active: true,
+      description: `回滚到 v${data.target_version}`,
+      operator_id: data.operator_id || null,
+      operator_name: data.operator_name || null,
+      create_time: new Date().toISOString(),
+      update_time: new Date().toISOString()
+    })
+  }
+  try {
+    const res = await strategyApi.post<StrategyConfigItem>('/strategy/config/rollback', data)
+    return res.data
+  } catch (err) {
+    console.error('策略回滚失败:', err)
+    return null
+  }
+}
+
+export async function fetchStrategyAuditLogs(
+  scope?: string,
+  nodeType?: string,
+  nodeId?: string,
+  action?: string,
+  limit = 50
+): Promise<{ total: number; items: StrategyAuditLog[] }> {
+  if (USE_MOCK) {
+    return Promise.resolve({ total: 0, items: [] })
+  }
+  try {
+    const params: Record<string, string | number> = { limit }
+    if (scope) params.scope = scope
+    if (nodeType) params.node_type = nodeType
+    if (nodeId) params.node_id = nodeId
+    if (action) params.action = action
+    const res = await strategyApi.get<{ total: number; items: StrategyAuditLog[] }>('/strategy/config/audit', { params })
+    return res.data
+  } catch (err) {
+    console.error('查询策略审计日志失败:', err)
+    return { total: 0, items: [] }
+  }
+}
+
+export async function deleteStrategyOverride(
+  nodeType: string,
+  nodeId: string
+): Promise<boolean> {
+  if (USE_MOCK) {
+    return Promise.resolve(true)
+  }
+  try {
+    await strategyApi.delete('/strategy/config/override', { data: { node_type: nodeType, node_id: nodeId } })
+    return true
+  } catch (err) {
+    console.error('删除节点策略覆盖失败:', err)
     return false
   }
 }

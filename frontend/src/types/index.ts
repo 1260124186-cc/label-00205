@@ -603,6 +603,83 @@ export interface WarningStrategyConfig {
   strategy_2_false_negative_threshold: number
 }
 
+export interface StrategyConfigItem {
+  id: number
+  scope: 'global' | 'bolt' | 'flange' | 'production_line'
+  node_type: string | null
+  node_id: string | null
+  strategy_type: AlertStrategy
+  confidence_threshold: number
+  false_positive_threshold: number | null
+  false_negative_threshold: number | null
+  version: number
+  is_active: boolean
+  description: string | null
+  operator_id: string | null
+  operator_name: string | null
+  create_time: string | null
+  update_time: string | null
+}
+
+export interface EffectiveStrategyResponse {
+  global_config: StrategyConfigItem
+  node_overrides: StrategyConfigItem[]
+  effective: StrategyConfigItem
+}
+
+export interface StrategyConfigUpdateRequest {
+  scope?: 'global' | 'bolt' | 'flange' | 'production_line'
+  node_type?: string | null
+  node_id?: string | null
+  strategy_type: AlertStrategy
+  confidence_threshold?: number | null
+  false_positive_threshold?: number | null
+  false_negative_threshold?: number | null
+  description?: string | null
+  operator_id?: string | null
+  operator_name?: string | null
+}
+
+export interface StrategyRollbackRequest {
+  target_version: number
+  scope?: 'global' | 'bolt' | 'flange' | 'production_line'
+  node_type?: string | null
+  node_id?: string | null
+  operator_id?: string | null
+  operator_name?: string | null
+}
+
+export interface StrategyAuditLog {
+  id: number
+  config_id: number
+  scope: string
+  node_type: string | null
+  node_id: string | null
+  action: 'create' | 'update' | 'rollback' | 'delete'
+  old_value: Record<string, unknown> | null
+  new_value: Record<string, unknown> | null
+  version_before: number | null
+  version_after: number | null
+  change_summary: string | null
+  operator_id: string | null
+  operator_name: string | null
+  create_time: string | null
+}
+
+export const StrategyScopeMap: Record<string, string> = {
+  global: '全局',
+  bolt: '螺栓',
+  flange: '法兰面',
+  production_line: '产线'
+}
+
+export const StrategyScopeColorMap: Record<string, string> = {
+  global: '#3b82f6',
+  bolt: '#8b5cf6',
+  flange: '#f97316',
+  production_line: '#22c55e'
+}
+
 export interface ThresholdConfig {
   high_risk_threshold: number
   medium_risk_threshold: number
