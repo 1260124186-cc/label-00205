@@ -902,3 +902,152 @@ INSERT IGNORE INTO sc_scheduler_leader (leader_key, leader_id, lease_expire_time
 -- 显示调度模块新增的表
 SHOW TABLES LIKE 'sc_%job%';
 SHOW TABLES LIKE 'sc_%scheduler%';
+
+-- ============================================================
+-- 异常检测增强与闭环 - 扩展 sc_anomaly_data 表
+-- ============================================================
+
+-- 检查并添加 is_confirmed 字段
+SET @dbname = DATABASE();
+SET @tablename = 'sc_anomaly_data';
+SET @columnname = 'is_confirmed';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' TINYINT(1) DEFAULT 0 COMMENT ''是否已确认''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 is_false_positive 字段
+SET @columnname = 'is_false_positive';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' TINYINT(1) DEFAULT 0 COMMENT ''是否为误报''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 confirmed_by 字段
+SET @columnname = 'confirmed_by';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(50) COMMENT ''确认人ID''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 confirmed_time 字段
+SET @columnname = 'confirmed_time';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DATETIME COMMENT ''确认时间''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 confirm_note 字段
+SET @columnname = 'confirm_note';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' TEXT COMMENT ''确认备注''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 tenant_id 字段
+SET @columnname = 'tenant_id';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' BIGINT COMMENT ''租户ID''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 update_time 字段
+SET @columnname = 'update_time';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT ''更新时间''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加确认相关索引
+SET @indexname = 'idx_anomaly_confirmed';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND index_name = @indexname) > 0,
+  'SELECT 1',
+  CONCAT('CREATE INDEX ', @indexname, ' ON ', @tablename, ' (is_confirmed)')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加误报索引
+SET @indexname = 'idx_anomaly_false_positive';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND index_name = @indexname) > 0,
+  'SELECT 1',
+  CONCAT('CREATE INDEX ', @indexname, ' ON ', @tablename, ' (is_false_positive)')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 update_time 索引
+SET @indexname = 'idx_anomaly_update_time';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND index_name = @indexname) > 0,
+  'SELECT 1',
+  CONCAT('CREATE INDEX ', @indexname, ' ON ', @tablename, ' (update_time)')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 显示异常表字段
+SHOW COLUMNS FROM sc_anomaly_data;

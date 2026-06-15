@@ -2795,3 +2795,146 @@ class ConfigCenterResponse(BaseModel):
     thresholds: ThresholdConfigSchema
     scheduled_jobs: List[ScheduledJobSchema]
     updated_at: datetime
+
+
+# ============================================================
+# 异常检测增强与闭环
+# ============================================================
+
+class AnomalyDataResponse(BaseModel):
+    """
+    异常数据响应模型
+
+    对应 sc_anomaly_data 表的完整字段，
+    包含异常信息、分类、确认标注等。
+    """
+    id: int
+    sensor_id: str
+    anomaly_value: Optional[float] = None
+    anomaly_type: Optional[str] = None
+    anomaly_score: Optional[float] = None
+    original_time: Optional[datetime] = None
+    details: Optional[Dict[str, Any]] = None
+    classification: Optional[str] = None
+    classification_confidence: Optional[float] = None
+    collection_subtype: Optional[str] = None
+    true_anomaly_subtype: Optional[str] = None
+    classification_evidence: Optional[Dict[str, Any]] = None
+    is_confirmed: bool = False
+    is_false_positive: bool = False
+    confirmed_by: Optional[str] = None
+    confirmed_time: Optional[datetime] = None
+    confirm_note: Optional[str] = None
+    tenant_id: Optional[int] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AnomalyQueryRequest(BaseModel):
+    """
+    异常查询请求
+
+    支持按 sensor_id、时间范围、类型、确认状态等多维度查询。
+    """
+    sensor_id: Optional[str] = Field(None, description="传感器/螺栓ID")
+    start_time: Optional[datetime] = Field(None, description="开始时间")
+    end_time: Optional[datetime] = Field(None, description="结束时间")
+    anomaly_type: Optional[str] = Field(None, description="异常类型")
+    classification: Optional[str] = Field(None, description="异常分类")
+    is_confirmed: Optional[bool] = Field(None, description="是否已确认")
+    is_false_positive: Optional[bool] = Field(None, description="是否为误报")
+    min_score: Optional[float] = Field(None, description="最低异常评分")
+    max_score: Optional[float] = Field(None, description="最高异常评分")
+    limit: int = Field(100, ge=1, le=1000, description="返回数量限制")
+    offset: int = Field(0, ge=0, description="偏移量")
+    sort_by: str = Field("original_time", description="排序字段")
+    sort_order: str = Field("desc", description="排序方向 asc/desc")
+
+
+class AnomalyListResponse(BaseModel):
+    """
+    异常列表响应
+    """
+    total: int = Field(..., description="总记录数")
+    items: List[AnomalyDataResponse] = Field(..., description="异常数据列表")
+
+
+class AnomalyConfirmRequest(BaseModel):
+    """
+    确认异常请求
+
+    将异常标记为真实异常。
+    """
+    anomaly_id: int = Field(..., description="异常记录ID")
+    confirmed_by: Optional[str] = Field(None, description="确认人ID")
+    confirm_note: Optional[str] = Field(None, description="确认备注")
+
+
+class AnomalyFalsePositiveRequest(BaseModel):
+    """
+    标注误报请求
+
+    将异常标记为误报。
+    """
+    anomaly_id: int = Field(..., description="异常记录ID")
+    confirmed_by: Optional[str] = Field(None, description="标注人ID")
+    confirm_note: Optional[str] = Field(None, description="标注备注")
+
+
+class AnomalyBatchConfirmRequest(BaseModel):
+    """
+    批量确认异常请求
+    """
+    anomaly_ids: List[int] = Field(..., description="异常记录ID列表")
+    confirmed_by: Optional[str] = Field(None, description="确认人ID")
+    confirm_note: Optional[str] = Field(None, description="确认备注")
+
+
+class AnomalyBatchFalsePositiveRequest(BaseModel):
+    """
+    批量标注误报请求
+    """
+    anomaly_ids: List[int] = Field(..., description="异常记录ID列表")
+    confirmed_by: Optional[str] = Field(None, description="标注人ID")
+    confirm_note: Optional[str] = Field(None, description="标注备注")
+
+
+class AnomalyBatchResultResponse(BaseModel):
+    """
+    批量操作结果响应
+    """
+    total: int = Field(0, description="总数量")
+    success: int = Field(0, description="成功数量")
+    failed: int = Field(0, description="失败数量")
+    failed_ids: List[int] = Field(default_factory=list, description="失败的ID列表")
+
+
+class AnomalyStatisticsResponse(BaseModel):
+    """
+    异常统计响应
+    """
+    total_count: int = Field(0, description="异常总数")
+    confirmed_count: int = Field(0, description="已确认数")
+    unconfirmed_count: int = Field(0, description="未确认数")
+    false_positive_count: int = Field(0, description="误报数")
+    true_anomaly_count: int = Field(0, description="真实异常数")
+    false_positive_rate: float = Field(0.0, description="误报率")
+    type_distribution: Optional[Dict[str, int]] = None
+    classification_distribution: Optional[Dict[str, int]] = None
+    time_range: Optional[Dict[str, Any]] = None
+
+
+class AnomalyWarningImpactResponse(BaseModel):
+    """
+    异常对预警等级影响分析响应
+    """
+    sensor_id: str
+    should_upgrade: bool = Field(False, description="是否需要提升预警等级")
+    original_level: int = Field(..., description="原始预警等级")
+    upgraded_level: int = Field(..., description="提升后的预警等级")
+    anomaly_count: int = Field(0, description="时间窗口内的异常数")
+    threshold: int = Field(0, description="异常数阈值")
+    window_minutes: int = Field(0, description="时间窗口（分钟）")

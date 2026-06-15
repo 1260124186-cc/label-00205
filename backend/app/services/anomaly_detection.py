@@ -511,30 +511,29 @@ class AnomalyDetector:
             anomalies: 异常记录列表
         """
         try:
+            from app.utils.database import AnomalyData
+            import json
+
             with get_db() as db:
                 if db is None:
                     logger.warning("数据库不可用，跳过异常数据存储")
                     return
                 
-                from sqlalchemy import text
-                
                 for anomaly in anomalies:
-                    insert_sql = text("""
-                        INSERT INTO sc_anomaly_data 
-                        (sensor_id, anomaly_value, anomaly_type, anomaly_score, 
-                         original_time, details, create_time)
-                        VALUES 
-                        (:sensor_id, :value, :type, :score, :original_time, :details, NOW())
-                    """)
-                    
-                    db.execute(insert_sql, {
-                        'sensor_id': sensor_id,
-                        'value': anomaly.value,
-                        'type': anomaly.anomaly_type.value,
-                        'score': anomaly.score,
-                        'original_time': anomaly.timestamp,
-                        'details': str(anomaly.details)
-                    })
+                    details_json = json.dumps(
+                        anomaly.details, 
+                        ensure_ascii=False
+                    ) if anomaly.details else None
+
+                    anomaly_record = AnomalyData(
+                        sensor_id=sensor_id,
+                        anomaly_value=float(anomaly.value),
+                        anomaly_type=anomaly.anomaly_type.value,
+                        anomaly_score=float(anomaly.score),
+                        original_time=anomaly.timestamp,
+                        details=details_json,
+                    )
+                    db.add(anomaly_record)
                 
                 db.commit()
                 logger.info(f"已存储{len(anomalies)}条异常数据: sensor_id={sensor_id}")

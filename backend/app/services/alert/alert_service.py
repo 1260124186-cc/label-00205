@@ -86,6 +86,26 @@ class AlertService:
 
         alert_level = status_code
 
+        # 异常与预测关联：同一时段异常数超阈值时自动提升预警等级
+        try:
+            from app.services.anomaly_service import get_anomaly_service
+            anomaly_service = get_anomaly_service()
+            upgrade_result = anomaly_service.upgrade_warning_by_anomalies(
+                sensor_id=str(node_id),
+                current_warning_level=alert_level,
+            )
+            if upgrade_result.get('should_upgrade', False):
+                new_level = upgrade_result.get('new_level', alert_level)
+                if new_level > alert_level:
+                    logger.info(
+                        f"预警等级因异常数量自动提升: node={node_type}/{node_id}, "
+                        f"原等级={alert_level}, 新等级={new_level}, "
+                        f"异常数={upgrade_result.get('anomaly_count', 0)}"
+                    )
+                    alert_level = new_level
+        except Exception as e:
+            logger.warning(f"异常预警等级提升检查失败，跳过: {e}")
+
         matched_rule = self._match_rule(
             node_type=node_type,
             node_id=node_id,

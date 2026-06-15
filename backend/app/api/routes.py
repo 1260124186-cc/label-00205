@@ -129,6 +129,11 @@ from app.api.schemas import (
     SchedulerTriggerRequest, ConfigCenterResponse,
     JobExecutionLogSchema, JobExecutionLogListResponse,
     LeaderStatusSchema, SchedulerTriggerResponse,
+    AnomalyDataResponse, AnomalyQueryRequest, AnomalyListResponse,
+    AnomalyConfirmRequest, AnomalyFalsePositiveRequest,
+    AnomalyBatchConfirmRequest, AnomalyBatchFalsePositiveRequest,
+    AnomalyBatchResultResponse, AnomalyStatisticsResponse,
+    AnomalyWarningImpactResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -7675,4 +7680,277 @@ async def get_leader_status(
         raise
     except Exception as e:
         logger.error(f"获取Leader状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 异常检测增强与闭环
+# ============================================================
+
+_anomaly_service = None
+
+
+def _get_anomaly_service():
+    """获取异常服务实例"""
+    global _anomaly_service
+    if _anomaly_service is None:
+        from app.services.anomaly_service import get_anomaly_service
+        _anomaly_service = get_anomaly_service()
+    return _anomaly_service
+
+
+@router.post(
+    "/anomaly/query",
+    response_model=AnomalyListResponse,
+    tags=["异常管理"],
+    summary="查询异常数据"
+)
+async def query_anomalies(
+    request: AnomalyQueryRequest,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """
+    查询异常数据，支持多维度过滤：
+    - sensor_id: 传感器/螺栓ID
+    - 时间范围: start_time ~ end_time
+    - anomaly_type: 异常类型
+    - classification: 异常分类
+    - is_confirmed: 是否已确认
+    - is_false_positive: 是否为误报
+    - 异常评分范围
+    """
+    try:
+        service = _get_anomaly_service()
+        total, anomalies = service.query_anomalies(
+            sensor_id=request.sensor_id,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            anomaly_type=request.anomaly_type,
+            classification=request.classification,
+            is_confirmed=request.is_confirmed,
+            is_false_positive=request.is_false_positive,
+            min_score=request.min_score,
+            max_score=request.max_score,
+            limit=request.limit,
+            offset=request.offset,
+            sort_by=request.sort_by,
+            sort_order=request.sort_order,
+        )
+
+        items = [
+            AnomalyDataResponse(**a)
+            for a in anomalies
+        ]
+
+        return AnomalyListResponse(total=total, items=items)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询异常数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/anomaly/{anomaly_id}",
+    response_model=AnomalyDataResponse,
+    tags=["异常管理"],
+    summary="获取异常详情"
+)
+async def get_anomaly_detail(
+    anomaly_id: int,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """根据ID获取单条异常记录详情"""
+    try:
+        service = _get_anomaly_service()
+        anomaly = service.get_anomaly_by_id(anomaly_id)
+        if not anomaly:
+            raise HTTPException(status_code=404, detail="异常记录不存在")
+        return AnomalyDataResponse(**anomaly)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取异常详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/anomaly/confirm",
+    response_model=AnomalyDataResponse,
+    tags=["异常管理"],
+    summary="确认异常（真实异常）"
+)
+async def confirm_anomaly(
+    request: AnomalyConfirmRequest,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """
+    确认异常为真实异常。
+    标记 is_confirmed=True, is_false_positive=False。
+    """
+    try:
+        service = _get_anomaly_service()
+        result = service.confirm_anomaly(
+            anomaly_id=request.anomaly_id,
+            confirmed_by=request.confirmed_by,
+            confirm_note=request.confirm_note,
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="异常记录不存在")
+        return AnomalyDataResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"确认异常失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/anomaly/false-positive",
+    response_model=AnomalyDataResponse,
+    tags=["异常管理"],
+    summary="标注异常为误报"
+)
+async def mark_anomaly_false_positive(
+    request: AnomalyFalsePositiveRequest,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """
+    标注异常为误报。
+    标记 is_confirmed=True, is_false_positive=True。
+    """
+    try:
+        service = _get_anomaly_service()
+        result = service.mark_false_positive(
+            anomaly_id=request.anomaly_id,
+            confirmed_by=request.confirmed_by,
+            confirm_note=request.confirm_note,
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="异常记录不存在")
+        return AnomalyDataResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"标注误报失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/anomaly/batch-confirm",
+    response_model=AnomalyBatchResultResponse,
+    tags=["异常管理"],
+    summary="批量确认异常"
+)
+async def batch_confirm_anomalies(
+    request: AnomalyBatchConfirmRequest,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """批量确认异常为真实异常"""
+    try:
+        service = _get_anomaly_service()
+        result = service.batch_confirm_anomalies(
+            anomaly_ids=request.anomaly_ids,
+            confirmed_by=request.confirmed_by,
+            confirm_note=request.confirm_note,
+        )
+        return AnomalyBatchResultResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量确认异常失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/anomaly/batch-false-positive",
+    response_model=AnomalyBatchResultResponse,
+    tags=["异常管理"],
+    summary="批量标注误报"
+)
+async def batch_mark_false_positives(
+    request: AnomalyBatchFalsePositiveRequest,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """批量标注异常为误报"""
+    try:
+        service = _get_anomaly_service()
+        result = service.batch_mark_false_positives(
+            anomaly_ids=request.anomaly_ids,
+            confirmed_by=request.confirmed_by,
+            confirm_note=request.confirm_note,
+        )
+        return AnomalyBatchResultResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量标注误报失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/anomaly/statistics/summary",
+    response_model=AnomalyStatisticsResponse,
+    tags=["异常管理"],
+    summary="获取异常统计信息"
+)
+async def get_anomaly_statistics(
+    sensor_id: Optional[str] = Query(None, description="传感器ID"),
+    start_time: Optional[datetime] = Query(None, description="开始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """
+    获取异常统计信息：
+    - 异常总数
+    - 已确认/未确认数
+    - 误报数/真实异常数
+    - 误报率
+    - 按类型分布
+    - 按分类分布
+    """
+    try:
+        service = _get_anomaly_service()
+        stats = service.get_anomaly_statistics(
+            sensor_id=sensor_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        return AnomalyStatisticsResponse(**stats)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取异常统计失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/anomaly/warning-impact/{sensor_id}",
+    response_model=AnomalyWarningImpactResponse,
+    tags=["异常管理"],
+    summary="检查异常对预警等级的影响"
+)
+async def check_anomaly_warning_impact(
+    sensor_id: str,
+    current_level: int = Query(1, ge=1, le=4, description="当前预警等级 1-4"),
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """
+    检查同一时段异常数是否超过阈值，决定是否需要提升预警等级。
+
+    - 统计指定时间窗口内的异常数量
+    - 与配置的阈值比较
+    - 返回是否需要提升预警等级
+    """
+    try:
+        service = _get_anomaly_service()
+        impact = service.check_anomaly_impact_on_warning(
+            sensor_id=sensor_id,
+            current_warning_level=current_level,
+        )
+        return AnomalyWarningImpactResponse(**impact)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"检查异常对预警影响失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -238,6 +238,7 @@ class DataPreprocessor:
         
         # 训练并预测
         predictions = self.isolation_forest.fit_predict(data)
+        anomaly_scores = self.isolation_forest.score_samples(data)
         
         # 分离正常和异常数据
         normal_mask = predictions == 1
@@ -246,6 +247,9 @@ class DataPreprocessor:
         normal_data = data[normal_mask]
         anomaly_data = data[anomaly_mask]
         anomaly_indices = np.where(anomaly_mask)[0].tolist()
+        anomaly_scores_list = anomaly_scores[anomaly_mask].tolist()
+        
+        self._last_anomaly_scores = anomaly_scores_list
         
         logger.info(f"异常检测完成: 总数据 {len(data)}, 异常数据 {len(anomaly_indices)}")
         
@@ -255,6 +259,80 @@ class DataPreprocessor:
             anomaly_data = anomaly_data.ravel()
         
         return normal_data, anomaly_data, anomaly_indices
+    
+    def store_anomalies_to_db(
+        self,
+        sensor_id: str,
+        anomalies: np.ndarray,
+        anomaly_indices: List[int],
+        timestamps: Optional[np.ndarray] = None,
+    ) -> int:
+        """
+        将检测到的异常数据写入 sc_anomaly_data 表
+        
+        Args:
+            sensor_id: 传感器/螺栓ID
+            anomalies: 异常数据数组
+            anomaly_indices: 异常数据的原始索引
+            timestamps: 时间戳数组（可选）
+            
+        Returns:
+            int: 成功写入的异常数量
+        """
+        if anomalies is None or len(anomalies) == 0:
+            return 0
+
+        try:
+            import json
+            from app.utils.database import get_db, AnomalyData
+
+            with get_db() as db:
+                if db is None:
+                    logger.warning("数据库不可用，跳过异常数据存储")
+                    return 0
+
+                count = 0
+                for i, (idx, value) in enumerate(zip(anomaly_indices, anomalies)):
+                    original_time = None
+                    if timestamps is not None and idx < len(timestamps):
+                        original_time = timestamps[idx]
+                        if hasattr(original_time, 'to_pydatetime'):
+                            original_time = original_time.to_pydatetime()
+                        elif isinstance(original_time, np.datetime64):
+                            original_time = pd.Timestamp(original_time).to_pydatetime()
+
+                    score = 0.0
+                    if hasattr(self, '_last_anomaly_scores') and self._last_anomaly_scores:
+                        if i < len(self._last_anomaly_scores):
+                            score = float(self._last_anomaly_scores[i])
+
+                    details = {
+                        "method": "isolation_forest",
+                        "original_index": idx,
+                        "preprocessing_stage": True,
+                    }
+
+                    anomaly_record = AnomalyData(
+                        sensor_id=sensor_id,
+                        anomaly_value=float(value),
+                        anomaly_type="isolation_forest",
+                        anomaly_score=score,
+                        original_time=original_time,
+                        details=json.dumps(details, ensure_ascii=False),
+                    )
+                    db.add(anomaly_record)
+                    count += 1
+
+                db.commit()
+                logger.info(
+                    f"预处理阶段异常写入数据库: sensor_id={sensor_id}, "
+                    f"数量={count}"
+                )
+                return count
+
+        except Exception as e:
+            logger.error(f"预处理阶段异常写入数据库失败: {e}")
+            return 0
     
     def interpolate_missing(
         self, 
@@ -392,7 +470,9 @@ class DataPreprocessor:
         remove_anomalies: bool = True,
         normalize: bool = True,
         smooth: bool = True,
-        fit_scaler: bool = True
+        fit_scaler: bool = True,
+        sensor_id: Optional[str] = None,
+        store_anomalies: bool = False,
     ) -> PreprocessingResult:
         """
         执行完整的数据预处理流程
@@ -404,6 +484,8 @@ class DataPreprocessor:
             normalize: 是否归一化
             smooth: 是否平滑
             fit_scaler: 是否拟合缩放器
+            sensor_id: 传感器ID（存储异常时需要）
+            store_anomalies: 是否将检测到的异常写入数据库
             
         Returns:
             PreprocessingResult: 预处理结果
@@ -416,6 +498,15 @@ class DataPreprocessor:
             result.data = normal_data
             result.anomalies = anomalies
             result.anomaly_indices = anomaly_indices
+            
+            # 存储异常到数据库
+            if store_anomalies and sensor_id and anomalies is not None and len(anomalies) > 0:
+                self.store_anomalies_to_db(
+                    sensor_id=sensor_id,
+                    anomalies=anomalies,
+                    anomaly_indices=anomaly_indices,
+                    timestamps=timestamps,
+                )
         
         # 2. 缺失值插值
         if timestamps is not None:
@@ -449,7 +540,8 @@ class DataPreprocessor:
         df: pd.DataFrame,
         value_column: str = 'ptf',
         time_column: str = 'create_time',
-        group_column: Optional[str] = None
+        group_column: Optional[str] = None,
+        store_anomalies: bool = False,
     ) -> pd.DataFrame:
         """
         处理DataFrame格式的数据
@@ -459,6 +551,7 @@ class DataPreprocessor:
             value_column: 预紧力数据列名
             time_column: 时间戳列名
             group_column: 分组列名（如sensor_id），可选
+            store_anomalies: 是否将检测到的异常写入数据库
             
         Returns:
             pd.DataFrame: 处理后的DataFrame
@@ -467,7 +560,7 @@ class DataPreprocessor:
             # 不分组，直接处理
             data = df[value_column].values
             timestamps = df[time_column].values
-            result = self.process(data, timestamps)
+            result = self.process(data, timestamps, store_anomalies=store_anomalies)
             
             # 创建新的DataFrame
             processed_df = pd.DataFrame({
@@ -484,7 +577,12 @@ class DataPreprocessor:
         for group_id, group_df in df.groupby(group_column):
             data = group_df[value_column].values
             timestamps = group_df[time_column].values
-            result = self.process(data, timestamps)
+            result = self.process(
+                data, 
+                timestamps, 
+                sensor_id=str(group_id) if store_anomalies else None,
+                store_anomalies=store_anomalies,
+            )
             
             group_processed = pd.DataFrame({
                 group_column: group_id,

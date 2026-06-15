@@ -1472,6 +1472,48 @@ class ModelVersionORM(Base):
     )
 
 
+class AnomalyData(Base):
+    """
+    异常数据表模型
+
+    对应数据库表: sc_anomaly_data
+    存储预处理阶段检出的异常数据，含异常类型、评分、详情等。
+    支持异常确认/误报标注，用于模型再训练。
+    """
+    __tablename__ = 'sc_anomaly_data'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    sensor_id = Column(String(50), comment='传感器/螺栓ID')
+    anomaly_value = Column(Float, comment='异常值')
+    anomaly_type = Column(String(50), comment='异常类型: isolation_forest, zscore, iqr, sudden_change, out_of_range')
+    anomaly_score = Column(Float, comment='异常评分')
+    original_time = Column(DateTime, comment='原始数据时间')
+    details = Column(Text, comment='详细信息JSON')
+    classification = Column(String(20), comment='异常分类: true_anomaly/collection_anomaly/uncertain/mixed')
+    classification_confidence = Column(Float, comment='分类置信度')
+    collection_subtype = Column(String(20), comment='采集异常子类型')
+    true_anomaly_subtype = Column(String(20), comment='真异常子类型')
+    classification_evidence = Column(Text, comment='分类证据JSON')
+    is_confirmed = Column(Boolean, default=False, comment='是否已确认')
+    is_false_positive = Column(Boolean, default=False, comment='是否为误报')
+    confirmed_by = Column(String(50), comment='确认人ID')
+    confirmed_time = Column(DateTime, comment='确认时间')
+    confirm_note = Column(Text, comment='确认备注')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_anomaly_sensor', 'sensor_id'),
+        Index('idx_anomaly_type', 'anomaly_type'),
+        Index('idx_anomaly_time', 'original_time'),
+        Index('idx_anomaly_classification', 'classification'),
+        Index('idx_anomaly_confirmed', 'is_confirmed'),
+        Index('idx_anomaly_false_positive', 'is_false_positive'),
+        Index('idx_anomaly_create_time', 'create_time'),
+    )
+
+
 class ManualLabelData(Base):
     """
     人工标注数据表模型
