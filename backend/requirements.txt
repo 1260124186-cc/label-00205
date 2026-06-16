@@ -53,6 +53,11 @@ httpx==0.26.0
 pytest==7.4.4
 pytest-asyncio==0.23.3
 
+# 超参优化
+optuna==3.5.0
+ray[tune]==2.9.0
+ax-platform==0.3.8
+
 # GraphQL / BFF
 strawberry-graphql[fastapi]>=0.316.0
 

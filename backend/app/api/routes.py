@@ -182,6 +182,15 @@ from app.api.schemas import (
     BoltCoordinateItemSchema, Flange3DSceneInfoResponse,
     Flange3DExportResponse, Flange3DUpdateResponse,
     Flange3DExplosionResponse, Flange3DListResponse,
+    # HPO schemas
+    SearchSpaceSchema, ObjectiveConfigSchema,
+    HPOCreateStudyRequest, HPOCreateStudyResponse,
+    HPOStartStudyRequest, HPOStartStudyResponse,
+    HPOApplyConfigRequest, HPOApplyConfigResponse,
+    HPOSetNodeOverrideRequest, HPONodeOverrideResponse,
+    HPOTrialSchema, HPOStudySchema, HPONodeOverrideSchema,
+    HPOStudyStatusResponse, HPOStudyListResponse, HPOTrialListResponse,
+    HPOCompareConfigResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -10965,4 +10974,470 @@ async def delete_flange_3d_scene(flange_id: str):
         return {"status": "success", "message": f"场景 {flange_id} 已删除"}
     except Exception as e:
         logger.error(f"删除3D场景失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 超参优化 (HPO) 模块
+# ============================================================
+
+_hpo_service = None
+
+
+def get_hpo_service():
+    """获取 HPO 服务实例"""
+    global _hpo_service
+    if _hpo_service is None:
+        from app.services.hpo import HPOService
+        _hpo_service = HPOService()
+    return _hpo_service
+
+
+def _convert_search_space_to_dict(
+    search_space: Optional[SearchSpaceSchema],
+) -> Optional[Dict[str, Any]]:
+    """将搜索空间 schema 转换为字典"""
+    if search_space is None:
+        return None
+    result = {}
+    for field_name, field_value in search_space.model_dump(exclude_none=True).items():
+        if field_name == 'custom_params' and field_value:
+            for k, v in field_value.items():
+                result[k] = v
+        elif field_name == 'fixed_params' and field_value:
+            result['_fixed_'] = field_value
+        else:
+            result[field_name] = field_value
+    return result
+
+
+@router.post(
+    "/hpo/studies",
+    response_model=HPOCreateStudyResponse,
+    tags=["超参优化"],
+    summary="创建HPO研究"
+)
+async def create_hpo_study(request: HPOCreateStudyRequest):
+    """
+    创建超参优化研究
+
+    支持配置：
+    - 搜索空间：层数、hidden size、dropout、lr、sequence_length
+    - 优化目标：验证F1 + 误报惩罚 + 推理延迟约束
+    - 优化框架：Optuna / Ray Tune
+    - 优化算法：TPE、Random、CMA-ES、Grid、ASHA等
+    - Per-node 超参：为不同节点设置独立超参
+    """
+    try:
+        service = get_hpo_service()
+
+        custom_search_space = _convert_search_space_to_dict(request.search_space)
+        objective_config = request.objective_config.model_dump(exclude_none=True) if request.objective_config else None
+
+        result = service.create_study(
+            study_name=request.study_name,
+            model_type=request.model_type,
+            node_id=request.node_id,
+            node_type=request.node_type,
+            custom_search_space=custom_search_space,
+            fixed_params=request.search_space.fixed_params if request.search_space else None,
+            objective_config=objective_config,
+            framework=request.framework,
+            optimizer=request.optimizer,
+            max_trials=request.max_trials,
+            max_concurrent_trials=request.max_concurrent_trials,
+            min_trials_to_prune=request.min_trials_to_prune,
+            pruner_type=request.pruner_type,
+            per_node_hpo_enabled=request.per_node_hpo_enabled,
+            node_scope=request.node_scope,
+            tenant_id=request.tenant_id,
+            created_by=request.created_by,
+        )
+
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("message", "创建研究失败"))
+
+        return HPOCreateStudyResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建HPO研究失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/hpo/studies",
+    response_model=HPOStudyListResponse,
+    tags=["超参优化"],
+    summary="获取HPO研究列表"
+)
+async def list_hpo_studies(
+    model_type: Optional[str] = Query(None, description="模型类型过滤 bolt/flange"),
+    status: Optional[str] = Query(None, description="状态过滤 pending/running/completed/failed"),
+    limit: int = Query(50, ge=1, le=500, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """获取HPO研究列表，支持按模型类型和状态过滤"""
+    try:
+        service = get_hpo_service()
+        result = service.list_studies(
+            model_type=model_type,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail="获取研究列表失败")
+
+        studies = [HPOStudySchema(**s) for s in result.get("studies", [])]
+        return HPOStudyListResponse(
+            success=True,
+            total=result.get("total", 0),
+            studies=studies,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取HPO研究列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/hpo/studies/{study_id}",
+    response_model=HPOStudyStatusResponse,
+    tags=["超参优化"],
+    summary="获取HPO研究详情和状态"
+)
+async def get_hpo_study_status(study_id: str):
+    """
+    获取指定HPO研究的详细信息和当前状态
+
+    返回内容：
+    - 研究基本信息
+    - 试验统计（总数、各状态数量、最新10条）
+    - 当前最优试验
+    """
+    try:
+        service = get_hpo_service()
+        result = service.get_study_status(study_id)
+
+        if not result.get("success"):
+            raise HTTPException(status_code=404, detail=result.get("message", "研究不存在"))
+
+        study_data = result.get("study", {})
+        study_schema = HPOStudySchema(**study_data)
+
+        trials_data = result.get("trials", {})
+        best_trial = result.get("best_trial")
+        best_trial_schema = HPOTrialSchema(**best_trial) if best_trial else None
+
+        return HPOStudyStatusResponse(
+            success=True,
+            study=study_schema,
+            trials=trials_data,
+            best_trial=best_trial_schema,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取HPO研究状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/hpo/studies/start",
+    response_model=HPOStartStudyResponse,
+    tags=["超参优化"],
+    summary="启动HPO研究"
+)
+async def start_hpo_study(
+    request: HPOStartStudyRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    启动已创建的HPO研究，在后台执行超参搜索
+
+    Args:
+        study_id: 研究ID
+        auto_apply_best: 研究完成后是否自动应用最优配置到训练任务
+    """
+    try:
+        service = get_hpo_service()
+
+        study_data = service.storage_service.get_study(request.study_id)
+        if not study_data:
+            raise HTTPException(status_code=404, detail=f"研究不存在: {request.study_id}")
+
+        if study_data.get("status") == "running":
+            raise HTTPException(status_code=400, detail="研究已在运行中")
+
+        background_tasks.add_task(
+            service.start_study,
+            study_id=request.study_id,
+            auto_apply_best=request.auto_apply_best,
+        )
+
+        return HPOStartStudyResponse(
+            study_id=request.study_id,
+            status="started",
+            message=f"HPO研究已启动，将在后台执行。使用 study_id={request.study_id} 查询状态",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"启动HPO研究失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/hpo/studies/{study_id}/trials",
+    response_model=HPOTrialListResponse,
+    tags=["超参优化"],
+    summary="获取研究的试验列表"
+)
+async def list_hpo_trials(
+    study_id: str,
+    status: Optional[str] = Query(None, description="状态过滤 pending/running/completed/failed/pruned"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """获取指定研究的所有试验记录"""
+    try:
+        service = get_hpo_service()
+        result = service.list_trials(
+            study_id=study_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail="获取试验列表失败")
+
+        trials = [HPOTrialSchema(**t) for t in result.get("trials", [])]
+        return HPOTrialListResponse(
+            success=True,
+            total=result.get("total", 0),
+            trials=trials,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取HPO试验列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/hpo/studies/{study_id}/trials/{trial_id}",
+    response_model=HPOTrialSchema,
+    tags=["超参优化"],
+    summary="获取单个试验详情"
+)
+async def get_hpo_trial(study_id: str, trial_id: str):
+    """获取指定试验的详细信息"""
+    try:
+        service = get_hpo_service()
+        trial = service.storage_service.get_trial(trial_id)
+
+        if not trial:
+            raise HTTPException(status_code=404, detail="试验不存在")
+
+        if trial.get("study_id") != study_id:
+            raise HTTPException(status_code=400, detail="试验不属于该研究")
+
+        return HPOTrialSchema(**trial)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取HPO试验详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/hpo/studies/{study_id}/apply",
+    response_model=HPOApplyConfigResponse,
+    tags=["超参优化"],
+    summary="应用最优配置到训练任务"
+)
+async def apply_hpo_best_config(
+    study_id: str,
+    request: Optional[HPOApplyConfigRequest] = None,
+):
+    """
+    将研究找到的最优超参配置应用到训练任务
+
+    - 不指定 node_ids：应用到研究关联的节点（全局或单个节点）
+    - 指定 node_ids：应用到指定的多个节点（per-node 模式）
+    """
+    try:
+        service = get_hpo_service()
+
+        node_ids = request.node_ids if request and request.node_ids else None
+
+        result = service.apply_best_config(
+            study_id=study_id,
+            node_ids=node_ids,
+        )
+
+        if not result.get("success", True) and result.get("success") is not None:
+            raise HTTPException(status_code=400, detail=result.get("message", "应用配置失败"))
+
+        return HPOApplyConfigResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"应用HPO最优配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/hpo/studies/{study_id}/compare",
+    response_model=HPOCompareConfigResponse,
+    tags=["超参优化"],
+    summary="比较最优配置与当前配置"
+)
+async def compare_hpo_config(study_id: str):
+    """
+    比较HPO研究找到的最优配置与当前训练配置
+
+    返回：
+    - 最优参数和当前参数
+    - 最优指标和当前指标
+    - 参数变化详情
+    - 指标改进幅度
+    """
+    try:
+        service = get_hpo_service()
+        result = service.compare_configs(study_id)
+
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("message", "比较配置失败"))
+
+        return HPOCompareConfigResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"比较HPO配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/hpo/studies/{study_id}/node-override",
+    response_model=HPONodeOverrideResponse,
+    tags=["超参优化"],
+    summary="设置节点超参覆盖"
+)
+async def set_hpo_node_override(
+    study_id: str,
+    request: HPOSetNodeOverrideRequest,
+):
+    """
+    为特定节点设置独立的超参搜索空间或固定参数
+
+    用于 per-node 超参优化，为不同节点设置不同的搜索空间。
+    """
+    try:
+        service = get_hpo_service()
+
+        search_space_override = _convert_search_space_to_dict(request.search_space_override)
+
+        result = service.set_node_override(
+            study_id=study_id,
+            node_id=request.node_id,
+            node_type=request.node_type,
+            search_space_override=search_space_override,
+            fixed_params=request.fixed_params,
+            tenant_id=request.tenant_id,
+        )
+
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("message", "设置节点覆盖失败"))
+
+        return HPONodeOverrideResponse(
+            success=True,
+            message=result.get("message", "操作成功"),
+            study_id=study_id,
+            node_id=request.node_id,
+            search_space_override=search_space_override,
+            fixed_params=request.fixed_params,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"设置HPO节点覆盖失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/hpo/studies/{study_id}/node-overrides",
+    response_model=Dict[str, Any],
+    tags=["超参优化"],
+    summary="获取研究的节点超参覆盖列表"
+)
+async def list_hpo_node_overrides(study_id: str):
+    """获取指定研究的所有节点超参覆盖配置"""
+    try:
+        service = get_hpo_service()
+        overrides = service.storage_service.list_node_overrides(study_id)
+
+        return {
+            "success": True,
+            "total": len(overrides),
+            "study_id": study_id,
+            "overrides": [
+                HPONodeOverrideSchema(**o) for o in overrides
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"获取HPO节点覆盖列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/hpo/studies/{study_id}",
+    tags=["超参优化"],
+    summary="删除HPO研究"
+)
+async def delete_hpo_study(study_id: str):
+    """
+    删除指定的HPO研究
+
+    注意：这将同时删除关联的所有试验记录和节点覆盖配置。
+    """
+    try:
+        service = get_hpo_service()
+
+        study = service.storage_service.get_study(study_id)
+        if not study:
+            raise HTTPException(status_code=404, detail="研究不存在")
+
+        if study.get("status") == "running":
+            raise HTTPException(status_code=400, detail="研究正在运行中，请先停止")
+
+        success = service.storage_service.delete_study(study_id)
+
+        if not success:
+            raise HTTPException(status_code=500, detail="删除研究失败")
+
+        return {
+            "success": True,
+            "message": f"研究 {study_id} 已删除",
+            "study_id": study_id,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除HPO研究失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -1667,3 +1667,154 @@ INSERT INTO sc_spare_part_inventory (sku_code, sku_name, warehouse_code, warehou
 SHOW TABLES LIKE '%spare%';
 SHOW TABLES LIKE '%bolt_sku%';
 SHOW TABLES LIKE '%purchase%';
+
+-- ============================================================
+-- 超参优化（HPO）模块
+-- ============================================================
+
+-- ============================================================
+-- HPO 试验表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_hpo_trials (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    trial_id VARCHAR(64) UNIQUE NOT NULL COMMENT '试验唯一ID',
+    study_id VARCHAR(64) NOT NULL COMMENT '研究ID（一组试验共享）',
+    model_type VARCHAR(20) NOT NULL COMMENT '模型类型：bolt/flange',
+    node_id VARCHAR(100) COMMENT '节点ID（为空表示全局）',
+    node_type VARCHAR(20) COMMENT '节点类型：bolt/flange',
+    framework VARCHAR(20) NOT NULL COMMENT '优化框架：optuna/ray_tune/ax',
+    status VARCHAR(20) DEFAULT 'running' COMMENT '状态：running/completed/failed/pruned',
+    trial_number INT COMMENT '试验序号',
+    
+    -- 超参配置
+    num_layers INT COMMENT '层数',
+    hidden_size INT COMMENT '隐藏层大小',
+    dropout_rate FLOAT COMMENT 'Dropout率',
+    learning_rate FLOAT COMMENT '学习率',
+    sequence_length INT COMMENT '序列长度',
+    params JSON COMMENT '完整超参JSON',
+    
+    -- 指标结果
+    val_f1_score FLOAT COMMENT '验证集F1分数',
+    val_precision FLOAT COMMENT '验证集精确率',
+    val_recall FLOAT COMMENT '验证集召回率',
+    val_accuracy FLOAT COMMENT '验证集准确率',
+    false_positive_rate FLOAT COMMENT '误报率',
+    false_negative_rate FLOAT COMMENT '漏报率',
+    inference_latency_ms FLOAT COMMENT '推理延迟（毫秒）',
+    training_time_seconds FLOAT COMMENT '训练耗时（秒）',
+    objective_value FLOAT COMMENT '综合优化目标值',
+    
+    -- 约束违反
+    latency_constraint_violated TINYINT(1) DEFAULT 0 COMMENT '是否违反延迟约束',
+    f1_constraint_violated TINYINT(1) DEFAULT 0 COMMENT '是否违反F1约束',
+    
+    -- 元数据
+    training_session_id VARCHAR(100) COMMENT '关联的训练会话ID',
+    model_version VARCHAR(50) COMMENT '模型版本',
+    error_message TEXT COMMENT '错误信息',
+    pruned_reason VARCHAR(200) COMMENT '被修剪原因',
+    
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    INDEX idx_study (study_id),
+    INDEX idx_model_node (model_type, node_id),
+    INDEX idx_status (status),
+    INDEX idx_objective (objective_value),
+    INDEX idx_f1 (val_f1_score),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_create_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='HPO试验记录表';
+
+-- ============================================================
+-- HPO 研究配置表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_hpo_studies (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    study_id VARCHAR(64) UNIQUE NOT NULL COMMENT '研究唯一ID',
+    study_name VARCHAR(200) NOT NULL COMMENT '研究名称',
+    model_type VARCHAR(20) NOT NULL COMMENT '模型类型：bolt/flange',
+    node_id VARCHAR(100) COMMENT '节点ID（为空表示全局）',
+    node_type VARCHAR(20) COMMENT '节点类型',
+    
+    -- 搜索空间配置
+    search_space JSON NOT NULL COMMENT '搜索空间定义JSON',
+    
+    -- 优化目标配置
+    objective_config JSON NOT NULL COMMENT '优化目标配置JSON',
+    f1_weight FLOAT DEFAULT 1.0 COMMENT 'F1权重',
+    false_positive_penalty FLOAT DEFAULT 0.5 COMMENT '误报惩罚系数',
+    latency_threshold_ms FLOAT DEFAULT 100.0 COMMENT '推理延迟阈值（毫秒）',
+    latency_weight FLOAT DEFAULT 0.3 COMMENT '延迟权重',
+    
+    -- 优化配置
+    framework VARCHAR(20) DEFAULT 'optuna' COMMENT '优化框架',
+    optimizer VARCHAR(20) DEFAULT 'tpe' COMMENT '优化算法：tpe/random/grid/bo',
+    max_trials INT DEFAULT 50 COMMENT '最大试验次数',
+    max_concurrent_trials INT DEFAULT 2 COMMENT '最大并发试验数',
+    min_trials_to_prune INT DEFAULT 5 COMMENT '最小试验数后开启剪枝',
+    pruner_type VARCHAR(20) DEFAULT 'median' COMMENT '剪枝类型：median/halver/none',
+    
+    -- 约束配置
+    constraints JSON COMMENT '约束条件JSON',
+    
+    -- 状态
+    status VARCHAR(20) DEFAULT 'pending' COMMENT '状态：pending/running/completed/failed',
+    best_trial_id VARCHAR(64) COMMENT '最佳试验ID',
+    best_params JSON COMMENT '最佳超参JSON',
+    best_objective_value FLOAT COMMENT '最佳目标值',
+    
+    -- 每节点超参
+    per_node_hpo_enabled TINYINT(1) DEFAULT 0 COMMENT '是否启用per-node超参',
+    node_scope VARCHAR(20) DEFAULT 'global' COMMENT '节点范围：global/group/single',
+    
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    created_by VARCHAR(100) COMMENT '创建人',
+    start_time DATETIME COMMENT '开始时间',
+    end_time DATETIME COMMENT '结束时间',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    INDEX idx_study_id (study_id),
+    INDEX idx_model_node (model_type, node_id),
+    INDEX idx_status (status),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='HPO研究配置表';
+
+-- ============================================================
+-- HPO per-node 超参配置表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_hpo_node_overrides (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    study_id VARCHAR(64) NOT NULL COMMENT '研究ID',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型',
+    
+    -- 覆盖的搜索空间
+    search_space_override JSON COMMENT '覆盖的搜索空间JSON',
+    
+    -- 覆盖的超参值（固定值）
+    fixed_params JSON COMMENT '固定超参值JSON',
+    
+    -- 该节点找到的最佳配置
+    best_params JSON COMMENT '该节点最佳超参',
+    best_trial_id VARCHAR(64) COMMENT '该节点最佳试验ID',
+    best_objective_value FLOAT COMMENT '该节点最佳目标值',
+    
+    -- 是否已应用到训练
+    applied_to_training TINYINT(1) DEFAULT 0 COMMENT '是否已应用到训练',
+    applied_time DATETIME COMMENT '应用时间',
+    
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    UNIQUE KEY uk_study_node (study_id, node_id),
+    INDEX idx_node (node_id),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='HPO节点超参覆盖配置表';
+
+-- 显示 HPO 相关表
+SHOW TABLES LIKE '%hpo%';

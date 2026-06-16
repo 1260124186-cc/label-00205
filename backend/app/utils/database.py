@@ -2342,6 +2342,239 @@ class PurchaseCycleConfig(Base):
     )
 
 
+class HPOTrial(Base):
+    """
+    HPO试验记录表模型
+
+    对应数据库表: sc_hpo_trials
+    存储每次超参优化试验的配置和结果。
+
+    Attributes:
+        id: 主键
+        trial_id: 试验唯一ID
+        study_id: 研究ID（一组试验共享）
+        model_type: 模型类型：bolt/flange
+        node_id: 节点ID（为空表示全局）
+        node_type: 节点类型
+        framework: 优化框架：optuna/ray_tune/ax
+        status: 状态：running/completed/failed/pruned
+        trial_number: 试验序号
+        num_layers: 层数
+        hidden_size: 隐藏层大小
+        dropout_rate: Dropout率
+        learning_rate: 学习率
+        sequence_length: 序列长度
+        params: 完整超参JSON
+        val_f1_score: 验证集F1分数
+        val_precision: 验证集精确率
+        val_recall: 验证集召回率
+        val_accuracy: 验证集准确率
+        false_positive_rate: 误报率
+        false_negative_rate: 漏报率
+        inference_latency_ms: 推理延迟（毫秒）
+        training_time_seconds: 训练耗时（秒）
+        objective_value: 综合优化目标值
+        latency_constraint_violated: 是否违反延迟约束
+        f1_constraint_violated: 是否违反F1约束
+        training_session_id: 关联的训练会话ID
+        model_version: 模型版本
+        error_message: 错误信息
+        pruned_reason: 被修剪原因
+        tenant_id: 租户ID
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_hpo_trials'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    trial_id = Column(String(64), unique=True, nullable=False, comment='试验唯一ID')
+    study_id = Column(String(64), nullable=False, comment='研究ID')
+    model_type = Column(String(20), nullable=False, comment='模型类型：bolt/flange')
+    node_id = Column(String(100), comment='节点ID')
+    node_type = Column(String(20), comment='节点类型')
+    framework = Column(String(20), nullable=False, comment='优化框架')
+    status = Column(String(20), default='running', comment='状态')
+    trial_number = Column(Integer, comment='试验序号')
+
+    num_layers = Column(Integer, comment='层数')
+    hidden_size = Column(Integer, comment='隐藏层大小')
+    dropout_rate = Column(Float, comment='Dropout率')
+    learning_rate = Column(Float, comment='学习率')
+    sequence_length = Column(Integer, comment='序列长度')
+    params = Column(Text, comment='完整超参JSON')
+
+    val_f1_score = Column(Float, comment='验证集F1分数')
+    val_precision = Column(Float, comment='验证集精确率')
+    val_recall = Column(Float, comment='验证集召回率')
+    val_accuracy = Column(Float, comment='验证集准确率')
+    false_positive_rate = Column(Float, comment='误报率')
+    false_negative_rate = Column(Float, comment='漏报率')
+    inference_latency_ms = Column(Float, comment='推理延迟（毫秒）')
+    training_time_seconds = Column(Float, comment='训练耗时（秒）')
+    objective_value = Column(Float, comment='综合优化目标值')
+
+    latency_constraint_violated = Column(Boolean, default=False, comment='是否违反延迟约束')
+    f1_constraint_violated = Column(Boolean, default=False, comment='是否违反F1约束')
+
+    training_session_id = Column(String(100), comment='关联的训练会话ID')
+    model_version = Column(String(50), comment='模型版本')
+    error_message = Column(Text, comment='错误信息')
+    pruned_reason = Column(String(200), comment='被修剪原因')
+
+    tenant_id = Column(BigInteger, default=0, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_study', 'study_id'),
+        Index('idx_model_node', 'model_type', 'node_id'),
+        Index('idx_status', 'status'),
+        Index('idx_objective', 'objective_value'),
+        Index('idx_f1', 'val_f1_score'),
+        Index('idx_tenant', 'tenant_id'),
+        Index('idx_create_time', 'create_time'),
+    )
+
+
+class HPOStudy(Base):
+    """
+    HPO研究配置表模型
+
+    对应数据库表: sc_hpo_studies
+    存储超参优化研究的配置和状态。
+
+    Attributes:
+        id: 主键
+        study_id: 研究唯一ID
+        study_name: 研究名称
+        model_type: 模型类型
+        node_id: 节点ID
+        node_type: 节点类型
+        search_space: 搜索空间定义JSON
+        objective_config: 优化目标配置JSON
+        f1_weight: F1权重
+        false_positive_penalty: 误报惩罚系数
+        latency_threshold_ms: 推理延迟阈值
+        latency_weight: 延迟权重
+        framework: 优化框架
+        optimizer: 优化算法
+        max_trials: 最大试验次数
+        max_concurrent_trials: 最大并发试验数
+        min_trials_to_prune: 最小试验数后开启剪枝
+        pruner_type: 剪枝类型
+        constraints: 约束条件JSON
+        status: 状态
+        best_trial_id: 最佳试验ID
+        best_params: 最佳超参JSON
+        best_objective_value: 最佳目标值
+        per_node_hpo_enabled: 是否启用per-node超参
+        node_scope: 节点范围
+        tenant_id: 租户ID
+        created_by: 创建人
+        start_time: 开始时间
+        end_time: 结束时间
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_hpo_studies'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    study_id = Column(String(64), unique=True, nullable=False, comment='研究唯一ID')
+    study_name = Column(String(200), nullable=False, comment='研究名称')
+    model_type = Column(String(20), nullable=False, comment='模型类型')
+    node_id = Column(String(100), comment='节点ID')
+    node_type = Column(String(20), comment='节点类型')
+
+    search_space = Column(Text, nullable=False, comment='搜索空间定义JSON')
+    objective_config = Column(Text, nullable=False, comment='优化目标配置JSON')
+    f1_weight = Column(Float, default=1.0, comment='F1权重')
+    false_positive_penalty = Column(Float, default=0.5, comment='误报惩罚系数')
+    latency_threshold_ms = Column(Float, default=100.0, comment='推理延迟阈值')
+    latency_weight = Column(Float, default=0.3, comment='延迟权重')
+
+    framework = Column(String(20), default='optuna', comment='优化框架')
+    optimizer = Column(String(20), default='tpe', comment='优化算法')
+    max_trials = Column(Integer, default=50, comment='最大试验次数')
+    max_concurrent_trials = Column(Integer, default=2, comment='最大并发试验数')
+    min_trials_to_prune = Column(Integer, default=5, comment='最小试验数后开启剪枝')
+    pruner_type = Column(String(20), default='median', comment='剪枝类型')
+
+    constraints = Column(Text, comment='约束条件JSON')
+
+    status = Column(String(20), default='pending', comment='状态')
+    best_trial_id = Column(String(64), comment='最佳试验ID')
+    best_params = Column(Text, comment='最佳超参JSON')
+    best_objective_value = Column(Float, comment='最佳目标值')
+
+    per_node_hpo_enabled = Column(Boolean, default=False, comment='是否启用per-node超参')
+    node_scope = Column(String(20), default='global', comment='节点范围')
+
+    tenant_id = Column(BigInteger, default=0, comment='租户ID')
+    created_by = Column(String(100), comment='创建人')
+    start_time = Column(DateTime, comment='开始时间')
+    end_time = Column(DateTime, comment='结束时间')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_study_id', 'study_id'),
+        Index('idx_model_node', 'model_type', 'node_id'),
+        Index('idx_status', 'status'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class HPONodeOverride(Base):
+    """
+    HPO节点超参覆盖配置表模型
+
+    对应数据库表: sc_hpo_node_overrides
+    存储每个节点的超参覆盖配置和最佳结果。
+
+    Attributes:
+        id: 主键
+        study_id: 研究ID
+        node_id: 节点ID
+        node_type: 节点类型
+        search_space_override: 覆盖的搜索空间JSON
+        fixed_params: 固定超参值JSON
+        best_params: 该节点最佳超参
+        best_trial_id: 该节点最佳试验ID
+        best_objective_value: 该节点最佳目标值
+        applied_to_training: 是否已应用到训练
+        applied_time: 应用时间
+        tenant_id: 租户ID
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_hpo_node_overrides'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    study_id = Column(String(64), nullable=False, comment='研究ID')
+    node_id = Column(String(100), nullable=False, comment='节点ID')
+    node_type = Column(String(20), nullable=False, comment='节点类型')
+
+    search_space_override = Column(Text, comment='覆盖的搜索空间JSON')
+    fixed_params = Column(Text, comment='固定超参值JSON')
+
+    best_params = Column(Text, comment='该节点最佳超参')
+    best_trial_id = Column(String(64), comment='该节点最佳试验ID')
+    best_objective_value = Column(Float, comment='该节点最佳目标值')
+
+    applied_to_training = Column(Boolean, default=False, comment='是否已应用到训练')
+    applied_time = Column(DateTime, comment='应用时间')
+
+    tenant_id = Column(BigInteger, default=0, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('uk_study_node', 'study_id', 'node_id', unique=True),
+        Index('idx_node', 'node_id'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类

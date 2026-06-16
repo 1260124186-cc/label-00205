@@ -4330,3 +4330,274 @@ class Flange3DListResponse(BaseModel):
     """3D场景列表响应"""
     total: int
     scenes: List[str]
+
+
+# ============================================================
+# 超参优化 (HPO) 模块
+# ============================================================
+
+# ---------- 搜索空间配置 ----------
+
+class SearchSpaceParamSchema(BaseModel):
+    """搜索空间单个参数配置"""
+    param_type: str = Field(..., description="参数类型: INT/FLOAT/CATEGORICAL/LOG_UNIFORM/DISCRETE_UNIFORM")
+    low: Optional[float] = Field(None, description="最小值")
+    high: Optional[float] = Field(None, description="最大值")
+    choices: Optional[List[Any]] = Field(None, description="可选值列表，用于 CATEGORICAL")
+    q: Optional[float] = Field(None, description="步长，用于 DISCRETE_UNIFORM")
+    step: Optional[int] = Field(None, description="整数步长，用于 INT")
+    log: Optional[bool] = Field(False, description="是否对数空间")
+
+
+class SearchSpaceSchema(BaseModel):
+    """搜索空间配置"""
+    num_layers: Optional[SearchSpaceParamSchema] = Field(None, description="层数搜索空间")
+    hidden_size: Optional[SearchSpaceParamSchema] = Field(None, description="隐藏层大小搜索空间")
+    dropout_rate: Optional[SearchSpaceParamSchema] = Field(None, description="Dropout率搜索空间")
+    learning_rate: Optional[SearchSpaceParamSchema] = Field(None, description="学习率搜索空间")
+    sequence_length: Optional[SearchSpaceParamSchema] = Field(None, description="序列长度搜索空间")
+    custom_params: Optional[Dict[str, SearchSpaceParamSchema]] = Field(None, description="自定义搜索参数")
+    fixed_params: Optional[Dict[str, Any]] = Field(None, description="固定参数值，不参与搜索")
+
+
+# ---------- 优化目标配置 ----------
+
+class ObjectiveConfigSchema(BaseModel):
+    """优化目标配置"""
+    f1_weight: float = Field(1.0, ge=0, le=10, description="F1分数权重")
+    false_positive_penalty: float = Field(0.5, ge=0, le=10, description="误报惩罚系数")
+    latency_weight: float = Field(0.3, ge=0, le=10, description="推理延迟权重")
+    latency_threshold_ms: float = Field(100.0, gt=0, description="推理延迟阈值(ms)")
+    f1_min_threshold: Optional[float] = Field(None, ge=0, le=1, description="F1最小阈值约束")
+    latency_max_penalty: float = Field(1.0, ge=0, description="延迟最大惩罚系数")
+    false_negative_penalty: Optional[float] = Field(0.3, ge=0, description="漏报惩罚系数")
+
+
+# ---------- 请求模型 ----------
+
+class HPOCreateStudyRequest(BaseModel):
+    """创建HPO研究请求"""
+    study_name: str = Field(..., description="研究名称", min_length=1, max_length=200)
+    model_type: str = Field(..., description="模型类型: bolt/flange")
+    node_id: Optional[str] = Field(None, description="节点ID，空表示全局")
+    node_type: Optional[str] = Field(None, description="节点类型")
+    framework: str = Field("optuna", description="优化框架: optuna/ray_tune")
+    optimizer: str = Field("tpe", description="优化算法: tpe/random/cmaes/grid/asha/bayesopt")
+    max_trials: int = Field(50, ge=1, le=1000, description="最大试验次数")
+    max_concurrent_trials: int = Field(2, ge=1, le=32, description="最大并发试验数")
+    min_trials_to_prune: int = Field(5, ge=0, description="开始剪枝的最小试验数")
+    pruner_type: str = Field("median", description="剪枝类型: median/hyperband/none")
+    search_space: Optional[SearchSpaceSchema] = Field(None, description="自定义搜索空间")
+    objective_config: Optional[ObjectiveConfigSchema] = Field(None, description="自定义优化目标配置")
+    per_node_hpo_enabled: bool = Field(False, description="是否启用per-node超参优化")
+    node_scope: str = Field("global", description="节点范围: global/per_node_type/per_node")
+    created_by: Optional[str] = Field(None, description="创建人")
+    tenant_id: int = Field(0, description="租户ID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "study_name": "螺栓模型LSTM调参",
+                "model_type": "bolt",
+                "framework": "optuna",
+                "optimizer": "tpe",
+                "max_trials": 50,
+                "max_concurrent_trials": 2,
+                "objective_config": {
+                    "f1_weight": 1.0,
+                    "false_positive_penalty": 0.5,
+                    "latency_threshold_ms": 100.0,
+                    "latency_weight": 0.3
+                }
+            }
+        }
+
+
+class HPOStartStudyRequest(BaseModel):
+    """启动HPO研究请求"""
+    study_id: str = Field(..., description="研究ID")
+    auto_apply_best: bool = Field(True, description="是否自动应用最优配置")
+
+
+class HPOApplyConfigRequest(BaseModel):
+    """应用最优配置请求"""
+    study_id: str = Field(..., description="研究ID")
+    node_ids: Optional[List[str]] = Field(None, description="指定节点ID列表，空则应用到研究关联的节点")
+
+
+class HPOSetNodeOverrideRequest(BaseModel):
+    """设置节点超参覆盖请求"""
+    study_id: str = Field(..., description="研究ID")
+    node_id: str = Field(..., description="节点ID")
+    node_type: str = Field(..., description="节点类型")
+    search_space_override: Optional[SearchSpaceSchema] = Field(None, description="搜索空间覆盖")
+    fixed_params: Optional[Dict[str, Any]] = Field(None, description="固定参数值")
+    tenant_id: int = Field(0, description="租户ID")
+
+
+# ---------- 响应模型 ----------
+
+class HPOTrialSchema(BaseModel):
+    """试验记录"""
+    trial_id: str
+    study_id: str
+    model_type: str
+    node_id: Optional[str] = None
+    node_type: Optional[str] = None
+    framework: str
+    status: str
+    trial_number: int
+    num_layers: Optional[int] = None
+    hidden_size: Optional[int] = None
+    dropout_rate: Optional[float] = None
+    learning_rate: Optional[float] = None
+    sequence_length: Optional[int] = None
+    params: Optional[Dict[str, Any]] = None
+    val_f1_score: Optional[float] = None
+    val_precision: Optional[float] = None
+    val_recall: Optional[float] = None
+    false_positive_rate: Optional[float] = None
+    false_negative_rate: Optional[float] = None
+    inference_latency_ms: Optional[float] = None
+    training_time_seconds: Optional[float] = None
+    objective_value: Optional[float] = None
+    latency_constraint_violated: Optional[bool] = None
+    f1_constraint_violated: Optional[bool] = None
+    training_session_id: Optional[str] = None
+    error_message: Optional[str] = None
+    pruned_reason: Optional[str] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+
+class HPOStudySchema(BaseModel):
+    """研究记录"""
+    study_id: str
+    study_name: str
+    model_type: str
+    node_id: Optional[str] = None
+    node_type: Optional[str] = None
+    framework: str
+    optimizer: str
+    max_trials: int
+    max_concurrent_trials: int
+    status: str
+    search_space: Optional[Dict[str, Any]] = None
+    objective_config: Optional[Dict[str, Any]] = None
+    f1_weight: float
+    false_positive_penalty: float
+    latency_threshold_ms: float
+    latency_weight: float
+    best_trial_id: Optional[str] = None
+    best_params: Optional[Dict[str, Any]] = None
+    best_objective_value: Optional[float] = None
+    per_node_hpo_enabled: bool
+    node_scope: str
+    created_by: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    create_time: datetime
+    update_time: datetime
+
+
+class HPONodeOverrideSchema(BaseModel):
+    """节点超参覆盖记录"""
+    study_id: str
+    node_id: str
+    node_type: str
+    search_space_override: Optional[Dict[str, Any]] = None
+    fixed_params: Optional[Dict[str, Any]] = None
+    best_params: Optional[Dict[str, Any]] = None
+    best_trial_id: Optional[str] = None
+    best_objective_value: Optional[float] = None
+    applied_to_training: bool
+    applied_time: Optional[datetime] = None
+    create_time: datetime
+    update_time: datetime
+
+
+class HPOCreateStudyResponse(BaseModel):
+    """创建HPO研究响应"""
+    success: bool
+    message: str
+    study_id: str
+    study_name: str
+    model_type: str
+    framework: str
+    search_space: Dict[str, Any]
+    objective_config: Dict[str, Any]
+    max_trials: int
+    per_node_hpo_enabled: bool
+
+
+class HPOStartStudyResponse(BaseModel):
+    """启动HPO研究响应"""
+    study_id: str
+    status: str
+    message: str
+    best_params: Optional[Dict[str, Any]] = None
+    best_value: Optional[float] = None
+    total_trials: Optional[int] = None
+    auto_apply_result: Optional[Dict[str, Any]] = None
+
+
+class HPOStudyStatusResponse(BaseModel):
+    """研究状态响应"""
+    success: bool
+    study: HPOStudySchema
+    trials: Dict[str, Any]
+    best_trial: Optional[HPOTrialSchema] = None
+
+
+class HPOStudyListResponse(BaseModel):
+    """研究列表响应"""
+    success: bool
+    total: int
+    studies: List[HPOStudySchema]
+
+
+class HPOTrialListResponse(BaseModel):
+    """试验列表响应"""
+    success: bool
+    total: int
+    trials: List[HPOTrialSchema]
+
+
+class HPOApplyConfigResponse(BaseModel):
+    """应用最优配置响应"""
+    success: Optional[bool] = None
+    message: Optional[str] = None
+    model_type: Optional[str] = None
+    node_id: Optional[str] = None
+    best_params: Optional[Dict[str, Any]] = None
+    objective_value: Optional[float] = None
+    training_config: Optional[Dict[str, Any]] = None
+    saved_to_db: Optional[bool] = None
+    total: Optional[int] = None
+    success_count: Optional[int] = None
+    failed_count: Optional[int] = None
+    success: Optional[List[str]] = None
+    failed: Optional[List[Dict[str, Any]]] = None
+
+
+class HPOCompareConfigResponse(BaseModel):
+    """配置比较响应"""
+    success: bool
+    best_params: Dict[str, Any]
+    best_metrics: Dict[str, Any]
+    current_params: Optional[Dict[str, Any]] = None
+    current_metrics: Optional[Dict[str, Any]] = None
+    param_changes: Dict[str, Any]
+    metric_changes: Dict[str, Any]
+    has_changes: bool
+    improvement: float
+
+
+class HPONodeOverrideResponse(BaseModel):
+    """节点超参覆盖响应"""
+    success: bool
+    message: str
+    study_id: Optional[str] = None
+    node_id: Optional[str] = None
+    search_space_override: Optional[Dict[str, Any]] = None
+    fixed_params: Optional[Dict[str, Any]] = None
