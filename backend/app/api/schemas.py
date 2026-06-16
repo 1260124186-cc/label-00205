@@ -3844,3 +3844,376 @@ class InspectionPdfExportResponse(BaseModel):
     """检验PDF导出响应"""
     html_content: str = Field(..., description="HTML内容，可直接转PDF")
     export_time: str
+
+
+# ============================================================
+# 备件库存与 RUL 联动模块
+# ============================================================
+
+# ---------- 螺栓-SKU 映射 ----------
+
+class BoltSkuMappingCreate(BaseModel):
+    """创建螺栓-SKU映射请求"""
+    bolt_model: str = Field(..., description="螺栓型号", max_length=100)
+    bolt_spec: Optional[str] = Field(None, description="螺栓规格描述", max_length=200)
+    material: Optional[str] = Field(None, description="材质", max_length=100)
+    standard: Optional[str] = Field(None, description="标准（如GB/T、DIN）", max_length=100)
+    diameter: Optional[float] = Field(None, description="公称直径(mm)")
+    length: Optional[float] = Field(None, description="公称长度(mm)")
+    grade: Optional[str] = Field(None, description="性能等级", max_length=50)
+    sku_code: str = Field(..., description="备件SKU编码", max_length=100)
+    sku_name: str = Field(..., description="备件名称", max_length=200)
+    unit: Optional[str] = Field("个", description="计量单位", max_length=20)
+    unit_price: Optional[float] = Field(None, description="单价")
+    supplier: Optional[str] = Field(None, description="供应商", max_length=200)
+    manufacturer: Optional[str] = Field(None, description="生产厂家", max_length=200)
+    lead_time_days: Optional[int] = Field(7, description="采购周期(天)")
+    min_order_qty: Optional[int] = Field(1, description="最小订货量")
+    is_active: Optional[bool] = Field(True, description="是否启用")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+
+
+class BoltSkuMappingUpdate(BaseModel):
+    """更新螺栓-SKU映射请求"""
+    bolt_model: Optional[str] = Field(None, description="螺栓型号")
+    bolt_spec: Optional[str] = Field(None, description="螺栓规格描述")
+    material: Optional[str] = Field(None, description="材质")
+    standard: Optional[str] = Field(None, description="标准")
+    diameter: Optional[float] = Field(None, description="公称直径(mm)")
+    length: Optional[float] = Field(None, description="公称长度(mm)")
+    grade: Optional[str] = Field(None, description="性能等级")
+    sku_name: Optional[str] = Field(None, description="备件名称")
+    unit: Optional[str] = Field(None, description="计量单位")
+    unit_price: Optional[float] = Field(None, description="单价")
+    supplier: Optional[str] = Field(None, description="供应商")
+    manufacturer: Optional[str] = Field(None, description="生产厂家")
+    lead_time_days: Optional[int] = Field(None, description="采购周期(天)")
+    min_order_qty: Optional[int] = Field(None, description="最小订货量")
+    is_active: Optional[bool] = Field(None, description="是否启用")
+
+
+class BoltSkuMappingResponse(BaseModel):
+    """螺栓-SKU映射响应"""
+    id: int
+    bolt_model: str
+    bolt_spec: Optional[str] = None
+    material: Optional[str] = None
+    standard: Optional[str] = None
+    diameter: Optional[float] = None
+    length: Optional[float] = None
+    grade: Optional[str] = None
+    sku_code: str
+    sku_name: str
+    unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    supplier: Optional[str] = None
+    manufacturer: Optional[str] = None
+    lead_time_days: Optional[int] = None
+    min_order_qty: Optional[int] = None
+    is_active: bool
+    tenant_id: Optional[int] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BoltSkuMappingListResponse(BaseModel):
+    """螺栓-SKU映射列表响应"""
+    total: int
+    items: List[BoltSkuMappingResponse]
+
+
+class BoltSkuQueryRequest(BaseModel):
+    """螺栓-SKU映射查询请求"""
+    bolt_model: Optional[str] = Field(None, description="螺栓型号（模糊匹配）")
+    sku_code: Optional[str] = Field(None, description="SKU编码（精确匹配）")
+    material: Optional[str] = Field(None, description="材质")
+    standard: Optional[str] = Field(None, description="标准")
+    is_active: Optional[bool] = Field(None, description="是否启用")
+    limit: int = Field(100, ge=1, le=500, description="返回数量限制")
+    offset: int = Field(0, ge=0, description="偏移量")
+
+
+# ---------- 库存查询 ----------
+
+class SparePartInventoryResponse(BaseModel):
+    """备件库存响应"""
+    id: int
+    sku_code: str
+    sku_name: Optional[str] = None
+    warehouse_code: Optional[str] = None
+    quantity_on_hand: int
+    quantity_reserved: int
+    quantity_available: int
+    quantity_on_order: int
+    reorder_point: Optional[int] = None
+    safety_stock: Optional[int] = None
+    abc_category: Optional[str] = None
+    turnover_rate: Optional[float] = None
+    unit_price: Optional[float] = None
+    stock_value: Optional[float] = None
+    tenant_id: Optional[int] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SparePartInventoryListResponse(BaseModel):
+    """备件库存列表响应"""
+    total: int
+    items: List[SparePartInventoryResponse]
+
+
+class StockAvailabilityCheckResponse(BaseModel):
+    """库存可用性检查响应"""
+    sku_code: str
+    sku_name: Optional[str] = None
+    required_quantity: int
+    is_available: bool
+    stock_status: str
+    available_quantity: int
+    shortage_quantity: int
+    warehouse_code: Optional[str] = None
+    reorder_point: Optional[int] = None
+    safety_stock: Optional[int] = None
+    unit_price: Optional[float] = None
+    shortage_cost: Optional[float] = None
+
+
+# ---------- 备件需求 ----------
+
+class SparePartDemandFromRulRequest(BaseModel):
+    """根据RUL生成备件需求请求"""
+    bolt_id: str = Field(..., description="螺栓ID")
+    bolt_model: str = Field(..., description="螺栓型号")
+    rul_days: float = Field(..., description="RUL剩余天数", ge=0)
+    current_hi: Optional[float] = Field(None, description="当前健康度指数")
+    failure_threshold: Optional[float] = Field(30, description="故障阈值HI")
+    estimated_failure_date: Optional[datetime] = Field(None, description="预计故障日期")
+    node_type: Optional[str] = Field("bolt", description="节点类型")
+    device_id: Optional[str] = Field(None, description="装置ID")
+    device_name: Optional[str] = Field(None, description="装置名称")
+    required_quantity: Optional[int] = Field(1, description="需求数量", ge=1)
+    source_type: Optional[str] = Field("rul", description="需求来源")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+
+
+class SparePartDemandResponse(BaseModel):
+    """备件需求响应"""
+    id: int
+    demand_no: str
+    source_type: Optional[str] = None
+    source_id: Optional[str] = None
+    node_type: Optional[str] = None
+    node_id: Optional[str] = None
+    bolt_model: Optional[str] = None
+    sku_code: str
+    sku_name: Optional[str] = None
+    required_quantity: int
+    urgency: Optional[str] = None
+    priority: Optional[int] = None
+    rul_days: Optional[float] = None
+    estimated_failure_date: Optional[datetime] = None
+    required_date: Optional[datetime] = None
+    stock_status: Optional[str] = None
+    available_quantity: Optional[int] = None
+    shortage_quantity: Optional[int] = None
+    work_order_id: Optional[int] = None
+    work_order_priority_upgraded: Optional[bool] = None
+    status: Optional[str] = None
+    device_id: Optional[str] = None
+    device_name: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_time: Optional[datetime] = None
+    fulfilled_by: Optional[str] = None
+    fulfilled_time: Optional[datetime] = None
+    tenant_id: Optional[int] = None
+    extra_info: Optional[Dict[str, Any]] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SparePartDemandListResponse(BaseModel):
+    """备件需求列表响应"""
+    total: int
+    items: List[SparePartDemandResponse]
+
+
+class SparePartDemandApproveRequest(BaseModel):
+    """审批备件需求请求"""
+    demand_id: int = Field(..., description="需求ID")
+    approved: bool = Field(..., description="是否批准")
+    approver_id: Optional[str] = Field(None, description="审批人ID")
+    approver_name: Optional[str] = Field(None, description="审批人姓名")
+    comment: Optional[str] = Field(None, description="审批意见")
+
+
+class SparePartDemandFulfillRequest(BaseModel):
+    """完成备件需求请求"""
+    demand_id: int = Field(..., description="需求ID")
+    fulfilled_quantity: Optional[int] = Field(None, description="实际发放数量，默认等于需求数量")
+    fulfiller_id: Optional[str] = Field(None, description="发放人ID")
+    fulfiller_name: Optional[str] = Field(None, description="发放人姓名")
+    warehouse_code: Optional[str] = Field(None, description="仓库编码")
+
+
+class SparePartRulScanRequest(BaseModel):
+    """批量扫描RUL生成备件需求请求"""
+    rul_threshold_days: Optional[int] = Field(30, description="RUL阈值天数")
+    device_id: Optional[str] = Field(None, description="装置ID，None表示全部")
+    auto_create_work_order: Optional[bool] = Field(True, description="缺货时是否自动创建工单")
+    auto_upgrade_priority: Optional[bool] = Field(True, description="缺货时是否自动升级工单优先级")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+
+
+class SparePartRulScanResponse(BaseModel):
+    """批量扫描RUL响应"""
+    scanned_count: int
+    below_threshold_count: int
+    new_demands_created: int
+    work_orders_created: int
+    work_orders_upgraded: int
+    skipped_demands: int
+    errors: List[Dict[str, Any]] = Field(default_factory=list)
+    timestamp: datetime
+
+
+# ---------- 装置需求汇总 ----------
+
+class SparePartDemandSummaryRequest(BaseModel):
+    """生成装置需求汇总请求"""
+    device_id: str = Field(..., description="装置ID")
+    device_name: Optional[str] = Field(None, description="装置名称")
+    include_pending: Optional[bool] = Field(True, description="是否包含待处理需求")
+    include_approved: Optional[bool] = Field(True, description="是否包含已批准需求")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+
+
+class SparePartDemandSummaryResponse(BaseModel):
+    """装置需求汇总响应"""
+    id: int
+    summary_no: str
+    device_id: str
+    device_name: Optional[str] = None
+    report_period_start: datetime
+    report_period_end: datetime
+    total_sku_types: int
+    total_quantity: int
+    total_value: Optional[float] = None
+    shortage_sku_count: int
+    urgent_demand_count: int
+    critical_demand_count: int
+    normal_demand_count: int
+    demand_details: Optional[List[Dict[str, Any]]] = None
+    stock_analysis: Optional[Dict[str, Any]] = None
+    purchase_recommendations: Optional[List[Dict[str, Any]]] = None
+    generated_by: Optional[str] = None
+    tenant_id: Optional[int] = None
+    extra_info: Optional[Dict[str, Any]] = None
+    create_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SparePartDemandSummaryListResponse(BaseModel):
+    """装置需求汇总列表响应"""
+    total: int
+    items: List[SparePartDemandSummaryResponse]
+
+
+# ---------- 采购优化 ----------
+
+class PurchaseAnalysisRequest(BaseModel):
+    """采购分析请求"""
+    sku_code: str = Field(..., description="SKU编码")
+    service_level: Optional[float] = Field(None, description="服务水平 0-1", ge=0, le=1)
+    safety_stock_days: Optional[int] = Field(None, description="安全库存天数", ge=1)
+
+
+class PurchaseAnalysisResponse(BaseModel):
+    """采购分析响应"""
+    sku_code: str
+    sku_name: Optional[str] = None
+    unit_price: Optional[float] = None
+    abc_category: Optional[str] = None
+    demand_statistics: Dict[str, Any]
+    lead_time_statistics: Dict[str, Any]
+    safety_stock: Dict[str, Any]
+    eoq: Dict[str, Any]
+    reorder_point: Dict[str, Any]
+    recommendations: List[Dict[str, Any]]
+
+
+class PurchaseConfigSaveRequest(BaseModel):
+    """保存采购配置请求"""
+    sku_code: str = Field(..., description="SKU编码")
+    service_level: Optional[float] = Field(None, description="服务水平", ge=0, le=1)
+    safety_stock_days: Optional[int] = Field(None, description="安全库存天数", ge=1)
+    lead_time_days: Optional[int] = Field(None, description="提前期(天)", ge=1)
+    review_period_days: Optional[int] = Field(None, description="盘点周期(天)", ge=1)
+    min_order_qty: Optional[int] = Field(None, description="最小订货量", ge=1)
+    max_order_qty: Optional[int] = Field(None, description="最大订货量", ge=1)
+    order_cost: Optional[float] = Field(None, description="单次订货成本", ge=0)
+    holding_cost_rate: Optional[float] = Field(None, description="持有成本率", ge=0, le=1)
+    description: Optional[str] = Field(None, description="备注")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+
+
+class PurchaseConfigResponse(BaseModel):
+    """采购配置响应"""
+    id: int
+    sku_code: str
+    sku_name: Optional[str] = None
+    abc_category: Optional[str] = None
+    lead_time_days: Optional[int] = None
+    review_period_days: Optional[int] = None
+    avg_daily_consumption: Optional[float] = None
+    max_daily_consumption: Optional[float] = None
+    safety_stock_days: Optional[int] = None
+    calculated_safety_stock: Optional[int] = None
+    reorder_point: Optional[int] = None
+    economic_order_qty: Optional[int] = None
+    min_order_qty: Optional[int] = None
+    max_order_qty: Optional[int] = None
+    order_cost: Optional[float] = None
+    holding_cost_rate: Optional[float] = None
+    unit_price: Optional[float] = None
+    service_level: Optional[float] = None
+    demand_variability: Optional[float] = None
+    lead_time_variability: Optional[float] = None
+    is_active: Optional[bool] = None
+    description: Optional[str] = None
+    tenant_id: Optional[int] = None
+    extra_info: Optional[Dict[str, Any]] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PurchasePlanRequest(BaseModel):
+    """生成采购计划请求"""
+    device_id: Optional[str] = Field(None, description="装置ID，None表示全部")
+    include_rul_demand: Optional[bool] = Field(True, description="是否包含基于RUL的预测需求")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+
+
+class PurchasePlanResponse(BaseModel):
+    """采购计划响应"""
+    plan_id: str
+    generated_time: datetime
+    device_id: Optional[str] = None
+    include_rul_demand: bool
+    total_items: int
+    total_estimated_cost: float
+    items: List[Dict[str, Any]]
+    summary: Dict[str, Any]

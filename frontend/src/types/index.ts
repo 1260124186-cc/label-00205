@@ -1341,3 +1341,448 @@ export interface InspectionTaskCreateRequest {
 }
 
 export type ComplianceViewMode = 'templates' | 'tasks' | 'checklist'
+
+// ==================== 备件库存与 RUL 联动模块相关类型 ====================
+
+export type UrgencyLevel = 'normal' | 'urgent' | 'critical'
+
+export const UrgencyLevelMap: Record<UrgencyLevel, string> = {
+  normal: '普通',
+  urgent: '紧急',
+  critical: '特急'
+}
+
+export const UrgencyLevelColorMap: Record<UrgencyLevel, string> = {
+  normal: '#22c55e',
+  urgent: '#f97316',
+  critical: '#ef4444'
+}
+
+export type StockStatus = 'normal' | 'shortage' | 'out_of_stock' | 'overstock'
+
+export const StockStatusMap: Record<StockStatus, string> = {
+  normal: '正常',
+  shortage: '库存不足',
+  out_of_stock: '缺货',
+  overstock: '库存过剩'
+}
+
+export const StockStatusColorMap: Record<StockStatus, string> = {
+  normal: '#22c55e',
+  shortage: '#f97316',
+  out_of_stock: '#ef4444',
+  overstock: '#8b5cf6'
+}
+
+export type DemandStatus = 'pending' | 'approved' | 'rejected' | 'fulfilled' | 'cancelled'
+
+export const DemandStatusMap: Record<DemandStatus, string> = {
+  pending: '待审批',
+  approved: '已审批',
+  rejected: '已拒绝',
+  fulfilled: '已完成',
+  cancelled: '已取消'
+}
+
+export const DemandStatusColorMap: Record<DemandStatus, string> = {
+  pending: '#eab308',
+  approved: '#3b82f6',
+  rejected: '#ef4444',
+  fulfilled: '#22c55e',
+  cancelled: '#64748b'
+}
+
+export type ABCCategory = 'A' | 'B' | 'C'
+
+export const ABCCategoryMap: Record<ABCCategory, string> = {
+  A: 'A类（高价值）',
+  B: 'B类（中价值）',
+  C: 'C类（低价值）'
+}
+
+export const ABCCategoryColorMap: Record<ABCCategory, string> = {
+  A: '#ef4444',
+  B: '#f97316',
+  C: '#22c55e'
+}
+
+export type SafetyStockMethod = 'statistical' | 'days_coverage'
+
+export const SafetyStockMethodMap: Record<SafetyStockMethod, string> = {
+  statistical: '统计方法',
+  days_coverage: '天数覆盖法'
+}
+
+export type ReportPeriod = 'weekly' | 'monthly' | 'quarterly' | 'custom'
+
+export const ReportPeriodMap: Record<ReportPeriod, string> = {
+  weekly: '周度',
+  monthly: '月度',
+  quarterly: '季度',
+  custom: '自定义'
+}
+
+export type ReportStatus = 'draft' | 'confirmed' | 'archived'
+
+export const ReportStatusMap: Record<ReportStatus, string> = {
+  draft: '草稿',
+  confirmed: '已确认',
+  archived: '已归档'
+}
+
+export interface BoltSkuMapping {
+  id: number
+  tenant_id: number
+  bolt_model: string
+  bolt_spec: string
+  material: string
+  standard: string
+  diameter: number
+  length: number
+  performance_grade: string
+  sku_code: string
+  sku_name: string
+  unit: string
+  unit_price: number
+  supplier: string
+  manufacturer: string
+  purchase_cycle_days: number
+  min_order_quantity: number
+  description: string
+  is_active: boolean
+  create_time: string
+  update_time: string
+}
+
+export interface BoltSkuMappingCreateRequest {
+  bolt_model: string
+  bolt_spec?: string
+  material?: string
+  standard?: string
+  diameter?: number
+  length?: number
+  performance_grade?: string
+  sku_code: string
+  sku_name: string
+  unit?: string
+  unit_price?: number
+  supplier?: string
+  manufacturer?: string
+  purchase_cycle_days?: number
+  min_order_quantity?: number
+  description?: string
+}
+
+export interface BoltSkuMappingUpdateRequest extends Partial<BoltSkuMappingCreateRequest> {
+  is_active?: boolean
+}
+
+export interface BoltSkuQueryRequest {
+  bolt_model?: string
+  sku_code?: string
+  material?: string
+  performance_grade?: string
+  is_active?: boolean
+}
+
+export interface BoltSkuMappingListResponse {
+  total: number
+  items: BoltSkuMapping[]
+}
+
+export interface SparePartInventory {
+  id: number
+  tenant_id: number
+  sku_code: string
+  sku_name: string
+  warehouse_code: string
+  warehouse_name: string
+  location_code: string
+  current_stock: number
+  reserved_stock: number
+  available_stock: number
+  in_transit_stock: number
+  reorder_point: number
+  safety_stock: number
+  abc_category: ABCCategory
+  turnover_rate: number
+  last_receipt_date: string
+  last_issue_date: string
+  unit_price: number
+  total_value: number
+  min_stock: number
+  max_stock: number
+  stock_status: StockStatus
+  description: string
+  create_time: string
+  update_time: string
+}
+
+export interface SparePartInventoryListResponse {
+  total: number
+  items: SparePartInventory[]
+}
+
+export interface StockAvailabilityCheckResponse {
+  sku_code: string
+  sku_name: string
+  required_quantity: number
+  available_quantity: number
+  stock_status: 'sufficient' | 'shortage' | 'out_of_stock'
+  short_quantity: number
+  unit_price: number
+  total_value: number
+  safety_stock: number
+  reorder_point: number
+  purchase_cycle_days: number
+  supplier: string
+}
+
+export interface SparePartDemand {
+  id: number
+  tenant_id: number
+  demand_no: string
+  source_type: 'rul_prediction' | 'manual' | 'work_order'
+  source_id: string
+  node_id: number
+  node_type: 'bolt' | 'flange'
+  device_id: string
+  device_name: string
+  bolt_model: string
+  bolt_spec: string
+  sku_code: string
+  sku_name: string
+  required_quantity: number
+  urgency_level: UrgencyLevel
+  priority: 'low' | 'medium' | 'high' | 'urgent'
+  rul_days: number
+  current_hi: number
+  predicted_failure_date: string
+  demand_date: string
+  stock_status: 'sufficient' | 'shortage' | 'out_of_stock'
+  available_quantity: number
+  short_quantity: number
+  work_order_id: number
+  work_order_upgraded: boolean
+  demand_status: DemandStatus
+  approver_id: number
+  approve_time: string
+  approve_comment: string
+  fulfill_time: string
+  fulfill_quantity: number
+  description: string
+  create_by: number
+  create_time: string
+  update_time: string
+}
+
+export interface SparePartDemandFromRulRequest {
+  rul_prediction_id: number
+  bolt_model: string
+  bolt_spec?: string
+  node_id?: number
+  node_type?: 'bolt' | 'flange'
+  device_id?: string
+  device_name?: string
+  required_quantity?: number
+  rul_days: number
+  current_hi?: number
+  predicted_failure_date?: string
+  rul_threshold_days?: number
+  auto_create_work_order?: boolean
+  auto_upgrade_priority?: boolean
+}
+
+export interface SparePartDemandListResponse {
+  total: number
+  items: SparePartDemand[]
+}
+
+export interface SparePartDemandApproveRequest {
+  action: 'approve' | 'reject'
+  approver_id?: number
+  approver_name?: string
+  comment?: string
+}
+
+export interface SparePartDemandFulfillRequest {
+  fulfill_quantity?: number
+  operator_id?: number
+  operator_name?: string
+  remark?: string
+}
+
+export interface SparePartRulScanRequest {
+  rul_threshold_days?: number
+  device_id?: string
+  auto_create_work_order?: boolean
+  auto_upgrade_priority?: boolean
+}
+
+export interface SparePartRulScanResponse {
+  scan_time: string
+  rul_threshold_days: number
+  total_scanned: number
+  below_threshold_count: number
+  demands_created: number
+  work_orders_created: number
+  priorities_upgraded: number
+  demand_ids: number[]
+  work_order_ids: number[]
+}
+
+export interface SparePartDemandSummary {
+  id: number
+  tenant_id: number
+  summary_no: string
+  device_id: string
+  device_name: string
+  report_period: ReportPeriod
+  start_date: string
+  end_date: string
+  total_sku_types: number
+  total_quantity: number
+  total_value: number
+  shortage_sku_count: number
+  critical_count: number
+  urgent_count: number
+  normal_count: number
+  demand_details: Record<string, any>
+  inventory_analysis: Record<string, any>
+  purchase_recommendation: Record<string, any>
+  report_status: ReportStatus
+  description: string
+  create_by: number
+  create_time: string
+  update_time: string
+}
+
+export interface SparePartDemandSummaryRequest {
+  device_id: string
+  device_name?: string
+  report_period?: ReportPeriod
+  start_date?: string
+  end_date?: string
+  description?: string
+}
+
+export interface SparePartDemandSummaryListResponse {
+  total: number
+  items: SparePartDemandSummary[]
+}
+
+export interface PurchaseAnalysisResponse {
+  sku_code: string
+  sku_name: string
+  avg_daily_demand: number
+  demand_std_dev: number
+  demand_variation_coeff: number
+  lead_time_days: number
+  lead_time_std_dev: number
+  service_level: number
+  safety_stock_method: SafetyStockMethod
+  safety_stock_days: number
+  calculated_safety_stock: number
+  reorder_point: number
+  eoq: number
+  abc_category: ABCCategory
+  annual_demand: number
+  order_cost: number
+  holding_cost_rate: number
+  unit_price: number
+  last_calculated_time: string
+  recommendations: string[]
+}
+
+export interface PurchaseConfigSaveRequest {
+  sku_code: string
+  lead_time_days?: number
+  count_cycle_days?: number
+  safety_stock_method?: SafetyStockMethod
+  safety_stock_days?: number
+  service_level?: number
+  order_cost?: number
+  holding_cost_rate?: number
+  description?: string
+}
+
+export interface PurchaseConfigResponse {
+  id: number
+  sku_code: string
+  sku_name: string
+  lead_time_days: number
+  lead_time_std_dev: number
+  count_cycle_days: number
+  avg_daily_demand: number
+  demand_std_dev: number
+  demand_variation_coeff: number
+  safety_stock_method: SafetyStockMethod
+  safety_stock_days: number
+  service_level: number
+  calculated_safety_stock: number
+  reorder_point: number
+  eoq: number
+  abc_category: ABCCategory
+  annual_demand: number
+  order_cost: number
+  holding_cost_rate: number
+  unit_price: number
+  last_calculated_time: string
+  description: string
+  create_time: string
+  update_time: string
+}
+
+export interface PurchaseConfigListResponse {
+  total: number
+  items: PurchaseConfigResponse[]
+}
+
+export interface PurchasePlanItem {
+  sku_code: string
+  sku_name: string
+  current_stock: number
+  available_stock: number
+  safety_stock: number
+  reorder_point: number
+  required_quantity: number
+  recommended_order_quantity: number
+  eoq: number
+  unit_price: number
+  total_cost: number
+  urgency_level: UrgencyLevel
+  demand_date: string
+  supplier: string
+  purchase_cycle_days: number
+}
+
+export interface PurchasePlanResponse {
+  plan_no: string
+  device_id: string
+  device_name: string
+  start_date: string
+  end_date: string
+  total_sku_types: number
+  total_quantity: number
+  total_cost: number
+  items: PurchasePlanItem[]
+  generated_at: string
+}
+
+export interface PurchasePlanRequest {
+  device_id?: string
+  start_date?: string
+  end_date?: string
+  include_rul_demands?: boolean
+  rul_threshold_days?: number
+}
+
+export type SparePartsViewMode = 'mapping' | 'inventory' | 'demand' | 'summary' | 'purchase'
+
+export const SparePartsViewModeMap: Record<SparePartsViewMode, string> = {
+  mapping: '螺栓-SKU映射',
+  inventory: '库存查询',
+  demand: '备件需求',
+  summary: '需求汇总',
+  purchase: '采购建议'
+}

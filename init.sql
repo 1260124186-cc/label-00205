@@ -1411,3 +1411,259 @@ SHOW COLUMNS FROM sc_bolt_data LIKE '%temper%';
 SHOW COLUMNS FROM sc_bolt_data LIKE '%humid%';
 SHOW COLUMNS FROM sc_bolt_data LIKE '%vibra%';
 SHOW COLUMNS FROM sc_bolt_data LIKE '%torque%';
+
+-- ============================================================
+-- 备件库存与 RUL 联动模块 - 数据表
+-- ============================================================
+
+-- ============================================================
+-- 螺栓型号与 SKU 映射表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_bolt_sku_mapping (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    bolt_model VARCHAR(100) NOT NULL COMMENT '螺栓型号',
+    bolt_spec VARCHAR(200) COMMENT '螺栓规格',
+    material VARCHAR(100) COMMENT '材质',
+    standard VARCHAR(50) COMMENT '标准（如GB/T、ISO、ANSI等）',
+    diameter DECIMAL(10,3) COMMENT '直径（mm）',
+    length DECIMAL(10,3) COMMENT '长度（mm）',
+    performance_grade VARCHAR(20) COMMENT '性能等级（如8.8级、10.9级等）',
+    sku_code VARCHAR(100) NOT NULL COMMENT '备件SKU编码',
+    sku_name VARCHAR(200) NOT NULL COMMENT '备件名称',
+    unit VARCHAR(20) DEFAULT '个' COMMENT '单位',
+    unit_price DECIMAL(15,4) COMMENT '单价（元）',
+    supplier VARCHAR(200) COMMENT '供应商',
+    manufacturer VARCHAR(200) COMMENT '厂家',
+    purchase_cycle_days INT COMMENT '采购周期（天）',
+    min_order_quantity INT DEFAULT 1 COMMENT '最小订货量',
+    description TEXT COMMENT '备注说明',
+    extra_info JSON COMMENT '扩展信息',
+    is_active TINYINT(1) DEFAULT 1 COMMENT '是否启用',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY uk_bolt_model_sku (bolt_model, sku_code, tenant_id),
+    INDEX idx_sku_code (sku_code),
+    INDEX idx_bolt_model (bolt_model),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='螺栓型号与SKU映射表';
+
+-- ============================================================
+-- 备件库存表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_spare_part_inventory (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    sku_code VARCHAR(100) NOT NULL COMMENT '备件SKU编码',
+    sku_name VARCHAR(200) COMMENT '备件名称',
+    warehouse_code VARCHAR(50) DEFAULT 'default' COMMENT '仓库编码',
+    warehouse_name VARCHAR(100) COMMENT '仓库名称',
+    location_code VARCHAR(50) COMMENT '库位编码',
+    current_stock INT DEFAULT 0 COMMENT '现有库存数量',
+    reserved_stock INT DEFAULT 0 COMMENT '预留库存数量（已分配未出库）',
+    available_stock INT DEFAULT 0 COMMENT '可用库存数量（现有-预留）',
+    in_transit_stock INT DEFAULT 0 COMMENT '在途库存数量',
+    reorder_point INT DEFAULT 0 COMMENT '再订货点',
+    safety_stock INT DEFAULT 0 COMMENT '安全库存数量',
+    abc_category CHAR(1) COMMENT 'ABC分类：A/B/C',
+    turnover_rate DECIMAL(10,4) COMMENT '周转率',
+    last_receipt_date DATE COMMENT '最近入库日期',
+    last_issue_date DATE COMMENT '最近出库日期',
+    unit_price DECIMAL(15,4) COMMENT '单价（元）',
+    total_value DECIMAL(18,4) COMMENT '库存总价值',
+    min_stock INT DEFAULT 0 COMMENT '最低库存预警',
+    max_stock INT COMMENT '最高库存限制',
+    stock_status VARCHAR(20) DEFAULT 'normal' COMMENT '库存状态：normal/shortage/out_of_stock/overstock',
+    description TEXT COMMENT '备注',
+    extra_info JSON COMMENT '扩展信息',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY uk_sku_warehouse (sku_code, warehouse_code, tenant_id),
+    INDEX idx_sku_code (sku_code),
+    INDEX idx_warehouse (warehouse_code),
+    INDEX idx_stock_status (stock_status),
+    INDEX idx_abc_category (abc_category),
+    INDEX idx_available (available_stock),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='备件库存表';
+
+-- ============================================================
+-- 备件需求建议表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_spare_part_demand (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    demand_no VARCHAR(50) NOT NULL COMMENT '需求单号',
+    source_type VARCHAR(30) NOT NULL COMMENT '需求来源：rul_prediction/manual/work_order',
+    source_id VARCHAR(100) COMMENT '来源记录ID',
+    node_id BIGINT COMMENT '节点ID（螺栓或法兰面）',
+    node_type VARCHAR(20) COMMENT '节点类型：bolt/flange',
+    device_id VARCHAR(100) COMMENT '所属装置ID',
+    device_name VARCHAR(200) COMMENT '所属装置名称',
+    bolt_model VARCHAR(100) COMMENT '螺栓型号',
+    bolt_spec VARCHAR(200) COMMENT '螺栓规格',
+    sku_code VARCHAR(100) COMMENT '备件SKU编码',
+    sku_name VARCHAR(200) COMMENT '备件名称',
+    required_quantity INT NOT NULL DEFAULT 1 COMMENT '需求数量',
+    urgency_level VARCHAR(20) NOT NULL DEFAULT 'normal' COMMENT '紧急程度：normal/urgent/critical',
+    priority VARCHAR(20) COMMENT '优先级：low/medium/high/urgent',
+    rul_days INT COMMENT 'RUL剩余寿命天数',
+    current_hi DECIMAL(10,4) COMMENT '当前健康度指数',
+    predicted_failure_date DATE COMMENT '预计故障日期',
+    demand_date DATE COMMENT '需求日期（期望到货日期）',
+    stock_status VARCHAR(20) COMMENT '库存状态：sufficient/shortage/out_of_stock',
+    available_quantity INT COMMENT '可用库存数量',
+    short_quantity INT COMMENT '短缺数量',
+    work_order_id BIGINT COMMENT '关联工单ID',
+    work_order_upgraded TINYINT(1) DEFAULT 0 COMMENT '工单是否已升级优先级',
+    demand_status VARCHAR(20) DEFAULT 'pending' COMMENT '需求状态：pending/approved/rejected/fulfilled/cancelled',
+    approver_id BIGINT COMMENT '审批人ID',
+    approve_time DATETIME COMMENT '审批时间',
+    approve_comment VARCHAR(500) COMMENT '审批意见',
+    fulfill_time DATETIME COMMENT '完成时间',
+    fulfill_quantity INT DEFAULT 0 COMMENT '已完成数量',
+    description TEXT COMMENT '需求说明',
+    extra_info JSON COMMENT '扩展信息',
+    create_by BIGINT COMMENT '创建人ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY uk_demand_no (demand_no, tenant_id),
+    INDEX idx_source (source_type, source_id),
+    INDEX idx_sku_code (sku_code),
+    INDEX idx_device (device_id),
+    INDEX idx_status (demand_status),
+    INDEX idx_urgency (urgency_level),
+    INDEX idx_demand_date (demand_date),
+    INDEX idx_node (node_id, node_type),
+    INDEX idx_work_order (work_order_id),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='备件需求建议表';
+
+-- ============================================================
+-- 装置备件需求汇总报表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_spare_part_demand_summary (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    summary_no VARCHAR(50) NOT NULL COMMENT '汇总编号',
+    device_id VARCHAR(100) COMMENT '装置ID',
+    device_name VARCHAR(200) COMMENT '装置名称',
+    report_period VARCHAR(20) COMMENT '报告周期：weekly/monthly/quarterly/custom',
+    start_date DATE COMMENT '统计开始日期',
+    end_date DATE COMMENT '统计结束日期',
+    total_sku_types INT DEFAULT 0 COMMENT 'SKU种类数',
+    total_quantity INT DEFAULT 0 COMMENT '总需求数量',
+    total_value DECIMAL(18,4) DEFAULT 0 COMMENT '总价值（元）',
+    shortage_sku_count INT DEFAULT 0 COMMENT '缺货SKU数',
+    critical_count INT DEFAULT 0 COMMENT '特急需求数',
+    urgent_count INT DEFAULT 0 COMMENT '紧急需求数',
+    normal_count INT DEFAULT 0 COMMENT '普通需求数',
+    demand_details JSON COMMENT '需求明细JSON',
+    inventory_analysis JSON COMMENT '库存分析JSON',
+    purchase_recommendation JSON COMMENT '采购建议JSON',
+    report_status VARCHAR(20) DEFAULT 'draft' COMMENT '报表状态：draft/confirmed/archived',
+    description TEXT COMMENT '备注',
+    extra_info JSON COMMENT '扩展信息',
+    create_by BIGINT COMMENT '创建人ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY uk_summary_no (summary_no, tenant_id),
+    INDEX idx_device (device_id),
+    INDEX idx_period (report_period),
+    INDEX idx_date (start_date, end_date),
+    INDEX idx_status (report_status),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='装置备件需求汇总报表';
+
+-- ============================================================
+-- 库存交易记录表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_spare_part_stock_transaction (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    transaction_no VARCHAR(50) NOT NULL COMMENT '交易单号',
+    transaction_type VARCHAR(30) NOT NULL COMMENT '交易类型：receipt/issue/transfer/adjustment/reserve/cancel_reserve',
+    sku_code VARCHAR(100) NOT NULL COMMENT '备件SKU编码',
+    sku_name VARCHAR(200) COMMENT '备件名称',
+    warehouse_code VARCHAR(50) DEFAULT 'default' COMMENT '仓库编码',
+    location_code VARCHAR(50) COMMENT '库位编码',
+    quantity INT NOT NULL COMMENT '交易数量（正数入库，负数出库）',
+    unit_price DECIMAL(15,4) COMMENT '单价',
+    total_amount DECIMAL(18,4) COMMENT '总金额',
+    balance_before INT COMMENT '交易前库存',
+    balance_after INT COMMENT '交易后库存',
+    related_order_no VARCHAR(50) COMMENT '关联单据号（需求单、采购单等）',
+    related_order_type VARCHAR(30) COMMENT '关联单据类型',
+    operator_id BIGINT COMMENT '操作人ID',
+    operator_name VARCHAR(100) COMMENT '操作人姓名',
+    transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '交易时间',
+    description TEXT COMMENT '备注',
+    extra_info JSON COMMENT '扩展信息',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_transaction_no (transaction_no),
+    INDEX idx_type (transaction_type),
+    INDEX idx_sku (sku_code),
+    INDEX idx_warehouse (warehouse_code),
+    INDEX idx_time (transaction_time),
+    INDEX idx_related_order (related_order_no),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='库存交易记录表';
+
+-- ============================================================
+-- 采购周期与安全库存配置表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_purchase_cycle_config (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
+    sku_code VARCHAR(100) NOT NULL COMMENT '备件SKU编码',
+    sku_name VARCHAR(200) COMMENT '备件名称',
+    lead_time_days INT COMMENT '采购提前期（天）',
+    lead_time_std_dev DECIMAL(10,2) COMMENT '提前期标准差（天）',
+    count_cycle_days INT DEFAULT 30 COMMENT '盘点周期（天）',
+    avg_daily_demand DECIMAL(12,4) COMMENT '日均消耗量',
+    demand_std_dev DECIMAL(12,4) COMMENT '需求标准差',
+    demand_variation_coeff DECIMAL(10,4) COMMENT '需求变异系数',
+    safety_stock_method VARCHAR(20) DEFAULT 'statistical' COMMENT '安全库存计算方法：statistical/days_coverage',
+    safety_stock_days INT DEFAULT 7 COMMENT '安全库存天数（days_coverage方法）',
+    service_level DECIMAL(5,4) DEFAULT 0.95 COMMENT '服务水平（0.90-0.999）',
+    calculated_safety_stock INT COMMENT '计算得出的安全库存数量',
+    reorder_point INT COMMENT '再订货点',
+    eoq INT COMMENT '经济订货批量EOQ',
+    abc_category CHAR(1) COMMENT 'ABC分类',
+    annual_demand INT COMMENT '年需求量',
+    order_cost DECIMAL(12,2) DEFAULT 500.00 COMMENT '单次订货成本（元）',
+    holding_cost_rate DECIMAL(10,4) DEFAULT 0.25 COMMENT '年持有成本率',
+    unit_price DECIMAL(15,4) COMMENT '单价',
+    last_calculated_time DATETIME COMMENT '上次计算时间',
+    description TEXT COMMENT '备注',
+    extra_info JSON COMMENT '扩展信息',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY uk_sku_config (sku_code, tenant_id),
+    INDEX idx_sku (sku_code),
+    INDEX idx_abc (abc_category),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='采购周期与安全库存配置表';
+
+-- ============================================================
+-- 初始化示例数据
+-- ============================================================
+
+-- 插入螺栓-SKU映射示例数据
+INSERT INTO sc_bolt_sku_mapping (bolt_model, bolt_spec, material, standard, diameter, length, performance_grade, sku_code, sku_name, unit, unit_price, supplier, purchase_cycle_days, min_order_quantity, description) VALUES
+('M20-8.8', 'M20×100', '35CrMoA', 'GB/T 5782', 20.0, 100.0, '8.8级', 'SKU-BOLT-0001', '六角头螺栓 M20×100 8.8级', '个', 25.50, '标准件供应商A', 7, 50, '常用高强度螺栓'),
+('M24-10.9', 'M24×150', '42CrMoA', 'GB/T 5782', 24.0, 150.0, '10.9级', 'SKU-BOLT-0002', '六角头螺栓 M24×150 10.9级', '个', 45.80, '标准件供应商A', 10, 30, '法兰连接用高强度螺栓'),
+('M30-10.9', 'M30×200', '42CrMoA', 'GB/T 5783', 30.0, 200.0, '10.9级', 'SKU-BOLT-0003', '全螺纹螺栓 M30×200 10.9级', '个', 78.20, '标准件供应商B', 14, 20, '压力容器用全螺纹螺栓'),
+('M16-8.8', 'M16×80', '35#', 'GB/T 5782', 16.0, 80.0, '8.8级', 'SKU-BOLT-0004', '六角头螺栓 M16×80 8.8级', '个', 12.30, '标准件供应商A', 5, 100, '普通连接螺栓');
+
+-- 插入备件库存示例数据
+INSERT INTO sc_spare_part_inventory (sku_code, sku_name, warehouse_code, warehouse_name, current_stock, reserved_stock, available_stock, safety_stock, reorder_point, abc_category, unit_price, total_value, min_stock, stock_status) VALUES
+('SKU-BOLT-0001', '六角头螺栓 M20×100 8.8级', 'WH001', '中心仓库', 120, 20, 100, 50, 80, 'B', 25.50, 3060.00, 30, 'normal'),
+('SKU-BOLT-0002', '六角头螺栓 M24×150 10.9级', 'WH001', '中心仓库', 15, 5, 10, 30, 40, 'A', 45.80, 687.00, 20, 'shortage'),
+('SKU-BOLT-0003', '全螺纹螺栓 M30×200 10.9级', 'WH001', '中心仓库', 0, 0, 0, 20, 25, 'A', 78.20, 0.00, 10, 'out_of_stock'),
+('SKU-BOLT-0004', '六角头螺栓 M16×80 8.8级', 'WH001', '中心仓库', 500, 50, 450, 100, 150, 'C', 12.30, 6150.00, 80, 'normal');
+
+-- 显示新增的备件库存相关表
+SHOW TABLES LIKE '%spare%';
+SHOW TABLES LIKE '%bolt_sku%';
+SHOW TABLES LIKE '%purchase%';

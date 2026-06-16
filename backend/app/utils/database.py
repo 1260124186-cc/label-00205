@@ -2070,6 +2070,278 @@ class MultivariateTrainingConfig(Base):
             return ['preload']
 
 
+# ============================================================
+# 备件库存与 RUL 联动模块 ORM 模型
+# ============================================================
+
+class BoltSkuMapping(Base):
+    """
+    螺栓型号与备件SKU映射表模型
+
+    对应数据库表: sc_bolt_sku_mapping
+    存储螺栓型号规格与备件SKU的对应关系。
+    """
+    __tablename__ = 'sc_bolt_sku_mapping'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    bolt_model = Column(String(100), nullable=False, comment='螺栓型号')
+    bolt_spec = Column(String(200), comment='螺栓规格描述')
+    material = Column(String(100), comment='材质')
+    standard = Column(String(100), comment='标准（如GB/T、DIN）')
+    diameter = Column(Float, comment='公称直径(mm)')
+    length = Column(Float, comment='公称长度(mm)')
+    grade = Column(String(50), comment='性能等级')
+    sku_code = Column(String(100), unique=True, nullable=False, comment='备件SKU编码')
+    sku_name = Column(String(200), nullable=False, comment='备件名称')
+    unit = Column(String(20), default='个', comment='计量单位')
+    unit_price = Column(Float, comment='单价')
+    supplier = Column(String(200), comment='供应商')
+    manufacturer = Column(String(200), comment='生产厂家')
+    lead_time_days = Column(Integer, default=7, comment='采购周期(天)')
+    min_order_qty = Column(Integer, default=1, comment='最小订货量')
+    is_active = Column(Boolean, default=True, comment='是否启用')
+    description = Column(String(500), comment='备注说明')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_bolt_model', 'bolt_model'),
+        Index('idx_sku_code', 'sku_code'),
+        Index('idx_sku_active', 'is_active'),
+        Index('idx_sku_tenant', 'tenant_id'),
+    )
+
+
+class SparePartInventory(Base):
+    """
+    备件库存表模型
+
+    对应数据库表: sc_spare_part_inventory
+    存储备件的当前库存信息。
+    """
+    __tablename__ = 'sc_spare_part_inventory'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    sku_code = Column(String(100), nullable=False, comment='备件SKU编码')
+    warehouse_code = Column(String(50), default='main', comment='仓库编码')
+    warehouse_name = Column(String(100), default='主仓库', comment='仓库名称')
+    location = Column(String(100), comment='库位')
+    quantity_on_hand = Column(Integer, default=0, comment='现有库存数量')
+    quantity_reserved = Column(Integer, default=0, comment='已预留数量')
+    quantity_available = Column(Integer, default=0, comment='可用库存数量')
+    quantity_on_order = Column(Integer, default=0, comment='在途数量')
+    reorder_point = Column(Integer, default=10, comment='再订货点')
+    safety_stock = Column(Integer, default=5, comment='安全库存量')
+    min_stock = Column(Integer, default=0, comment='最低库存量')
+    max_stock = Column(Integer, comment='最高库存量')
+    avg_consumption_rate = Column(Float, comment='平均消耗速率(个/天)')
+    last_receipt_date = Column(DateTime, comment='最近入库日期')
+    last_issue_date = Column(DateTime, comment='最近出库日期')
+    batch_no = Column(String(100), comment='批次号')
+    expiry_date = Column(DateTime, comment='有效期')
+    quality_status = Column(String(20), default='qualified', comment='质量状态 qualified/inspecting/rejected')
+    unit_price = Column(Float, comment='库存单价')
+    total_value = Column(Float, comment='库存总值')
+    abc_category = Column(String(1), comment='ABC分类 A/B/C')
+    turnover_rate = Column(Float, comment='库存周转率')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_inv_sku', 'sku_code'),
+        Index('idx_inv_warehouse', 'warehouse_code'),
+        Index('idx_inv_available', 'quantity_available'),
+        Index('idx_inv_abc', 'abc_category'),
+        Index('idx_inv_tenant', 'tenant_id'),
+        Index('idx_inv_sku_warehouse', 'sku_code', 'warehouse_code', unique=True),
+    )
+
+
+class SparePartDemand(Base):
+    """
+    备件需求建议表模型
+
+    对应数据库表: sc_spare_part_demands
+    存储基于RUL预测生成的备件需求建议。
+    """
+    __tablename__ = 'sc_spare_part_demands'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    demand_no = Column(String(50), unique=True, nullable=False, comment='需求单号')
+    source_type = Column(String(20), default='rul', comment='需求来源 rul/alert/work_order/manual')
+    source_id = Column(String(100), comment='来源ID（RUL记录ID/告警ID/工单ID）')
+    node_type = Column(String(20), comment='节点类型 bolt/flange')
+    node_id = Column(String(100), comment='节点ID')
+    bolt_model = Column(String(100), comment='螺栓型号')
+    sku_code = Column(String(100), nullable=False, comment='备件SKU编码')
+    sku_name = Column(String(200), comment='备件名称')
+    required_quantity = Column(Integer, default=1, comment='需求数量')
+    urgency = Column(String(20), default='normal', comment='紧急程度 normal/urgent/critical')
+    priority = Column(Integer, default=3, comment='优先级 1-5')
+    rul_days = Column(Float, comment='RUL剩余天数')
+    rul_threshold = Column(Float, comment='RUL阈值')
+    estimated_failure_date = Column(DateTime, comment='预计故障日期')
+    required_date = Column(DateTime, comment='需求日期')
+    stock_status = Column(String(20), default='checking', comment='库存状态 checking/in_stock/out_of_stock/partial')
+    available_quantity = Column(Integer, comment='可用库存数量')
+    shortage_quantity = Column(Integer, comment='短缺数量')
+    work_order_id = Column(BigInteger, comment='关联工单ID')
+    work_order_priority_upgraded = Column(Boolean, default=False, comment='是否已升级工单优先级')
+    status = Column(String(20), default='pending', comment='状态 pending/approved/fulfilled/cancelled')
+    approved_by = Column(String(50), comment='审批人ID')
+    approved_name = Column(String(100), comment='审批人姓名')
+    approved_time = Column(DateTime, comment='审批时间')
+    fulfilled_time = Column(DateTime, comment='完成时间')
+    remarks = Column(String(500), comment='备注')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    device_id = Column(String(100), comment='装置ID')
+    device_name = Column(String(200), comment='装置名称')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_demand_no', 'demand_no', unique=True),
+        Index('idx_demand_sku', 'sku_code'),
+        Index('idx_demand_node', 'node_type', 'node_id'),
+        Index('idx_demand_status', 'status'),
+        Index('idx_demand_urgency', 'urgency'),
+        Index('idx_demand_date', 'required_date'),
+        Index('idx_demand_device', 'device_id'),
+        Index('idx_demand_tenant', 'tenant_id'),
+        Index('idx_demand_source', 'source_type', 'source_id'),
+    )
+
+
+class SparePartDemandSummary(Base):
+    """
+    批量装置备件需求汇总报表模型
+
+    对应数据库表: sc_spare_part_demand_summaries
+    存储按装置维度汇总的备件需求报表。
+    """
+    __tablename__ = 'sc_spare_part_demand_summaries'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    summary_no = Column(String(50), unique=True, nullable=False, comment='汇总报表编号')
+    device_id = Column(String(100), comment='装置ID')
+    device_name = Column(String(200), comment='装置名称')
+    summary_period = Column(String(20), default='monthly', comment='汇总周期 weekly/monthly/quarterly/custom')
+    period_start = Column(DateTime, nullable=False, comment='统计周期开始')
+    period_end = Column(DateTime, nullable=False, comment='统计周期结束')
+    total_demand_count = Column(Integer, default=0, comment='需求项总数')
+    total_quantity = Column(Integer, default=0, comment='需求总数量')
+    total_estimated_value = Column(Float, default=0, comment='预估总金额')
+    urgent_count = Column(Integer, default=0, comment='紧急需求项数')
+    critical_count = Column(Integer, default=0, comment='特急需求项数')
+    out_of_stock_count = Column(Integer, default=0, comment='缺货项数')
+    partial_stock_count = Column(Integer, default=0, comment='部分缺货项数')
+    in_stock_count = Column(Integer, default=0, comment='现货充足项数')
+    affected_node_count = Column(Integer, default=0, comment='受影响节点数')
+    demand_details = Column(Text, comment='需求明细 JSON')
+    stock_analysis = Column(Text, comment='库存分析 JSON')
+    recommendations = Column(Text, comment='采购建议 JSON')
+    status = Column(String(20), default='draft', comment='状态 draft/confirmed/archived')
+    generated_by = Column(String(50), comment='生成人ID')
+    generated_name = Column(String(100), comment='生成人姓名')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_summary_no', 'summary_no', unique=True),
+        Index('idx_summary_device', 'device_id'),
+        Index('idx_summary_period', 'period_start', 'period_end'),
+        Index('idx_summary_status', 'status'),
+        Index('idx_summary_tenant', 'tenant_id'),
+    )
+
+
+class SparePartStockTransaction(Base):
+    """
+    备件库存交易记录表模型
+
+    对应数据库表: sc_spare_part_stock_transactions
+    存储备件出入库的交易记录。
+    """
+    __tablename__ = 'sc_spare_part_stock_transactions'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    transaction_no = Column(String(50), unique=True, nullable=False, comment='交易单号')
+    transaction_type = Column(String(20), nullable=False, comment='交易类型 receipt/issue/transfer/adjustment')
+    sku_code = Column(String(100), nullable=False, comment='备件SKU编码')
+    sku_name = Column(String(200), comment='备件名称')
+    warehouse_code = Column(String(50), comment='仓库编码')
+    quantity = Column(Integer, nullable=False, comment='交易数量（正入库负出库）')
+    unit_price = Column(Float, comment='单价')
+    total_amount = Column(Float, comment='总金额')
+    balance_after = Column(Integer, comment='交易后库存数量')
+    related_demand_id = Column(BigInteger, comment='关联需求单ID')
+    related_work_order_id = Column(BigInteger, comment='关联工单ID')
+    batch_no = Column(String(100), comment='批次号')
+    operator_id = Column(String(50), comment='操作人ID')
+    operator_name = Column(String(100), comment='操作人姓名')
+    remarks = Column(String(500), comment='备注')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_trans_no', 'transaction_no', unique=True),
+        Index('idx_trans_sku', 'sku_code'),
+        Index('idx_trans_type', 'transaction_type'),
+        Index('idx_trans_time', 'create_time'),
+        Index('idx_trans_tenant', 'tenant_id'),
+    )
+
+
+class PurchaseCycleConfig(Base):
+    """
+    采购周期与安全库存配置表模型
+
+    对应数据库表: sc_purchase_cycle_configs
+    存储各类备件的采购周期和安全库存配置。
+    """
+    __tablename__ = 'sc_purchase_cycle_configs'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    sku_code = Column(String(100), unique=True, nullable=False, comment='备件SKU编码')
+    sku_name = Column(String(200), comment='备件名称')
+    abc_category = Column(String(1), comment='ABC分类')
+    lead_time_days = Column(Integer, default=7, comment='采购提前期(天)')
+    review_period_days = Column(Integer, default=30, comment='盘点周期(天)')
+    avg_daily_consumption = Column(Float, default=0, comment='平均日消耗量')
+    max_daily_consumption = Column(Float, default=0, comment='最大日消耗量')
+    safety_stock_days = Column(Integer, default=7, comment='安全库存天数')
+    calculated_safety_stock = Column(Integer, default=0, comment='计算安全库存量')
+    reorder_point = Column(Integer, default=0, comment='再订货点')
+    economic_order_qty = Column(Integer, default=0, comment='经济订货批量EOQ')
+    min_order_qty = Column(Integer, default=1, comment='最小订货量')
+    max_order_qty = Column(Integer, comment='最大订货量')
+    order_cost = Column(Float, default=100, comment='单次订货成本')
+    holding_cost_rate = Column(Float, default=0.15, comment='年持有成本率')
+    unit_price = Column(Float, comment='单价')
+    service_level = Column(Float, default=0.95, comment='服务水平 0-1')
+    demand_variability = Column(Float, comment='需求变异系数')
+    lead_time_variability = Column(Float, comment='提前期变异系数')
+    is_active = Column(Boolean, default=True, comment='是否启用')
+    description = Column(String(500), comment='备注')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_pc_sku', 'sku_code', unique=True),
+        Index('idx_pc_abc', 'abc_category'),
+        Index('idx_pc_active', 'is_active'),
+        Index('idx_pc_tenant', 'tenant_id'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类

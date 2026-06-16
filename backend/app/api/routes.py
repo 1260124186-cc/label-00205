@@ -166,6 +166,17 @@ from app.api.schemas import (
     InspectionTaskCreateRequest, InspectionItemCheckRequest, AutoCheckMandatoryRequest,
     InspectionTaskResponse, InspectionTaskListResponse,
     WorkOrderCloseCheckResponse, InspectionPdfExportResponse,
+    BoltSkuMappingCreate, BoltSkuMappingUpdate, BoltSkuMappingResponse, BoltSkuMappingListResponse,
+    BoltSkuQueryRequest,
+    SparePartInventoryResponse, SparePartInventoryListResponse,
+    StockAvailabilityCheckResponse,
+    SparePartDemandFromRulRequest, SparePartDemandResponse, SparePartDemandListResponse,
+    SparePartDemandApproveRequest, SparePartDemandFulfillRequest,
+    SparePartRulScanRequest, SparePartRulScanResponse,
+    SparePartDemandSummaryRequest, SparePartDemandSummaryResponse, SparePartDemandSummaryListResponse,
+    PurchaseAnalysisRequest, PurchaseAnalysisResponse,
+    PurchaseConfigSaveRequest, PurchaseConfigResponse,
+    PurchasePlanRequest, PurchasePlanResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -9744,4 +9755,887 @@ async def export_inspection_pdf(task_id: int):
         )
     except Exception as e:
         logger.error(f"导出PDF检验报告失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 备件库存与 RUL 联动模块
+# ============================================================
+
+_spare_part_service = None
+_purchase_optimizer = None
+
+
+def get_spare_part_service():
+    """获取备件库存服务实例"""
+    global _spare_part_service
+    if _spare_part_service is None:
+        from app.services.spare_parts import SparePartService
+        _spare_part_service = SparePartService()
+    return _spare_part_service
+
+
+def get_purchase_optimizer():
+    """获取采购优化器实例"""
+    global _purchase_optimizer
+    if _purchase_optimizer is None:
+        from app.services.spare_parts import PurchaseOptimizer
+        _purchase_optimizer = PurchaseOptimizer()
+    return _purchase_optimizer
+
+
+def _bolt_sku_mapping_to_dict(mapping) -> Dict[str, Any]:
+    """将螺栓-SKU映射ORM对象转为响应字典"""
+    return {
+        'id': mapping.id,
+        'bolt_model': mapping.bolt_model,
+        'bolt_specification': mapping.bolt_specification,
+        'material': mapping.material,
+        'standard': mapping.standard,
+        'diameter': mapping.diameter,
+        'length': mapping.length,
+        'performance_grade': mapping.performance_grade,
+        'sku_code': mapping.sku_code,
+        'sku_name': mapping.sku_name,
+        'unit': mapping.unit,
+        'unit_price': mapping.unit_price,
+        'supplier': mapping.supplier,
+        'manufacturer': mapping.manufacturer,
+        'purchase_cycle_days': mapping.purchase_cycle_days,
+        'min_order_quantity': mapping.min_order_quantity,
+        'tenant_id': mapping.tenant_id,
+        'is_active': bool(mapping.is_active),
+        'create_time': mapping.create_time,
+        'update_time': mapping.update_time,
+    }
+
+
+def _spare_part_inventory_to_dict(inventory) -> Dict[str, Any]:
+    """将备件库存ORM对象转为响应字典"""
+    return {
+        'id': inventory.id,
+        'sku_code': inventory.sku_code,
+        'sku_name': inventory.sku_name,
+        'warehouse_code': inventory.warehouse_code,
+        'warehouse_name': inventory.warehouse_name,
+        'quantity_on_hand': inventory.quantity_on_hand,
+        'quantity_reserved': inventory.quantity_reserved,
+        'quantity_available': inventory.quantity_available,
+        'quantity_in_transit': inventory.quantity_in_transit,
+        'reorder_point': inventory.reorder_point,
+        'safety_stock': inventory.safety_stock,
+        'abc_category': inventory.abc_category,
+        'turnover_rate': inventory.turnover_rate,
+        'last_count_date': inventory.last_count_date,
+        'next_count_date': inventory.next_count_date,
+        'tenant_id': inventory.tenant_id,
+        'create_time': inventory.create_time,
+        'update_time': inventory.update_time,
+    }
+
+
+def _spare_part_demand_to_dict(demand) -> Dict[str, Any]:
+    """将备件需求ORM对象转为响应字典"""
+    data = {
+        'id': demand.id,
+        'demand_no': demand.demand_no,
+        'source_type': demand.source_type,
+        'source_id': demand.source_id,
+        'node_type': demand.node_type,
+        'node_id': demand.node_id,
+        'bolt_model': demand.bolt_model,
+        'sku_code': demand.sku_code,
+        'sku_name': demand.sku_name,
+        'required_quantity': demand.required_quantity,
+        'urgency': demand.urgency,
+        'priority': demand.priority,
+        'rul_days': demand.rul_days,
+        'expected_failure_date': demand.expected_failure_date,
+        'demand_date': demand.demand_date,
+        'stock_status': demand.stock_status,
+        'available_quantity': demand.available_quantity,
+        'shortage_quantity': demand.shortage_quantity,
+        'work_order_id': demand.work_order_id,
+        'work_order_upgraded': bool(demand.work_order_upgraded),
+        'demand_status': demand.demand_status,
+        'device_id': demand.device_id,
+        'device_name': demand.device_name,
+        'approved_by': demand.approved_by,
+        'approved_time': demand.approved_time,
+        'fulfilled_quantity': demand.fulfilled_quantity,
+        'fulfilled_time': demand.fulfilled_time,
+        'tenant_id': demand.tenant_id,
+        'create_time': demand.create_time,
+        'update_time': demand.update_time,
+    }
+    if demand.extra_info:
+        try:
+            data['extra_info'] = json.loads(demand.extra_info)
+        except Exception:
+            data['extra_info'] = {}
+    else:
+        data['extra_info'] = {}
+    return data
+
+
+def _demand_summary_to_dict(summary) -> Dict[str, Any]:
+    """将需求汇总ORM对象转为响应字典"""
+    data = {
+        'id': summary.id,
+        'summary_no': summary.summary_no,
+        'device_id': summary.device_id,
+        'device_name': summary.device_name,
+        'report_period': summary.report_period,
+        'report_date': summary.report_date,
+        'total_sku_types': summary.total_sku_types,
+        'total_quantity': summary.total_quantity,
+        'total_value': summary.total_value,
+        'shortage_sku_count': summary.shortage_sku_count,
+        'critical_count': summary.critical_count,
+        'urgent_count': summary.urgent_count,
+        'normal_count': summary.normal_count,
+        'tenant_id': summary.tenant_id,
+        'create_time': summary.create_time,
+    }
+    for field, attr in [
+        ('demand_details', summary.demand_details),
+        ('inventory_analysis', summary.inventory_analysis),
+        ('purchase_recommendations', summary.purchase_recommendations),
+    ]:
+        if attr:
+            try:
+                data[field] = json.loads(attr)
+            except Exception:
+                data[field] = attr
+        else:
+            data[field] = None
+    return data
+
+
+def _purchase_config_to_dict(config) -> Dict[str, Any]:
+    """将采购配置ORM对象转为响应字典"""
+    return {
+        'id': config.id,
+        'sku_code': config.sku_code,
+        'sku_name': config.sku_name,
+        'avg_lead_time_days': config.avg_lead_time_days,
+        'lead_time_std_days': config.lead_time_std_days,
+        'count_cycle_days': config.count_cycle_days,
+        'avg_daily_demand': config.avg_daily_demand,
+        'demand_std': config.demand_std,
+        'safety_stock_days': config.safety_stock_days,
+        'calculated_safety_stock': config.calculated_safety_stock,
+        'reorder_point': config.reorder_point,
+        'economic_order_quantity': config.economic_order_quantity,
+        'service_level': config.service_level,
+        'abc_category': config.abc_category,
+        'annual_demand': config.annual_demand,
+        'order_cost': config.order_cost,
+        'holding_cost_rate': config.holding_cost_rate,
+        'unit_price': config.unit_price,
+        'tenant_id': config.tenant_id,
+        'create_time': config.create_time,
+        'update_time': config.update_time,
+    }
+
+
+# ==================== 螺栓-SKU映射管理 ====================
+
+@router.get(
+    "/spare-parts/sku-mappings",
+    response_model=BoltSkuMappingListResponse,
+    tags=["备件库存"],
+    summary="查询螺栓-SKU映射列表",
+)
+async def list_sku_mappings(
+    bolt_model: Optional[str] = Query(None, description="螺栓型号模糊查询"),
+    sku_code: Optional[str] = Query(None, description="SKU编码精确查询"),
+    is_active: Optional[bool] = Query(None, description="是否启用"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """查询螺栓型号与备件SKU的映射关系列表"""
+    try:
+        service = get_spare_part_service()
+        mappings = service.list_sku_mappings(
+            bolt_model=bolt_model,
+            sku_code=sku_code,
+            is_active=is_active,
+            limit=limit,
+            offset=offset,
+        )
+        items = [_bolt_sku_mapping_to_dict(m) for m in mappings]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询SKU映射列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/spare-parts/sku-mappings/query",
+    response_model=BoltSkuMappingListResponse,
+    tags=["备件库存"],
+    summary="高级查询螺栓-SKU映射",
+)
+async def query_sku_mappings(request: BoltSkuQueryRequest):
+    """根据螺栓规格参数高级查询SKU映射"""
+    try:
+        service = get_spare_part_service()
+        mappings = service.query_sku_mappings(
+            bolt_model=request.bolt_model,
+            diameter=request.diameter,
+            length=request.length,
+            performance_grade=request.performance_grade,
+            material=request.material,
+            standard=request.standard,
+            limit=request.limit or 100,
+        )
+        items = [_bolt_sku_mapping_to_dict(m) for m in mappings]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"高级查询SKU映射失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/sku-mappings/{mapping_id}",
+    response_model=BoltSkuMappingResponse,
+    tags=["备件库存"],
+    summary="获取螺栓-SKU映射详情",
+)
+async def get_sku_mapping(mapping_id: int):
+    """获取单个螺栓-SKU映射详情"""
+    try:
+        service = get_spare_part_service()
+        mapping = service.get_sku_mapping(mapping_id)
+        if not mapping:
+            raise HTTPException(status_code=404, detail="映射不存在")
+        return _bolt_sku_mapping_to_dict(mapping)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取SKU映射详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/sku-for-bolt/{bolt_model}",
+    response_model=BoltSkuMappingResponse,
+    tags=["备件库存"],
+    summary="根据螺栓型号查询SKU",
+)
+async def get_sku_for_bolt(bolt_model: str):
+    """根据螺栓型号查询对应的备件SKU"""
+    try:
+        service = get_spare_part_service()
+        mapping = service.get_sku_for_bolt(bolt_model)
+        if not mapping:
+            raise HTTPException(status_code=404, detail=f"未找到螺栓型号 {bolt_model} 对应的SKU")
+        return _bolt_sku_mapping_to_dict(mapping)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"根据螺栓型号查询SKU失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/spare-parts/sku-mappings",
+    response_model=BoltSkuMappingResponse,
+    tags=["备件库存"],
+    summary="创建螺栓-SKU映射",
+)
+async def create_sku_mapping(request: BoltSkuMappingCreate):
+    """创建螺栓型号与备件SKU的映射关系"""
+    try:
+        service = get_spare_part_service()
+        mapping = service.create_sku_mapping(**request.model_dump())
+        if not mapping:
+            raise HTTPException(status_code=500, detail="创建映射失败")
+        return _bolt_sku_mapping_to_dict(mapping)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建SKU映射失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/spare-parts/sku-mappings/{mapping_id}",
+    response_model=BoltSkuMappingResponse,
+    tags=["备件库存"],
+    summary="更新螺栓-SKU映射",
+)
+async def update_sku_mapping(mapping_id: int, request: BoltSkuMappingUpdate):
+    """更新螺栓-SKU映射关系"""
+    try:
+        service = get_spare_part_service()
+        mapping = service.update_sku_mapping(mapping_id, **request.model_dump(exclude_unset=True))
+        if not mapping:
+            raise HTTPException(status_code=404, detail="映射不存在")
+        return _bolt_sku_mapping_to_dict(mapping)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新SKU映射失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/spare-parts/sku-mappings/{mapping_id}",
+    tags=["备件库存"],
+    summary="删除螺栓-SKU映射",
+)
+async def delete_sku_mapping(mapping_id: int):
+    """删除螺栓-SKU映射关系"""
+    try:
+        service = get_spare_part_service()
+        success = service.delete_sku_mapping(mapping_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="映射不存在")
+        return {"status": "success", "message": "映射已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除SKU映射失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 库存查询管理 ====================
+
+@router.get(
+    "/spare-parts/inventory",
+    response_model=SparePartInventoryListResponse,
+    tags=["备件库存"],
+    summary="查询备件库存列表",
+)
+async def list_inventory(
+    sku_code: Optional[str] = Query(None, description="SKU编码"),
+    sku_name: Optional[str] = Query(None, description="SKU名称模糊查询"),
+    warehouse_code: Optional[str] = Query(None, description="仓库编码"),
+    abc_category: Optional[str] = Query(None, description="ABC分类 A/B/C"),
+    stock_status: Optional[str] = Query(None, description="库存状态: in_stock/shortage/out_of_stock"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """查询备件库存列表，支持多条件筛选"""
+    try:
+        service = get_spare_part_service()
+        inventory_list = service.list_inventory(
+            sku_code=sku_code,
+            sku_name=sku_name,
+            warehouse_code=warehouse_code,
+            abc_category=abc_category,
+            stock_status=stock_status,
+            limit=limit,
+            offset=offset,
+        )
+        items = [_spare_part_inventory_to_dict(inv) for inv in inventory_list]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询库存列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/inventory/{sku_code}",
+    response_model=SparePartInventoryResponse,
+    tags=["备件库存"],
+    summary="查询单个SKU库存",
+)
+async def get_inventory(sku_code: str, warehouse_code: Optional[str] = Query(None, description="仓库编码")):
+    """查询指定SKU的库存详情"""
+    try:
+        service = get_spare_part_service()
+        inventory = service.check_inventory(sku_code, warehouse_code)
+        if not inventory:
+            raise HTTPException(status_code=404, detail=f"未找到SKU {sku_code} 的库存记录")
+        return _spare_part_inventory_to_dict(inventory)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询SKU库存失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/inventory/{sku_code}/availability",
+    response_model=StockAvailabilityCheckResponse,
+    tags=["备件库存"],
+    summary="检查库存可用性",
+)
+async def check_stock_availability(
+    sku_code: str,
+    required_quantity: int = Query(..., ge=1, description="需求数量"),
+    warehouse_code: Optional[str] = Query(None, description="仓库编码"),
+):
+    """检查指定SKU的库存是否满足需求数量"""
+    try:
+        service = get_spare_part_service()
+        result = service.check_stock_availability(
+            sku_code=sku_code,
+            required_quantity=required_quantity,
+            warehouse_code=warehouse_code,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"检查库存可用性失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 备件需求管理 ====================
+
+@router.post(
+    "/spare-parts/demands/from-rul",
+    response_model=SparePartDemandResponse,
+    tags=["备件库存"],
+    summary="根据RUL预测生成备件需求",
+)
+async def generate_demand_from_rul(request: SparePartDemandFromRulRequest):
+    """
+    根据螺栓RUL预测结果自动生成备件需求建议
+
+    - 当RUL低于阈值时自动创建需求单
+    - 自动检查库存可用性
+    - 缺货时自动创建工单并升级优先级
+    """
+    try:
+        service = get_spare_part_service()
+
+        rul_prediction_dict = request.rul_prediction.model_dump() if request.rul_prediction else None
+
+        demand = service.generate_demand_from_rul(
+            rul_prediction=rul_prediction_dict,
+            bolt_model=request.bolt_model,
+            bolt_id=request.bolt_id,
+            device_id=request.device_id,
+            device_name=request.device_name,
+            required_quantity=request.required_quantity or 1,
+            rul_threshold_days=request.rul_threshold_days,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+        )
+        if not demand:
+            raise HTTPException(status_code=500, detail="生成备件需求失败")
+        return _spare_part_demand_to_dict(demand)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"根据RUL生成备件需求失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/spare-parts/demands/scan-rul",
+    response_model=SparePartRulScanResponse,
+    tags=["备件库存"],
+    summary="批量扫描RUL生成备件需求",
+)
+async def scan_rul_and_generate_demands(request: SparePartRulScanRequest):
+    """
+    批量扫描数据库中所有RUL低于阈值的预测记录，自动生成备件需求
+
+    - 可指定RUL阈值（默认30天）
+    - 可按装置筛选
+    - 支持自动创建缺货工单
+    """
+    try:
+        service = get_spare_part_service()
+        result = service.scan_rul_and_generate_demands(
+            rul_threshold_days=request.rul_threshold_days,
+            device_id=request.device_id,
+            create_work_order=request.create_work_order or True,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"批量扫描RUL生成需求失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/demands",
+    response_model=SparePartDemandListResponse,
+    tags=["备件库存"],
+    summary="查询备件需求列表",
+)
+async def list_demands(
+    demand_status: Optional[str] = Query(None, description="需求状态: pending/approved/fulfilled/cancelled"),
+    urgency: Optional[str] = Query(None, description="紧急程度: critical/urgent/normal"),
+    stock_status: Optional[str] = Query(None, description="库存状态: in_stock/shortage/out_of_stock"),
+    device_id: Optional[str] = Query(None, description="装置ID"),
+    sku_code: Optional[str] = Query(None, description="SKU编码"),
+    start_date: Optional[datetime] = Query(None, description="开始时间"),
+    end_date: Optional[datetime] = Query(None, description="结束时间"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """查询备件需求列表"""
+    try:
+        service = get_spare_part_service()
+        demands = service.list_demands(
+            demand_status=demand_status,
+            urgency=urgency,
+            stock_status=stock_status,
+            device_id=device_id,
+            sku_code=sku_code,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            offset=offset,
+        )
+        items = [_spare_part_demand_to_dict(d) for d in demands]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询需求列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/demands/{demand_id}",
+    response_model=SparePartDemandResponse,
+    tags=["备件库存"],
+    summary="获取备件需求详情",
+)
+async def get_demand(demand_id: int):
+    """获取单个备件需求详情"""
+    try:
+        service = get_spare_part_service()
+        demand = service.get_demand(demand_id)
+        if not demand:
+            raise HTTPException(status_code=404, detail="需求不存在")
+        return _spare_part_demand_to_dict(demand)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取需求详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/spare-parts/demands/{demand_id}/approve",
+    response_model=SparePartDemandResponse,
+    tags=["备件库存"],
+    summary="审批备件需求",
+)
+async def approve_demand(demand_id: int, request: SparePartDemandApproveRequest):
+    """审批备件需求，通过后可进行出库操作"""
+    try:
+        service = get_spare_part_service()
+        demand = service.approve_demand(
+            demand_id=demand_id,
+            approved=request.approved,
+            approved_quantity=request.approved_quantity,
+            approver_id=request.approver_id,
+            approver_name=request.approver_name,
+            approval_notes=request.approval_notes,
+        )
+        if not demand:
+            raise HTTPException(status_code=404, detail="需求不存在")
+        return _spare_part_demand_to_dict(demand)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"审批需求失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/spare-parts/demands/{demand_id}/fulfill",
+    response_model=SparePartDemandResponse,
+    tags=["备件库存"],
+    summary="完成备件需求（出库）",
+)
+async def fulfill_demand(demand_id: int, request: SparePartDemandFulfillRequest):
+    """完成备件需求，执行出库扣减库存"""
+    try:
+        service = get_spare_part_service()
+        demand = service.fulfill_demand(
+            demand_id=demand_id,
+            fulfilled_quantity=request.fulfilled_quantity,
+            operator_id=request.operator_id_id,
+            operator_name=request.operator_name_id if hasattr(request, 'operator_name_id') else request.operator_name,
+            fulfillment_notes=request.fulfillment_notes,
+        )
+        if not demand:
+            raise HTTPException(status_code=404, detail="需求不存在")
+        return _spare_part_demand_to_dict(demand)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"完成需求（出库）失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/spare-parts/demands/{demand_id}/upgrade-work-order",
+    tags=["备件库存"],
+    summary="升级关联工单优先级",
+)
+async def upgrade_demand_work_order(
+    demand_id: int,
+    reason: Optional[str] = Query(None, description="升级原因"),
+):
+    """当备件缺货时，手动升级关联工单的优先级"""
+    try:
+        service = get_spare_part_service()
+        result = service.upgrade_work_order_priority(
+            demand_id=demand_id,
+            reason=reason,
+        )
+        if not result.get('success'):
+            raise HTTPException(status_code=400, detail=result.get('message', '升级失败'))
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"升级工单优先级失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 装置需求汇总报表 ====================
+
+@router.post(
+    "/spare-parts/summaries/device",
+    response_model=SparePartDemandSummaryResponse,
+    tags=["备件库存"],
+    summary="生成装置备件需求汇总报表",
+)
+async def generate_device_summary(request: SparePartDemandSummaryRequest):
+    """
+    按装置维度汇总备件需求，生成统计报表
+
+    - 汇总指定装置的所有未完成需求
+    - 按紧急程度分类统计
+    - 分析库存状况
+    - 生成采购建议
+    """
+    try:
+        service = get_spare_part_service()
+        summary = service.generate_device_summary(
+            device_id=request.device_id,
+            device_name=request.device_name,
+            report_period=request.report_period,
+            include_approved_only=request.include_approved_only or False,
+            operator_id=request.operator_id_id,
+            operator_name=request.operator_name_id if hasattr(request, 'operator_name_id') else request.operator_name,
+        )
+        if not summary:
+            raise HTTPException(status_code=500, detail="生成汇总报表失败")
+        return _demand_summary_to_dict(summary)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成装置需求汇总失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/summaries",
+    response_model=SparePartDemandSummaryListResponse,
+    tags=["备件库存"],
+    summary="查询需求汇总报表列表",
+)
+async def list_summaries(
+    device_id: Optional[str] = Query(None, description="装置ID"),
+    report_period: Optional[str] = Query(None, description="报告周期"),
+    start_date: Optional[datetime] = Query(None, description="开始时间"),
+    end_date: Optional[datetime] = Query(None, description="结束时间"),
+    limit: int = Query(50, ge=1, le=500, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """查询装置需求汇总报表列表"""
+    try:
+        service = get_spare_part_service()
+        summaries = service.list_summaries(
+            device_id=device_id,
+            report_period=report_period,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            offset=offset,
+        )
+        items = [_demand_summary_to_dict(s) for s in summaries]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询汇总报表列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/summaries/{summary_id}",
+    response_model=SparePartDemandSummaryResponse,
+    tags=["备件库存"],
+    summary="获取需求汇总报表详情",
+)
+async def get_summary(summary_id: int):
+    """获取单个需求汇总报表详情"""
+    try:
+        service = get_spare_part_service()
+        summary = service.get_summary(summary_id)
+        if not summary:
+            raise HTTPException(status_code=404, detail="汇总报表不存在")
+        return _demand_summary_to_dict(summary)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取汇总报表详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 采购周期与安全库存建议 ====================
+
+@router.post(
+    "/spare-parts/purchase/analyze",
+    response_model=PurchaseAnalysisResponse,
+    tags=["采购优化"],
+    summary="分析SKU采购策略",
+)
+async def analyze_sku_purchase(request: PurchaseAnalysisRequest):
+    """
+    分析单个SKU的采购策略，提供安全库存和经济订货批量建议
+
+    - 计算需求统计数据（日均需求、标准差、变异系数）
+    - 计算安全库存（考虑需求和提前期不确定性）
+    - 计算经济订货批量 EOQ
+    - 计算再订货点 ROP
+    - 进行ABC分类
+    """
+    try:
+        optimizer = get_purchase_optimizer()
+        result = optimizer.analyze_sku(
+            sku_code=request.sku_code,
+            sku_name=request.sku_name,
+            history_days=request.history_days or 90,
+            service_level=request.service_level or 0.95,
+            safety_stock_method=request.safety_stock_method or 'statistical',
+            safety_stock_days=request.safety_stock_days,
+            unit_price=request.unit_price,
+            order_cost=request.order_cost,
+            holding_cost_rate=request.holding_cost_rate or 0.25,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"分析SKU采购策略失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/spare-parts/purchase/config",
+    response_model=PurchaseConfigResponse,
+    tags=["采购优化"],
+    summary="保存采购周期配置",
+)
+async def save_purchase_config(request: PurchaseConfigSaveRequest):
+    """保存SKU的采购周期与安全库存配置到数据库"""
+    try:
+        optimizer = get_purchase_optimizer()
+        config = optimizer.save_config(**request.model_dump())
+        if not config:
+            raise HTTPException(status_code=500, detail="保存配置失败")
+        return _purchase_config_to_dict(config)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"保存采购配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/purchase/configs",
+    tags=["采购优化"],
+    summary="查询采购配置列表",
+)
+async def list_purchase_configs(
+    sku_code: Optional[str] = Query(None, description="SKU编码"),
+    abc_category: Optional[str] = Query(None, description="ABC分类 A/B/C"),
+    service_level: Optional[float] = Query(None, description="服务水平"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """查询采购周期配置列表"""
+    try:
+        optimizer = get_purchase_optimizer()
+        configs = optimizer.list_configs(
+            sku_code=sku_code,
+            abc_category=abc_category,
+            service_level=service_level,
+            limit=limit,
+            offset=offset,
+        )
+        items = [_purchase_config_to_dict(c) for c in configs]
+        return {"total": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"查询采购配置列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/spare-parts/purchase/configs/{sku_code}",
+    response_model=PurchaseConfigResponse,
+    tags=["采购优化"],
+    summary="获取SKU采购配置",
+)
+async def get_purchase_config(sku_code: str):
+    """获取指定SKU的采购配置"""
+    try:
+        optimizer = get_purchase_optimizer()
+        config = optimizer.get_config(sku_code)
+        if not config:
+            raise HTTPException(status_code=404, detail=f"未找到SKU {sku_code} 的采购配置")
+        return _purchase_config_to_dict(config)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取采购配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/spare-parts/purchase/plan",
+    response_model=PurchasePlanResponse,
+    tags=["采购优化"],
+    summary="生成综合采购计划",
+)
+async def generate_purchase_plan(request: PurchasePlanRequest):
+    """
+    生成综合采购计划，考虑RUL预测需求和库存状况
+
+    - 汇总所有缺货和低于安全库存的SKU
+    - 考虑RUL预测产生的未来需求
+    - 合并相同SKU的需求
+    - 考虑经济订货批量进行数量优化
+    - 按紧急程度排序
+    """
+    try:
+        optimizer = get_purchase_optimizer()
+        result = optimizer.generate_purchase_plan(
+            device_id=request.device_id,
+            include_rul_demands=request.include_rul_demands or True,
+            rul_days_ahead=request.rul_days_ahead or 30,
+            apply_eoq=request.apply_eoq or True,
+            service_level=request.service_level or 0.95,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"生成采购计划失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

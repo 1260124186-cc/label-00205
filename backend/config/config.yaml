@@ -662,3 +662,76 @@ stream_prediction:
       client_id: "stream_publisher"
       username: ""
       password: ""
+
+# ============================================================
+# 备件库存与 RUL 联动模块配置
+# ============================================================
+spare_parts:
+  # RUL阈值配置（天）
+  rul_thresholds:
+    default: 30           # 普通阈值 - RUL低于此值生成需求建议
+    urgent: 14            # 紧急阈值 - RUL低于此值标记为紧急
+    critical: 7           # 特急阈值 - RUL低于此值标记为特急
+  
+  # 库存状态阈值
+  stock_thresholds:
+    shortage_ratio: 0.5   # 库存不足比例（可用库存/需求数量 < 此值为缺货）
+    safety_stock_warning: 1.2  # 低于安全库存的预警倍数
+  
+  # 采购优化器默认配置
+  purchase_optimizer:
+    # 默认服务水平（0.90-0.999），对应Z分数:
+    # 0.90=1.28, 0.95=1.645, 0.98=2.05, 0.99=2.33, 0.999=3.09
+    default_service_level: 0.95
+    
+    # 安全库存计算方法: statistical(统计法) / days_coverage(天数覆盖法)
+    default_safety_stock_method: "statistical"
+    
+    # 默认安全库存天数（days_coverage方法使用）
+    default_safety_stock_days: 7
+    
+    # 需求统计历史天数
+    default_history_days: 90
+    
+    # 单次订货成本（元/次）
+    default_order_cost: 500.0
+    
+    # 年持有成本率（%）
+    default_holding_cost_rate: 0.25
+    
+    # ABC分类阈值（按年使用价值占比）
+    abc_thresholds:
+      a: 0.80   # 前80%价值为A类
+      b: 0.95   # 前80%-95%为B类
+      # 剩余5%为C类
+    
+    # 经济订货批量（EOQ）最小/最大值限制
+    eoq_limits:
+      min_quantity: 1
+      max_quantity: 10000
+  
+  # 自动扫描RUL定时任务
+  auto_scan:
+    enabled: true
+    cron: "0 1 * * *"          # 每天凌晨1点执行
+    auto_create_work_order: true  # 缺货时自动创建工单
+    auto_upgrade_priority: true   # 缺货时自动升级工单优先级
+  
+  # 需求单自动审批配置
+  auto_approval:
+    enabled: false         # 是否启用自动审批
+    max_amount: 10000      # 单SKU金额上限（元）
+    max_urgency: "normal"  # 最大紧急程度（normal/urgent/critical）
+  
+  # 工单优先级升级配置
+  work_order_upgrade:
+    # 升级映射：库存状态 -> 优先级升级级别
+    upgrade_levels:
+      out_of_stock: 2       # 缺货升级2级（low→high）
+      shortage: 1          # 库存不足升级1级（low→medium）
+    # 是否更新截止时间
+    update_due_time: true
+    # 升级后截止时间（小时）
+    due_time_hours:
+      urgent: 24
+      critical: 8
