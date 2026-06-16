@@ -4217,3 +4217,116 @@ class PurchasePlanResponse(BaseModel):
     total_estimated_cost: float
     items: List[Dict[str, Any]]
     summary: Dict[str, Any]
+
+
+# ==================== 3D数字孪生可视化 ====================
+
+class BoltStatusDataSchema(BaseModel):
+    """螺栓状态数据（用于3D可视化）"""
+    bolt_id: str = Field(..., description="螺栓ID")
+    status_code: Optional[int] = Field(None, description="状态代码 0-4")
+    status: Optional[str] = Field(None, description="状态名称")
+    hi_score: Optional[float] = Field(None, description="健康度HI分数 0-100")
+    hi_level: Optional[str] = Field(None, description="健康等级")
+    risk_level: Optional[str] = Field(None, description="风险等级 low/medium/high/critical")
+    risk_score: Optional[float] = Field(None, description="风险评分 1-10")
+    confidence: Optional[float] = Field(None, description="置信度 0-1")
+    diagnosis: Optional[str] = Field(None, description="诊断结论")
+    recommendations: Optional[List[str]] = Field(None, description="推荐措施")
+
+
+class Flange3DCreateRequest(BaseModel):
+    """创建法兰3D场景请求"""
+    flange_id: str = Field(..., description="法兰面ID")
+    bolt_ids: Optional[List[str]] = Field(None, description="螺栓ID列表")
+    bolt_count: Optional[int] = Field(8, description="螺栓数量（bolt_ids为空时使用）")
+    bolt_data: Optional[List[BoltStatusDataSchema]] = Field(None, description="螺栓状态数据列表")
+    bolt_coordinate_csv: Optional[str] = Field(None, description="螺栓坐标映射表CSV内容")
+    bolt_coordinate_json: Optional[str] = Field(None, description="螺栓坐标映射表JSON内容")
+    visualization_mode: Optional[str] = Field("status", description="可视化模式: status/hi/risk")
+    flange_params: Optional[Dict[str, Any]] = Field(None, description="法兰模型参数")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "flange_id": "FL001",
+                "bolt_count": 8,
+                "visualization_mode": "status",
+                "bolt_data": [
+                    {"bolt_id": "B001", "status_code": 0, "hi_score": 95.0, "risk_level": "low"},
+                    {"bolt_id": "B002", "status_code": 2, "hi_score": 60.0, "risk_level": "medium"},
+                ]
+            }
+        }
+
+
+class Flange3DExportRequest(BaseModel):
+    """导出法兰3D场景请求"""
+    flange_id: str = Field(..., description="法兰面ID")
+    format: Optional[str] = Field("threejs", description="导出格式: gltf/threejs/unity/all")
+    visualization_mode: Optional[str] = Field(None, description="可视化模式（可选，不填则使用原模式）")
+
+
+class Flange3DUpdateRequest(BaseModel):
+    """更新螺栓状态（增量更新）请求"""
+    flange_id: str = Field(..., description="法兰面ID")
+    bolt_data: List[BoltStatusDataSchema] = Field(..., description="螺栓状态数据列表")
+    visualization_mode: Optional[str] = Field(None, description="可视化模式（可选）")
+
+
+class Flange3DExplosionRequest(BaseModel):
+    """爆炸图位置请求"""
+    flange_id: str = Field(..., description="法兰面ID")
+    explosion_factor: Optional[float] = Field(1.0, description="爆炸因子 0-1")
+
+
+class BoltCoordinateItemSchema(BaseModel):
+    """螺栓坐标项"""
+    bolt_id: str
+    x: float
+    y: float
+    z: float
+    angle: Optional[float] = None
+    radius: Optional[float] = None
+    position_index: Optional[int] = None
+
+
+class Flange3DSceneInfoResponse(BaseModel):
+    """法兰3D场景信息响应"""
+    flange_id: str
+    visualization_mode: str
+    bolt_count: int
+    bolt_ids: List[str]
+    flange_params: Dict[str, Any]
+    bolt_coordinates: List[BoltCoordinateItemSchema]
+
+
+class Flange3DExportResponse(BaseModel):
+    """法兰3D导出响应"""
+    flange_id: str
+    format: str
+    visualization_mode: str
+    export_time: datetime
+    data: Dict[str, Any]
+
+
+class Flange3DUpdateResponse(BaseModel):
+    """螺栓状态更新响应"""
+    flange_id: str
+    updated_count: int
+    visualization_mode: str
+    bolt_updates: List[Dict[str, Any]]
+    update_time: datetime
+
+
+class Flange3DExplosionResponse(BaseModel):
+    """爆炸图位置响应"""
+    flange_id: str
+    explosion_factor: float
+    bolt_positions: Dict[str, List[float]]
+
+
+class Flange3DListResponse(BaseModel):
+    """3D场景列表响应"""
+    total: int
+    scenes: List[str]

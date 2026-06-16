@@ -121,6 +121,19 @@
             </svg>
             合规检验
           </button>
+          <button
+            v-if="canViewDigitalTwin"
+            class="nav-tab"
+            :class="{ active: currentView === 'digital_twin' }"
+            @click="switchView('digital_twin')"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+              <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+              <line x1="12" y1="22.08" x2="12" y2="12"></line>
+            </svg>
+            数字孪生
+          </button>
         </nav>
         <div class="realtime-status" :class="{ active: autoRefresh }" v-if="currentView === 'monitoring'">
           <span class="status-dot"></span>
@@ -223,7 +236,7 @@
       </div>
     </header>
 
-    <main class="app-main" :class="{ 'app-main-full': currentView === 'alert' || currentView === 'trend' || currentView === 'model' || currentView === 'config' || currentView === 'federated' || currentView === 'carbon' || currentView === 'compliance' }">
+    <main class="app-main" :class="{ 'app-main-full': currentView === 'alert' || currentView === 'trend' || currentView === 'model' || currentView === 'config' || currentView === 'federated' || currentView === 'carbon' || currentView === 'compliance' || currentView === 'digital_twin' }">
       <template v-if="currentView === 'monitoring'">
         <aside class="sidebar-left">
           <FilterPanel
@@ -291,6 +304,8 @@
       <CarbonEnergyAnalysis v-else-if="currentView === 'carbon'" />
 
       <ComplianceInspection v-else-if="currentView === 'compliance'" />
+
+      <DigitalTwinView v-else-if="currentView === 'digital_twin'" />
     </main>
   </div>
 </template>
@@ -308,6 +323,7 @@ import ConfigCenter from '@/components/ConfigCenter.vue'
 import FederatedLearning from '@/components/FederatedLearning.vue'
 import CarbonEnergyAnalysis from '@/components/CarbonEnergyAnalysis.vue'
 import ComplianceInspection from '@/components/ComplianceInspection.vue'
+import DigitalTwinView from '@/components/DigitalTwinView.vue'
 import LoginView from '@/components/LoginView.vue'
 import { fetchTopology, fetchCollectors, fetchPositions } from '@/api/monitoring'
 import { fetchAlertStats } from '@/api/alert'
@@ -332,12 +348,13 @@ const {
   canViewFederated,
   canViewCarbon,
   canViewCompliance,
+  canViewDigitalTwin,
   canWrite,
   hasPermission,
   logout
 } = useAuth()
 
-type ViewName = 'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon' | 'compliance'
+type ViewName = 'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon' | 'compliance' | 'digital_twin'
 
 const currentView = ref<ViewName>('monitoring')
 const showUserMenu = ref(false)
@@ -425,7 +442,8 @@ function switchView(view: ViewName) {
     config: canViewConfig.value,
     federated: canViewFederated.value,
     carbon: canViewCarbon.value,
-    compliance: canViewCompliance.value
+    compliance: canViewCompliance.value,
+    digital_twin: canViewDigitalTwin.value
   }
   if (!allowed[view]) return
   currentView.value = view
@@ -441,7 +459,8 @@ function ensureValidView() {
     config: canViewConfig.value,
     federated: canViewFederated.value,
     carbon: canViewCarbon.value,
-    compliance: canViewCompliance.value
+    compliance: canViewCompliance.value,
+    digital_twin: canViewDigitalTwin.value
   }
   if (!allowed[currentView.value]) {
     const firstAllowed = (Object.keys(allowed) as ViewName[]).find(v => allowed[v])

@@ -792,13 +792,13 @@ export interface APIKeyLoginRequest {
 }
 
 // 角色到视图的映射（哪些角色可以看到哪些导航页面）
-export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon' | 'compliance'>> = {
-  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance'],
-  admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance'],
-  operator: ['monitoring', 'alert', 'trend', 'model', 'carbon', 'compliance'],
-  viewer: ['monitoring', 'alert', 'trend', 'carbon', 'compliance'],
+export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon' | 'compliance' | 'digital_twin'>> = {
+  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance', 'digital_twin'],
+  admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance', 'digital_twin'],
+  operator: ['monitoring', 'alert', 'trend', 'model', 'carbon', 'compliance', 'digital_twin'],
+  viewer: ['monitoring', 'alert', 'trend', 'carbon', 'compliance', 'digital_twin'],
   anonymous: [],
-  api_key: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance']
+  api_key: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance', 'digital_twin']
 }
 
 // 角色到权限的映射

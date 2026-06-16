@@ -177,9 +177,15 @@ from app.api.schemas import (
     PurchaseAnalysisRequest, PurchaseAnalysisResponse,
     PurchaseConfigSaveRequest, PurchaseConfigResponse,
     PurchasePlanRequest, PurchasePlanResponse,
+    BoltStatusDataSchema, Flange3DCreateRequest, Flange3DExportRequest,
+    Flange3DUpdateRequest, Flange3DExplosionRequest,
+    BoltCoordinateItemSchema, Flange3DSceneInfoResponse,
+    Flange3DExportResponse, Flange3DUpdateResponse,
+    Flange3DExplosionResponse, Flange3DListResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
+from app.services.visualization_3d import Visualization3DService
 from app.api.validators import (
     DataValidator,
     ValidationMode,
@@ -199,6 +205,7 @@ router = APIRouter(dependencies=[Depends(verify_api_key)])
 # 服务实例
 prediction_service = None
 training_service = None
+visualization_3d_service = None
 federated_server = None
 federated_clients: Dict[str, Any] = {}
 
@@ -217,6 +224,14 @@ def get_training_service() -> TrainingService:
     if training_service is None:
         training_service = TrainingService()
     return training_service
+
+
+def get_visualization_3d_service() -> Visualization3DService:
+    """获取3D可视化服务实例"""
+    global visualization_3d_service
+    if visualization_3d_service is None:
+        visualization_3d_service = Visualization3DService()
+    return visualization_3d_service
 
 
 def get_federated_server():
@@ -10638,4 +10653,316 @@ async def generate_purchase_plan(request: PurchasePlanRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"生成采购计划失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 3D数字孪生可视化 ====================
+
+@router.post(
+    "/visualization/3d/scene",
+    response_model=Flange3DSceneInfoResponse,
+    tags=["3D可视化"],
+    summary="创建法兰3D场景"
+)
+async def create_flange_3d_scene(request: Flange3DCreateRequest):
+    """
+    创建法兰3D数字孪生场景
+
+    支持：
+    - 程序化生成法兰3D模型
+    - 螺栓坐标映射表导入（CSV/JSON）
+    - 状态/健康度/风险颜色映射
+    - 环形自动分布螺栓
+
+    螺栓坐标CSV格式：
+    - 2D展开图: bolt_id,position_index,angle_deg,radius_mm
+    - 3D坐标: bolt_id,x,y,z
+
+    螺栓坐标JSON格式：
+    - 数组: [{"bolt_id": "B001", "x": 100, "y": 0, "z": 50}, ...]
+    - 对象: {"flange_radius": 100, "bolts": [{"bolt_id": "B001", "angle_deg": 0}, ...]}
+    """
+    try:
+        service = get_visualization_3d_service()
+
+        bolt_data_dict = None
+        if request.bolt_data:
+            bolt_data_dict = {
+                item.bolt_id: item.model_dump(exclude_none=True)
+                for item in request.bolt_data
+            }
+
+        scene = service.create_flange_scene(
+            flange_id=request.flange_id,
+            bolt_ids=request.bolt_ids,
+            bolt_count=request.bolt_count or 8,
+            bolt_data=bolt_data_dict,
+            bolt_coordinate_csv=request.bolt_coordinate_csv,
+            bolt_coordinate_json=request.bolt_coordinate_json,
+            flange_params=request.flange_params,
+            visualization_mode=request.visualization_mode or "status",
+        )
+
+        bolt_coords = [
+            BoltCoordinateItemSchema(
+                bolt_id=coord.bolt_id,
+                x=coord.x,
+                y=coord.y,
+                z=coord.z,
+                angle=coord.angle,
+                radius=coord.radius,
+                position_index=coord.position_index,
+            )
+            for coord in service.bolt_mapper.get_all_coordinates()
+        ]
+
+        return Flange3DSceneInfoResponse(
+            flange_id=scene['flange_id'],
+            visualization_mode=scene['visualization_mode'],
+            bolt_count=len(scene['bolt_ids']),
+            bolt_ids=scene['bolt_ids'],
+            flange_params=scene['flange_params'],
+            bolt_coordinates=bolt_coords,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建法兰3D场景失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/visualization/3d/scene/{flange_id}",
+    response_model=Flange3DSceneInfoResponse,
+    tags=["3D可视化"],
+    summary="获取法兰3D场景信息"
+)
+async def get_flange_3d_scene(flange_id: str):
+    """获取指定法兰的3D场景信息"""
+    try:
+        service = get_visualization_3d_service()
+        scene_info = service.get_scene_info(flange_id)
+        if not scene_info:
+            raise HTTPException(status_code=404, detail=f"场景 {flange_id} 不存在")
+
+        bolt_coords = [
+            BoltCoordinateItemSchema(
+                bolt_id=coord.bolt_id,
+                x=coord.x,
+                y=coord.y,
+                z=coord.z,
+                angle=coord.angle,
+                radius=coord.radius,
+                position_index=coord.position_index,
+            )
+            for coord in service.bolt_mapper.get_all_coordinates()
+        ]
+
+        return Flange3DSceneInfoResponse(
+            flange_id=scene_info['flange_id'],
+            visualization_mode=scene_info['visualization_mode'],
+            bolt_count=scene_info['bolt_count'],
+            bolt_ids=scene_info['bolt_ids'],
+            flange_params=scene_info['flange_params'],
+            bolt_coordinates=bolt_coords,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取法兰3D场景信息失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/visualization/3d/scenes",
+    response_model=Flange3DListResponse,
+    tags=["3D可视化"],
+    summary="获取3D场景列表"
+)
+async def list_flange_3d_scenes():
+    """获取所有已创建的3D场景列表"""
+    try:
+        service = get_visualization_3d_service()
+        scenes = service.list_scenes()
+        return Flange3DListResponse(
+            total=len(scenes),
+            scenes=scenes,
+        )
+    except Exception as e:
+        logger.error(f"获取3D场景列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/visualization/3d/export/{flange_id}",
+    response_model=Flange3DExportResponse,
+    tags=["3D可视化"],
+    summary="导出法兰3D场景"
+)
+async def export_flange_3d_scene(
+    flange_id: str,
+    format: str = Query("threejs", description="导出格式: gltf/threejs/unity/all"),
+    visualization_mode: Optional[str] = Query(None, description="可视化模式"),
+):
+    """
+    导出法兰3D场景为指定格式
+
+    支持格式：
+    - **gltf**: glTF 2.0格式，支持Three.js、Unity、Unreal等多种引擎
+    - **threejs**: Three.js Object3D JSON格式，可直接用THREE.ObjectLoader加载
+    - **unity**: Unity数据包格式，包含网格、材质、螺栓状态数据
+    - **all**: 导出所有格式
+    """
+    try:
+        service = get_visualization_3d_service()
+        scene_info = service.get_scene_info(flange_id)
+        if not scene_info:
+            raise HTTPException(status_code=404, detail=f"场景 {flange_id} 不存在")
+
+        if visualization_mode:
+            from app.services.visualization_3d.color_mapper import ColorMapper
+            scene_data = service._scenes.get(flange_id)
+            if scene_data:
+                scene_data['visualization_mode'] = visualization_mode
+
+        mode = visualization_mode or scene_info['visualization_mode']
+
+        if format == 'gltf':
+            data = service.export_gltf(flange_id)
+        elif format == 'threejs':
+            data = service.export_threejs(flange_id)
+        elif format == 'unity':
+            data = service.export_unity(flange_id)
+        elif format == 'all':
+            data = service.export_all_formats(flange_id)
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持的格式: {format}")
+
+        return Flange3DExportResponse(
+            flange_id=flange_id,
+            format=format,
+            visualization_mode=mode,
+            export_time=datetime.now(),
+            data=data,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"导出法兰3D场景失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/visualization/3d/update",
+    response_model=Flange3DUpdateResponse,
+    tags=["3D可视化"],
+    summary="更新螺栓状态（增量更新）"
+)
+async def update_bolt_3d_status(request: Flange3DUpdateRequest):
+    """
+    增量更新螺栓状态数据
+
+    用于实时更新螺栓的状态、健康度、风险等级等数据，
+    前端可通过返回数据更新3D视图中螺栓的颜色和状态。
+    """
+    try:
+        service = get_visualization_3d_service()
+        scene_info = service.get_scene_info(request.flange_id)
+        if not scene_info:
+            raise HTTPException(status_code=404, detail=f"场景 {request.flange_id} 不存在")
+
+        bolt_data_dict = {
+            item.bolt_id: item.model_dump(exclude_none=True)
+            for item in request.bolt_data
+        }
+
+        scene_data = service.update_bolt_status(
+            flange_id=request.flange_id,
+            bolt_data=bolt_data_dict,
+            visualization_mode=request.visualization_mode,
+        )
+
+        bolt_updates = []
+        for bolt_id, data in bolt_data_dict.items():
+            if bolt_id in scene_data['bolt_data']:
+                bolt_updates.append({
+                    'bolt_id': bolt_id,
+                    'color_hex': scene_data['bolt_data'][bolt_id].get('color_hex'),
+                    'data': scene_data['bolt_data'][bolt_id],
+                })
+
+        return Flange3DUpdateResponse(
+            flange_id=request.flange_id,
+            updated_count=len(bolt_updates),
+            visualization_mode=scene_data['visualization_mode'],
+            bolt_updates=bolt_updates,
+            update_time=datetime.now(),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新螺栓3D状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/visualization/3d/explosion/{flange_id}",
+    response_model=Flange3DExplosionResponse,
+    tags=["3D可视化"],
+    summary="获取爆炸图位置"
+)
+async def get_flange_explosion_positions(
+    flange_id: str,
+    explosion_factor: float = Query(1.0, description="爆炸因子 0-1", ge=0, le=2),
+):
+    """
+    获取螺栓爆炸图位置
+
+    - explosion_factor = 0: 原始位置
+    - explosion_factor = 1: 完全爆炸
+    - 爆炸方向：径向向外 + 轴向偏移
+    """
+    try:
+        service = get_visualization_3d_service()
+        scene_info = service.get_scene_info(flange_id)
+        if not scene_info:
+            raise HTTPException(status_code=404, detail=f"场景 {flange_id} 不存在")
+
+        positions = service.get_explosion_positions(flange_id, explosion_factor)
+
+        bolt_positions = {
+            bolt_id: list(pos)
+            for bolt_id, pos in positions.items()
+        }
+
+        return Flange3DExplosionResponse(
+            flange_id=flange_id,
+            explosion_factor=explosion_factor,
+            bolt_positions=bolt_positions,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取爆炸图位置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/visualization/3d/scene/{flange_id}",
+    tags=["3D可视化"],
+    summary="删除3D场景缓存"
+)
+async def delete_flange_3d_scene(flange_id: str):
+    """删除指定法兰的3D场景缓存"""
+    try:
+        service = get_visualization_3d_service()
+        service.clear_scene(flange_id)
+        return {"status": "success", "message": f"场景 {flange_id} 已删除"}
+    except Exception as e:
+        logger.error(f"删除3D场景失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

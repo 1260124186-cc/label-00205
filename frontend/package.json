@@ -10,9 +10,11 @@
     "type-check": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "vue": "^3.4.0",
+    "@types/three": "^0.184.1",
     "axios": "^1.6.0",
-    "echarts": "^5.4.3"
+    "echarts": "^5.4.3",
+    "three": "^0.184.0",
+    "vue": "^3.4.0"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.0",
