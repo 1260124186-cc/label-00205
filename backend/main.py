@@ -189,6 +189,10 @@ def create_app() -> FastAPI:
     app.include_router(router, prefix="/api/v1")
     app.include_router(sso_router)
 
+    from app.bff.schema import create_bff_router
+    bff_router = create_bff_router()
+    app.include_router(bff_router, prefix="/graphql")
+
     from app.api.schemas import HealthResponse, HealthComponentStatus
 
     @app.get("/health", response_model=HealthResponse, tags=["系统"], summary="健康检查（公开免鉴权）")
