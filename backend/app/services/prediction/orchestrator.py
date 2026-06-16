@@ -307,7 +307,7 @@ class PredictionOrchestrator:
         """
         start_time = time.time()
         set_bolt_id(str(bolt_id))
-        
+
         logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}, version={version or 'active'}, shadow_version={shadow_version}, generate_diagnosis={generate_diagnosis}")
 
         # 主版本预测
@@ -657,49 +657,101 @@ class PredictionOrchestrator:
 
         # Step 3.6: 工况识别与自适应调整
         working_condition_info = {}
+        condition_prediction = None
         if self.enable_working_condition and len(data) >= 50:
             try:
-                condition_result = self.condition_adaptive_predictor.identify_condition(
-                    str(bolt_id),
-                    data,
+                condition_prediction = self.condition_adaptive_predictor.predict(
+                    node_id=str(bolt_id),
+                    data=data,
+                    forecast_days=1,
+                    node_type='bolt',
                 )
 
+                condition = condition_prediction.condition
+                condition_label = condition_prediction.condition_label
+                condition_conf = condition_prediction.condition_confidence
+
                 working_condition_info = {
-                    'condition': condition_result.condition.value,
-                    'condition_label': condition_result.condition_label,
-                    'confidence': condition_result.confidence,
-                    'is_transition': condition_result.is_transition,
+                    'condition': condition.value,
+                    'condition_label': condition_label,
+                    'confidence': condition_conf,
+                    'is_transition': condition_prediction.is_transition,
+                    'condition_changed': condition_prediction.condition_changed,
+                    'previous_condition': (
+                        condition_prediction.previous_condition.value
+                        if condition_prediction.previous_condition else None
+                    ),
                     'probabilities': {
                         cond.value: prob
-                        for cond, prob in condition_result.probabilities.items()
+                        for cond, prob in condition_prediction.condition_probabilities.items()
                     },
+                    'baseline_anomaly': {
+                        'status': condition_prediction.overall_status,
+                        'anomaly_count': condition_prediction.anomaly_summary.get('anomaly_count', 0),
+                        'warning_count': condition_prediction.anomaly_summary.get('warning_count', 0),
+                        'anomaly_ratio': condition_prediction.anomaly_summary.get('anomaly_ratio', 0.0),
+                    },
+                    'baseline': condition_prediction.baseline,
                 }
 
-                if condition_result.confidence >= self.condition_confidence_threshold:
-                    adjusted_confidence = self._adjust_confidence_by_condition(
-                        confidence,
-                        condition_result.condition,
-                        original_status_code,
-                    )
+                # ---- 3.6a: 基线异常检测修正状态码 ----
+                if condition_conf >= self.condition_confidence_threshold:
+                    baseline_anomaly_count = condition_prediction.anomaly_summary.get('anomaly_count', 0)
+                    baseline_warning_count = condition_prediction.anomaly_summary.get('warning_count', 0)
+                    total_points = len(data) if len(data) > 0 else 1
+                    anomaly_ratio = baseline_anomaly_count / total_points
+                    warning_ratio = baseline_warning_count / total_points
 
-                    if adjusted_confidence != confidence:
+                    condition_status_override = None
+
+                    if anomaly_ratio >= 0.3:
+                        condition_status_override = max(original_status_code, 3)
+                        logger.info(
+                            f"工况基线异常升级: 螺栓 {bolt_id}, "
+                            f"工况={condition_label}, 异常率={anomaly_ratio:.1%}, "
+                            f"状态码 {original_status_code} → {condition_status_override}"
+                        )
+                    elif anomaly_ratio >= 0.1:
+                        condition_status_override = max(original_status_code, 2)
+                        logger.info(
+                            f"工况基线异常升级: 螺栓 {bolt_id}, "
+                            f"工况={condition_label}, 异常率={anomaly_ratio:.1%}, "
+                            f"状态码 {original_status_code} → {condition_status_override}"
+                        )
+                    elif warning_ratio >= 0.3 and original_status_code == 0:
+                        condition_status_override = 1
+                        logger.info(
+                            f"工况基线预警升级: 螺栓 {bolt_id}, "
+                            f"工况={condition_label}, 预警率={warning_ratio:.1%}, "
+                            f"状态码 0 → 1"
+                        )
+
+                    if condition_status_override is not None:
+                        original_status_code = condition_status_override
+                        original_status = STATUS_LABELS.get(original_status_code, '未知')
+
+                    # ---- 3.6b: 工况自适应置信度调整 ----
+                    adjusted_confidence = self._adjust_confidence_by_condition(
+                        confidence, condition, original_status_code
+                    )
+                    if abs(adjusted_confidence - confidence) > 0.001:
                         logger.info(
                             f"工况置信度调整: 螺栓 {bolt_id}, "
-                            f"工况={condition_result.condition_label}, "
+                            f"工况={condition_label}, "
                             f"原始置信度 {confidence:.3f} → 调整后 {adjusted_confidence:.3f}"
                         )
                         confidence = adjusted_confidence
 
+                # ---- 3.6c: 增量更新基线 ----
                 self.condition_baseline_manager.update_baseline(
-                    condition_result.condition,
-                    data,
-                    incremental=True,
+                    condition, data, incremental=True
                 )
 
-                if working_condition_info.get('condition_changed', False):
+                # ---- 3.6d: 工况变更审计 ----
+                if condition_prediction.condition_changed:
                     self._record_condition_change_audit(
                         bolt_id=str(bolt_id),
-                        condition_result=condition_result,
+                        condition_result=condition_prediction,
                         node_type='bolt',
                     )
 
@@ -707,20 +759,28 @@ class PredictionOrchestrator:
                 logger.warning(f"工况识别失败，跳过: {e}")
                 working_condition_info = {'error': str(e)}
 
-        # Step 4: 风险评估
-        risk_assessment = self.risk_model.assess_risk(
-            data,
+        # Step 4: 风险评估（融合工况信息）
+        condition_for_risk = (
+            condition_prediction.condition
+            if condition_prediction else None
+        )
+        risk_assessment = self._assess_risk_with_condition(
+            data=data,
             lstm_probs=probs,
             lstm_class=original_status_code,
             node_type='bolt',
             node_id=bolt_id,
+            condition=condition_for_risk,
         )
 
-        # Step 5: 应用预警策略
-        final_status_code, final_status = self.warning_policy.apply(
-            original_status_code, original_status, confidence,
-            risk_level=risk_assessment.level.value,
-            lstm_confidence=float(confidence),
+        # Step 5: 应用预警策略（融合工况信息）
+        final_status_code, final_status = self._apply_warning_with_condition(
+            original_status_code=original_status_code,
+            original_status=original_status,
+            confidence=confidence,
+            risk_assessment=risk_assessment,
+            condition=condition_for_risk,
+            bolt_id=bolt_id,
         )
 
         # 推荐措施（优先用模型建议，兜底使用风险评估建议）
@@ -908,7 +968,7 @@ class PredictionOrchestrator:
             try:
                 from app.services.report import get_diagnosis_report_service
                 diagnosis_service = get_diagnosis_report_service()
-                
+
                 fault_type_mapping = {
                     1: 'loosening',
                     2: 'preload_decrease',
@@ -916,11 +976,11 @@ class PredictionOrchestrator:
                     4: 'failure',
                 }
                 fault_type = fault_type_mapping.get(final_status_code)
-                
+
                 recent_values = None
                 if data is not None and len(data) > 0:
                     recent_values = [float(v) for v in data[-20:]]
-                
+
                 diagnosis_report = diagnosis_service.generate_single_report(
                     status=final_status,
                     risk_score=float(risk_assessment.score),
@@ -931,7 +991,7 @@ class PredictionOrchestrator:
                     recent_values=recent_values,
                     historical_incidents=None,
                 )
-                
+
                 result['diagnosis_report'] = {
                     'diagnosis_summary': diagnosis_report.diagnosis_summary,
                     'recommended_actions': diagnosis_report.recommended_actions,
@@ -941,7 +1001,7 @@ class PredictionOrchestrator:
                     'latency_ms': diagnosis_report.latency_ms,
                     'is_fallback': diagnosis_report.is_fallback,
                 }
-                
+
                 logger.info(
                     f"LLM诊断报告生成完成: 螺栓 {bolt_id}, "
                     f"紧急程度={result['diagnosis_report']['urgency_level']}, "
@@ -1505,9 +1565,6 @@ class PredictionOrchestrator:
             'confidence': self.condition_adaptive_predictor.current_condition_confidences.get(
                 condition_key, 0.0
             ),
-            'is_transition': self.condition_adaptive_predictor.transition_states.get(
-                condition_key, False
-            ),
         }
 
     def get_condition_baseline(
@@ -1784,18 +1841,82 @@ class PredictionOrchestrator:
 
         original_status = STATUS_LABELS.get(original_status_code, '未知')
 
+        # Step 2.5: 工况识别与自适应调整
+        flange_condition_info = {}
+        flange_condition_prediction = None
+        if self.enable_working_condition and len(all_data) >= 50:
+            try:
+                flange_condition_prediction = self.condition_adaptive_predictor.predict(
+                    node_id=str(flange_id),
+                    data=all_data,
+                    forecast_days=1,
+                    node_type='flange',
+                )
+
+                flange_condition = flange_condition_prediction.condition
+                flange_condition_info = {
+                    'condition': flange_condition.value,
+                    'condition_label': flange_condition_prediction.condition_label,
+                    'confidence': flange_condition_prediction.condition_confidence,
+                    'is_transition': flange_condition_prediction.is_transition,
+                    'condition_changed': flange_condition_prediction.condition_changed,
+                    'baseline_anomaly': {
+                        'status': flange_condition_prediction.overall_status,
+                        'anomaly_count': flange_condition_prediction.anomaly_summary.get('anomaly_count', 0),
+                        'warning_count': flange_condition_prediction.anomaly_summary.get('warning_count', 0),
+                    },
+                }
+
+                if flange_condition_prediction.condition_confidence >= self.condition_confidence_threshold:
+                    anomaly_ratio = flange_condition_prediction.anomaly_summary.get('anomaly_ratio', 0.0)
+                    if anomaly_ratio >= 0.3:
+                        original_status_code = max(original_status_code, 3)
+                        original_status = STATUS_LABELS.get(original_status_code, '未知')
+                    elif anomaly_ratio >= 0.1:
+                        original_status_code = max(original_status_code, 2)
+                        original_status = STATUS_LABELS.get(original_status_code, '未知')
+
+                    adjusted = self._adjust_confidence_by_condition(
+                        confidence, flange_condition, original_status_code
+                    )
+                    if abs(adjusted - confidence) > 0.001:
+                        confidence = adjusted
+
+                self.condition_baseline_manager.update_baseline(
+                    flange_condition, all_data, incremental=True
+                )
+
+                if flange_condition_prediction.condition_changed:
+                    self._record_condition_change_audit(
+                        bolt_id=str(flange_id),
+                        condition_result=flange_condition_prediction,
+                        node_type='flange',
+                    )
+
+            except Exception as e:
+                logger.warning(f"法兰面工况识别失败，跳过: {e}")
+
+        flange_condition = flange_condition_prediction.condition if flange_condition_prediction else None
+
         # Step 3: 风险评估（使用所有螺栓数据拼接）
         all_data = np.concatenate(multi_bolt_data)
-        risk_assessment = self.risk_model.assess_risk(
-            all_data, lstm_class=original_status_code,
-            node_type='flange', node_id=flange_id,
+        risk_assessment = self._assess_risk_with_condition(
+            all_data,
+            lstm_class=original_status_code,
+            node_type='flange',
+            node_id=flange_id,
+            condition=flange_condition,
+            lstm_probs=None,
         )
 
         # Step 4: 应用预警策略
-        final_status_code, final_status = self.warning_policy.apply(
-            original_status_code, original_status, confidence,
-            risk_level=risk_assessment.level.value,
-            lstm_confidence=float(confidence),
+        final_status_code, final_status = self._apply_warning_with_condition(
+            original_status_code=original_status_code,
+            original_status=original_status,
+            confidence=confidence,
+            risk_assessment=risk_assessment,
+            condition=flange_condition,
+            bolt_id=flange_id,
         )
 
         # 推荐措施
@@ -1970,6 +2091,7 @@ class PredictionOrchestrator:
             ),
             'root_cause_measures': root_cause_measures if root_cause_measures else None,
             'fault_detail': fault_detail,
+            'working_condition': flange_condition_info if flange_condition_info else None,
         }
 
         # Step 5: 审计快照
@@ -1990,6 +2112,7 @@ class PredictionOrchestrator:
                 recommendations=risk_assessment.recommendations,
                 attention_weights=attention,
                 multi_bolt_data=multi_bolt_data,
+                working_condition=flange_condition_info if flange_condition_info else None,
             )
         except Exception as e:
             logger.warning(f"法兰面 {flange_id} 审计快照记录异常: {e}")
@@ -2023,7 +2146,7 @@ class PredictionOrchestrator:
             try:
                 from app.services.report import get_diagnosis_report_service
                 diagnosis_service = get_diagnosis_report_service()
-                
+
                 fault_type_mapping = {
                     1: 'loosening',
                     2: 'preload_decrease',
@@ -2031,7 +2154,7 @@ class PredictionOrchestrator:
                     4: 'failure',
                 }
                 fault_type = fault_type_mapping.get(final_status_code)
-                
+
                 recent_values = None
                 if multi_bolt_data is not None and len(multi_bolt_data) > 0:
                     all_values = []
@@ -2039,7 +2162,7 @@ class PredictionOrchestrator:
                         if bolt_data is not None and len(bolt_data) > 0:
                             all_values.extend([float(v) for v in bolt_data[-10:]])
                     recent_values = all_values[:30]
-                
+
                 diagnosis_report = diagnosis_service.generate_single_report(
                     status=final_status,
                     risk_score=float(risk_assessment.score),
@@ -2050,7 +2173,7 @@ class PredictionOrchestrator:
                     recent_values=recent_values,
                     historical_incidents=None,
                 )
-                
+
                 result['diagnosis_report'] = {
                     'diagnosis_summary': diagnosis_report.diagnosis_summary,
                     'recommended_actions': diagnosis_report.recommended_actions,
@@ -2060,7 +2183,7 @@ class PredictionOrchestrator:
                     'latency_ms': diagnosis_report.latency_ms,
                     'is_fallback': diagnosis_report.is_fallback,
                 }
-                
+
                 logger.info(
                     f"LLM诊断报告生成完成: 法兰面 {flange_id}, "
                     f"紧急程度={result['diagnosis_report']['urgency_level']}, "
@@ -2325,7 +2448,7 @@ class PredictionOrchestrator:
                 logger.error(f"未知节点类型: {node_type}")
                 metrics.record_prediction_task(task_type, success=False, error_type="unknown_node_type")
                 return
-            
+
             # 记录任务成功
             if not specific_bolt_id:
                 metrics.record_prediction_task(task_type, success=True)
@@ -2353,7 +2476,7 @@ class PredictionOrchestrator:
     def _batch_predict_bolts(self) -> None:
         """批量预测所有螺栓"""
         bolt_data = self.repository.fetch_batch_bolt_data(per_bolt_limit=100)
-        
+
         success_count = 0
         fail_count = 0
 
@@ -2372,13 +2495,13 @@ class PredictionOrchestrator:
 
         # 更新模型加载数
         metrics.update_model_count('bolt_lstm', len(self.bolt_models))
-        
+
         logger.info(f"批量螺栓预测完成，共 {len(bolt_data)} 个，成功 {success_count} 个，失败 {fail_count} 个")
 
     def _batch_predict_flanges(self) -> None:
         """批量预测所有法兰面"""
         flange_ids = self.repository.fetch_all_flange_ids()
-        
+
         success_count = 0
         fail_count = 0
 
@@ -2404,7 +2527,7 @@ class PredictionOrchestrator:
             except Exception as e:
                 logger.error(f"法兰面 {flange_id} 预测失败: {e}")
                 fail_count += 1
-        
+
         # 更新模型加载数
         metrics.update_model_count('flange_attention', len(self.flange_models))
 
@@ -2608,7 +2731,7 @@ class PredictionOrchestrator:
 
         Args:
             bolt_id: 螺栓ID
-            condition_result: 工况分类结果
+            condition_result: 工况自适应预测结果（ConditionAdaptivePrediction）
             node_type: 节点类型
 
         Returns:
@@ -2621,36 +2744,34 @@ class PredictionOrchestrator:
 
             audit_service = get_working_condition_audit_service()
 
-            previous_condition = self.condition_adaptive_predictor.current_conditions.get(
-                str(bolt_id)
-            )
-            previous_confidence = self.condition_adaptive_predictor.current_condition_confidences.get(
-                str(bolt_id), 0.0
-            )
+            previous_condition = condition_result.previous_condition
+            to_condition = condition_result.condition
+            to_confidence = condition_result.condition_confidence
+            from_confidence = 0.0
 
-            baseline_info = self.condition_baseline_manager.get_baseline(
-                condition_result.condition
-            )
+            baseline_info = self.condition_baseline_manager.get_baseline(to_condition)
             baseline_dict = baseline_info.to_dict() if baseline_info else None
 
-            anomaly_summary = self.condition_baseline_manager.get_anomaly_summary(
-                condition_result.condition,
-                np.array([]),
-            ) if hasattr(self.condition_baseline_manager, 'get_anomaly_summary') else None
+            condition_probs = {}
+            if condition_result.condition_probabilities:
+                condition_probs = {
+                    k.value if hasattr(k, 'value') else str(k): v
+                    for k, v in condition_result.condition_probabilities.items()
+                }
 
             event_id = audit_service.record_condition_change(
                 node_type=node_type,
                 node_id=bolt_id,
                 from_condition=previous_condition,
-                to_condition=condition_result.condition,
-                from_confidence=previous_confidence,
-                to_confidence=condition_result.confidence,
+                to_condition=to_condition,
+                from_confidence=from_confidence,
+                to_confidence=to_confidence,
                 is_transition=condition_result.is_transition,
                 trigger_data_points=0,
-                feature_evidence=condition_result.features,
-                condition_probabilities=condition_result.probabilities,
+                feature_evidence=condition_probs,
+                condition_probabilities=condition_probs,
                 baseline_info=baseline_dict,
-                anomaly_summary=anomaly_summary,
+                anomaly_summary=condition_result.anomaly_summary if condition_result.anomaly_summary else None,
             )
 
             return event_id
@@ -2658,6 +2779,182 @@ class PredictionOrchestrator:
         except Exception as e:
             logger.warning(f"记录工况变更审计失败: {e}")
             return None
+
+    def _assess_risk_with_condition(
+        self,
+        data: np.ndarray,
+        lstm_probs: Optional[np.ndarray],
+        lstm_class: int,
+        node_type: str,
+        node_id: str,
+        condition: Optional[WorkingCondition] = None,
+    ) -> RiskAssessment:
+        """
+        带工况感知的风险评估
+
+        根据工况动态调整风险评估权重：
+        - 稳态运行：标准权重
+        - 升/降负荷：降低趋势因子权重（趋势变化是预期的），提高LSTM因子权重
+        - 停机冷却：提高均值偏移因子权重，降低趋势因子权重
+        - 检修后恢复：降低LSTM因子权重（模型对恢复期预测不准），提高波动性因子权重
+        """
+        risk_assessment = self.risk_model.assess_risk(
+            data,
+            lstm_probs=lstm_probs,
+            lstm_class=lstm_class,
+            node_type=node_type,
+            node_id=node_id,
+        )
+
+        if condition is None or condition == WorkingCondition.UNKNOWN:
+            return risk_assessment
+
+        condition_weight_overrides = {
+            WorkingCondition.STEADY_STATE: None,
+            WorkingCondition.LOAD_INCREASE: {
+                'mean_deviation': 0.20,
+                'volatility': 0.15,
+                'trend': 0.10,
+                'extreme_values': 0.20,
+                'lstm_prediction': 0.35,
+            },
+            WorkingCondition.LOAD_DECREASE: {
+                'mean_deviation': 0.20,
+                'volatility': 0.15,
+                'trend': 0.10,
+                'extreme_values': 0.20,
+                'lstm_prediction': 0.35,
+            },
+            WorkingCondition.SHUTDOWN_COOLING: {
+                'mean_deviation': 0.35,
+                'volatility': 0.25,
+                'trend': 0.05,
+                'extreme_values': 0.20,
+                'lstm_prediction': 0.15,
+            },
+            WorkingCondition.POST_MAINTENANCE_RECOVERY: {
+                'mean_deviation': 0.20,
+                'volatility': 0.30,
+                'trend': 0.15,
+                'extreme_values': 0.25,
+                'lstm_prediction': 0.10,
+            },
+        }
+
+        weight_override = condition_weight_overrides.get(condition)
+        if weight_override is not None:
+            effective_weights = self.risk_model.get_effective_weights(node_type, node_id)
+            original_score = risk_assessment.score
+
+            scores = {
+                'mean_deviation': self.risk_model.calculate_deviation_score(data),
+                'volatility': self.risk_model.calculate_volatility_score(data),
+                'trend': self.risk_model.calculate_trend_score(data),
+                'extreme_values': self.risk_model.calculate_extreme_score(data),
+                'lstm_prediction': self.risk_model.calculate_lstm_score(lstm_probs),
+            }
+
+            weighted_score = sum(
+                weight_override.get(k, 0) * v for k, v in scores.items()
+            )
+            condition_risk_score = round(weighted_score * 9 + 1, 1)
+            condition_risk_score = float(np.clip(condition_risk_score, 1, 10))
+
+            blend_factor = 0.4
+            blended_score = original_score * (1 - blend_factor) + condition_risk_score * blend_factor
+            blended_score = round(float(blended_score), 1)
+
+            if abs(blended_score - original_score) > 0.5:
+                from app.models.risk_model import RiskLevel
+                if blended_score <= 3:
+                    new_level = RiskLevel.HIGH
+                elif blended_score <= 7:
+                    new_level = RiskLevel.MEDIUM
+                else:
+                    new_level = RiskLevel.LOW
+
+                logger.info(
+                    f"工况风险调整: {node_type} {node_id}, "
+                    f"工况={condition.value}, "
+                    f"风险分 {original_score} → {blended_score}, "
+                    f"等级 {risk_assessment.level.value} → {new_level.value}"
+                )
+
+                risk_assessment.score = blended_score
+                risk_assessment.level = new_level
+
+                if hasattr(risk_assessment, 'factors') and risk_assessment.factors:
+                    risk_assessment.factors['condition_adjustment'] = {
+                        'condition': condition.value,
+                        'original_score': original_score,
+                        'adjusted_score': blended_score,
+                        'weight_override': weight_override,
+                    }
+
+        return risk_assessment
+
+    def _apply_warning_with_condition(
+        self,
+        original_status_code: int,
+        original_status: str,
+        confidence: float,
+        risk_assessment: RiskAssessment,
+        condition: Optional[WorkingCondition] = None,
+        bolt_id: str = '',
+    ) -> Tuple[int, str]:
+        """
+        带工况感知的预警策略应用
+
+        根据工况调整预警灵敏度：
+        - 稳态运行：标准策略
+        - 升/降负荷：提高报警门槛（变化是预期的，减少误报）
+        - 停机冷却：提高灵敏度（异常可能意味着冷却异常）
+        - 检修后恢复：提高报警门槛（恢复期波动是正常的）
+        """
+        final_code, final_status = self.warning_policy.apply(
+            original_status_code,
+            original_status,
+            confidence,
+            risk_level=risk_assessment.level.value,
+            lstm_confidence=float(confidence),
+        )
+
+        if condition is None or condition == WorkingCondition.UNKNOWN:
+            return final_code, final_status
+
+        condition_sensitivity = {
+            WorkingCondition.STEADY_STATE: 0.0,
+            WorkingCondition.LOAD_INCREASE: -0.1,
+            WorkingCondition.LOAD_DECREASE: -0.1,
+            WorkingCondition.SHUTDOWN_COOLING: 0.15,
+            WorkingCondition.POST_MAINTENANCE_RECOVERY: -0.15,
+        }
+
+        sensitivity_delta = condition_sensitivity.get(condition, 0.0)
+
+        if sensitivity_delta > 0 and final_code < original_status_code:
+            restored_code = original_status_code
+            restored_status = STATUS_LABELS.get(restored_code, '未知')
+            logger.info(
+                f"工况预警升级: 螺栓 {bolt_id}, "
+                f"工况={condition.value}, "
+                f"策略降级 {final_code} → 恢复为 {restored_code}（高灵敏度工况）"
+            )
+            return restored_code, restored_status
+
+        if sensitivity_delta < 0 and final_code > 0 and final_code == original_status_code:
+            effective_confidence = confidence + abs(sensitivity_delta)
+            if effective_confidence < self.warning_policy.strategy_1_threshold:
+                demoted_code = max(0, final_code - 1)
+                demoted_status = STATUS_LABELS.get(demoted_code, '正常')
+                logger.info(
+                    f"工况预警降级: 螺栓 {bolt_id}, "
+                    f"工况={condition.value}, "
+                    f"状态码 {final_code} → {demoted_code}（低灵敏度工况）"
+                )
+                return demoted_code, demoted_status
+
+        return final_code, final_status
 
     # ---------- 告警评估 ----------
 
