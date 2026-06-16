@@ -1168,6 +1168,82 @@ class APIAuditLog(Base):
     )
 
 
+class WorkingConditionAudit(Base):
+    """
+    工况变更审计表模型
+
+    对应数据库表: sc_working_condition_audit
+    记录每次工况识别结果和工况变更事件，用于审计和追溯。
+    """
+    __tablename__ = 'sc_working_condition_audit'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    event_id = Column(String(64), unique=True, nullable=False, comment='事件ID (UUID)')
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    node_id = Column(String(100), nullable=False, comment='节点ID')
+    from_condition = Column(String(50), comment='原工况')
+    from_condition_label = Column(String(100), comment='原工况名称')
+    from_confidence = Column(Float, comment='原工况置信度')
+    to_condition = Column(String(50), comment='新工况')
+    to_condition_label = Column(String(100), comment='新工况名称')
+    to_confidence = Column(Float, comment='新工况置信度')
+    is_transition = Column(Boolean, default=False, comment='是否为过渡态')
+    trigger_data_points = Column(Integer, comment='触发数据点数')
+    feature_evidence = Column(Text, comment='特征证据 JSON')
+    condition_probabilities = Column(Text, comment='各工况概率分布 JSON')
+    baseline_info = Column(Text, comment='基线信息 JSON')
+    anomaly_summary = Column(Text, comment='异常检测摘要 JSON')
+    retention_days = Column(Integer, default=365, comment='保留天数')
+    expire_time = Column(DateTime, comment='过期时间')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_wc_audit_node', 'node_type', 'node_id'),
+        Index('idx_wc_audit_time', 'create_time'),
+        Index('idx_wc_audit_expire', 'expire_time'),
+        Index('idx_wc_audit_condition', 'from_condition', 'to_condition'),
+        Index('idx_wc_audit_event_id', 'event_id'),
+    )
+
+
+class WorkingConditionBaseline(Base):
+    """
+    工况基线配置表模型
+
+    对应数据库表: sc_working_condition_baselines
+    存储各工况的基线参数和阈值配置。
+    """
+    __tablename__ = 'sc_working_condition_baselines'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    node_id = Column(String(100), nullable=False, comment='节点ID')
+    condition = Column(String(50), nullable=False, comment='工况类型')
+    condition_label = Column(String(100), comment='工况名称')
+    mean_value = Column(Float, comment='基线均值')
+    std_value = Column(Float, comment='基线标准差')
+    upper_bound = Column(Float, comment='异常上界')
+    lower_bound = Column(Float, comment='异常下界')
+    warning_upper = Column(Float, comment='预警上界')
+    warning_lower = Column(Float, comment='预警下界')
+    trend_slope = Column(Float, comment='趋势斜率')
+    trend_intercept = Column(Float, comment='趋势截距')
+    sample_count = Column(Integer, comment='样本数量')
+    threshold_config = Column(Text, comment='阈值配置 JSON')
+    is_active = Column(Boolean, default=True, comment='是否生效')
+    version = Column(Integer, default=1, comment='版本号')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_wc_baseline_node', 'node_type', 'node_id'),
+        Index('idx_wc_baseline_condition', 'condition'),
+        Index('idx_wc_baseline_active', 'is_active'),
+    )
+
+
 # ============================================================
 # 数字孪生与健康度评分模块 ORM 模型
 # ============================================================
