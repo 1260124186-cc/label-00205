@@ -19,9 +19,10 @@ import sys
 import argparse
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import uvicorn
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
@@ -236,6 +237,55 @@ def create_app() -> FastAPI:
             content=metrics_text,
             media_type="text/plain; version=0.0.4; charset=utf-8"
         )
+
+    # ---------- 风险热力图 WebSocket 端点 ----------
+
+    @app.websocket("/ws/risk/heatmap")
+    async def websocket_risk_heatmap(
+        websocket: WebSocket,
+        tenant_id: int = Query(..., description="租户ID"),
+        api_key: str = Query(..., description="API密钥"),
+    ):
+        """
+        风险热力图 WebSocket 实时推送端点
+
+        支持的消息类型：
+        - **subscribe**: 订阅节点风险更新
+        - **unsubscribe**: 取消订阅
+        - **heartbeat**: 心跳检测
+        - **request_full_graph**: 请求全量图数据
+        - **start_time_playback**: 开始时间回放
+        - **stop_time_playback**: 停止时间回放
+        """
+        from app.services.risk_visualization.websocket_manager import get_websocket_manager
+
+        manager = get_websocket_manager()
+        try:
+            await manager.connect(websocket, tenant_id, api_key)
+
+            while True:
+                try:
+                    data = await websocket.receive_json()
+                    await manager.handle_message(websocket, data)
+                except WebSocketDisconnect:
+                    manager.disconnect(websocket)
+                    break
+                except Exception as e:
+                    logger.error(f"WebSocket消息处理错误: {e}")
+                    try:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": str(e),
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"WebSocket连接失败: {e}")
+            try:
+                await websocket.close(code=1008, reason=str(e))
+            except Exception:
+                pass
 
     return app
 

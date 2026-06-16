@@ -191,10 +191,23 @@ from app.api.schemas import (
     HPOTrialSchema, HPOStudySchema, HPONodeOverrideSchema,
     HPOStudyStatusResponse, HPOStudyListResponse, HPOTrialListResponse,
     HPOCompareConfigResponse,
+    # 风险热力图与传播可视化
+    RiskGraphNodeSchema, RiskGraphEdgeSchema,
+    PropagationGraphResponse,
+    GeoJSONHeatmapRequest,
+    EChartsGraphRequest, EChartsGraphResponse,
+    TimeSliceRequest, TimeSliceNodeSchema, TimeSliceDataSchema, TimeSeriesResponse,
+    PropagationPathRequest, PropagationPathSchema, PropagationPathListResponse,
+    RiskSummaryResponse,
+    EdgeWeightConfigRequest, EdgeWeightConfigResponse,
+    SignificantChangeRequest, SignificantChangeSliceSchema, SignificantChangeListResponse,
+    SignificantChangeItemSchema,
+    WSMessageSchema, IncrementalUpdateSchema,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
 from app.services.visualization_3d import Visualization3DService
+from app.services.risk_visualization.service import RiskVisualizationService
 from app.api.validators import (
     DataValidator,
     ValidationMode,
@@ -215,6 +228,7 @@ router = APIRouter(dependencies=[Depends(verify_api_key)])
 prediction_service = None
 training_service = None
 visualization_3d_service = None
+risk_visualization_service = None
 federated_server = None
 federated_clients: Dict[str, Any] = {}
 
@@ -241,6 +255,14 @@ def get_visualization_3d_service() -> Visualization3DService:
     if visualization_3d_service is None:
         visualization_3d_service = Visualization3DService()
     return visualization_3d_service
+
+
+def get_risk_visualization_service() -> RiskVisualizationService:
+    """获取风险可视化服务实例"""
+    global risk_visualization_service
+    if risk_visualization_service is None:
+        risk_visualization_service = RiskVisualizationService()
+    return risk_visualization_service
 
 
 def get_federated_server():
@@ -11440,4 +11462,372 @@ async def delete_hpo_study(study_id: str):
         raise
     except Exception as e:
         logger.error(f"删除HPO研究失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 风险热力图与传播可视化
+# ============================================================
+
+
+@router.get(
+    "/risk/visualization/graph",
+    response_model=PropagationGraphResponse,
+    tags=["风险可视化"],
+    summary="获取风险传播图（nodes/edges）"
+)
+async def get_propagation_graph(
+    tenant_id: int = Query(..., description="租户ID"),
+    graph_type: str = Query("composite", description="图类型"),
+):
+    """
+    获取风险传播图，包含节点和边
+
+    - **graph_type**: 图类型，如 co_fault / physical / granger / composite
+    """
+    try:
+        service = get_risk_visualization_service()
+        graph = service.get_propagation_graph(
+            tenant_id=tenant_id,
+            graph_type=graph_type,
+        )
+
+        if not graph:
+            raise HTTPException(status_code=404, detail="未找到传播图数据")
+
+        return PropagationGraphResponse(**graph)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取传播图失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/visualization/heatmap/geojson",
+    tags=["风险可视化"],
+    summary="获取热力图 GeoJSON"
+)
+async def get_heatmap_geojson(
+    tenant_id: int = Query(..., description="租户ID"),
+    node_type: str = Query("all", description="节点类型: all/bolt/flange/unit"),
+    value_field: str = Query("risk_score", description="热力值字段"),
+    aggregate_level: str = Query(None, description="聚合层级"),
+):
+    """
+    获取热力图 GeoJSON 格式数据，支持 GIS 和地图可视化
+
+    - **node_type**: 节点类型过滤
+    - **value_field**: 热力值使用的字段
+    - **aggregate_level**: 聚合层级，如 group/factory/unit
+    """
+    try:
+        service = get_risk_visualization_service()
+        geojson = service.get_heatmap_geojson(
+            tenant_id=tenant_id,
+            node_type=node_type,
+            value_field=value_field,
+            aggregate_level=aggregate_level,
+        )
+
+        if not geojson:
+            raise HTTPException(status_code=404, detail="未找到热力图数据")
+
+        return geojson
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取热力图GeoJSON失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/visualization/echarts",
+    response_model=EChartsGraphResponse,
+    tags=["风险可视化"],
+    summary="获取 ECharts 图结构数据"
+)
+async def get_echarts_graph(
+    tenant_id: int = Query(..., description="租户ID"),
+    graph_type: str = Query("composite", description="图类型"),
+    layout: str = Query("force", description="布局类型: force/circular/none"),
+):
+    """
+    获取 ECharts graph 组件所需的数据结构
+
+    - **layout**: 布局类型 force 力导向 / circular 环形
+    - **graph_type**: 图类型
+    """
+    try:
+        service = get_risk_visualization_service()
+        echarts_data = service.get_echarts_graph(
+            tenant_id=tenant_id,
+            graph_type=graph_type,
+            layout=layout,
+        )
+
+        if not echarts_data:
+            raise HTTPException(status_code=404, detail="未找到图数据")
+
+        return EChartsGraphResponse(**echarts_data)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取ECharts图失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/visualization/timeseries",
+    response_model=TimeSeriesResponse,
+    tags=["风险可视化"],
+    summary="获取时间切片序列（24小时风险演化）"
+)
+async def get_time_series_slices(
+    tenant_id: int = Query(..., description="租户ID"),
+    history_hours: int = Query(24, description="历史时长（小时）", ge=1, le=168),
+    interval_minutes: int = Query(60, description="时间间隔（分钟）", ge=5, le=360),
+    include_edges: bool = Query(False, description="是否包含边"),
+    use_mock: bool = Query(True, description="是否使用模拟数据"),
+):
+    """
+    获取历史时间切片序列，支持风险演化动画回放
+
+    - **history_hours**: 历史时长，默认24小时
+    - **interval_minutes**: 时间间隔，默认60分钟
+    - **include_edges**: 是否包含边的时间序列
+    - **use_mock**: 是否使用模拟数据（无真实数据时）
+    """
+    try:
+        service = get_risk_visualization_service()
+        result = service.get_time_series_slices(
+            tenant_id=tenant_id,
+            history_hours=history_hours,
+            interval_minutes=interval_minutes,
+            include_edges=include_edges,
+            use_mock=use_mock,
+        )
+
+        if not result:
+            raise HTTPException(status_code=404, detail="未找到时间序列数据")
+
+        return TimeSeriesResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取时间切片序列失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/visualization/timeslice/{slice_index}/geojson",
+    tags=["风险可视化"],
+    summary="获取指定时间切片的 GeoJSON"
+)
+async def get_time_slice_geojson(
+    slice_index: int,
+    tenant_id: int = Query(..., description="租户ID"),
+    history_hours: int = Query(24, description="历史时长（小时）"),
+    interval_minutes: int = Query(60, description="时间间隔（分钟）"),
+    use_mock: bool = Query(True, description="是否使用模拟数据"),
+):
+    """
+    获取指定时间切片的 GeoJSON 数据
+
+    - **slice_index**: 时间切片索引
+    """
+    try:
+        service = get_risk_visualization_service()
+        geojson = service.get_time_slice_geojson(
+            tenant_id=tenant_id,
+            slice_index=slice_index,
+            history_hours=history_hours,
+            interval_minutes=interval_minutes,
+            use_mock=use_mock,
+        )
+
+        if not geojson:
+            raise HTTPException(status_code=404, detail="未找到该时间切片")
+
+        return geojson
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取时间切片GeoJSON失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/visualization/propagation-paths",
+    response_model=PropagationPathListResponse,
+    tags=["风险可视化"],
+    summary="获取风险传播路径"
+)
+async def get_propagation_paths(
+    source_node: str = Query(..., description="源节点ID"),
+    tenant_id: int = Query(..., description="租户ID"),
+    top_k: int = Query(10, description="返回前k条路径", ge=1, le=100),
+    max_depth: int = Query(3, description="最大路径深度", ge=1, le=10),
+):
+    """
+    获取从指定节点出发的 top-k 风险传播路径
+
+    - **source_node**: 源节点ID
+    - **top_k**: 返回前 k 条路径
+    - **max_depth**: 路径最大深度
+    """
+    try:
+        service = get_risk_visualization_service()
+        result = service.get_propagation_paths(
+            tenant_id=tenant_id,
+            source_node=source_node,
+            top_k=top_k,
+            max_depth=max_depth,
+        )
+
+        if not result:
+            raise HTTPException(status_code=404, detail="未找到传播路径")
+
+        return PropagationPathListResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取传播路径失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/visualization/summary",
+    response_model=RiskSummaryResponse,
+    tags=["风险可视化"],
+    summary="获取风险汇总统计"
+)
+async def get_risk_summary(
+    tenant_id: int = Query(..., description="租户ID"),
+    graph_type: str = Query("composite", description="图类型"),
+):
+    """
+    获取风险汇总统计信息
+
+    - 总节点数、总边数
+    - 平均/最大/最小风险评分
+    - 风险等级分布
+    - 高风险节点列表
+    """
+    try:
+        service = get_risk_visualization_service()
+        result = service.get_risk_summary(
+            tenant_id=tenant_id,
+            graph_type=graph_type,
+        )
+
+        if not result:
+            raise HTTPException(status_code=404, detail="未找到风险汇总数据")
+
+        return RiskSummaryResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取风险汇总失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/risk/visualization/edge-weights/config",
+    response_model=EdgeWeightConfigResponse,
+    tags=["风险可视化"],
+    summary="更新边权重配置"
+)
+async def update_edge_weights_config(
+    request: EdgeWeightConfigRequest,
+    tenant_id: int = Query(..., description="租户ID"),
+):
+    """
+    动态更新三种边权重的比例系数
+
+    - **co_fault_weight**: 共故障权重 (0-1)
+    - **physical_weight**: 物理邻接权重 (0-1)
+    - **granger_weight**: Granger因果权重 (0-1)
+    """
+    try:
+        service = get_risk_visualization_service()
+        result = service.update_edge_weights_config(
+            tenant_id=tenant_id,
+            co_fault_weight=request.co_fault_weight,
+            physical_weight=request.physical_weight,
+            granger_weight=request.granger_weight,
+        )
+
+        return EdgeWeightConfigResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新边权重配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/visualization/edge-weights/config",
+    response_model=EdgeWeightConfigResponse,
+    tags=["风险可视化"],
+    summary="获取边权重配置"
+)
+async def get_edge_weights_config(
+    tenant_id: int = Query(..., description="租户ID"),
+):
+    """获取当前边权重配置"""
+    try:
+        service = get_risk_visualization_service()
+        result = service.get_edge_weights_config(tenant_id=tenant_id)
+
+        return EdgeWeightConfigResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取边权重配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/visualization/significant-changes",
+    response_model=SignificantChangeListResponse,
+    tags=["风险可视化"],
+    summary="检测风险显著变化点"
+)
+async def detect_significant_changes(
+    tenant_id: int = Query(..., description="租户ID"),
+    threshold: float = Query(2.0, description="变化阈值", gt=0, le=10),
+    history_hours: int = Query(24, description="历史时长（小时）"),
+    use_mock: bool = Query(True, description="是否使用模拟数据"),
+):
+    """
+    检测历史时间序列中风险显著变化的时间点
+
+    - **threshold**: 风险评分变化阈值
+    - 返回风险变化超过阈值的所有时间切片
+    """
+    try:
+        service = get_risk_visualization_service()
+        result = service.detect_significant_changes(
+            tenant_id=tenant_id,
+            threshold=threshold,
+            history_hours=history_hours,
+            use_mock=use_mock,
+        )
+
+        return SignificantChangeListResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"检测显著变化失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

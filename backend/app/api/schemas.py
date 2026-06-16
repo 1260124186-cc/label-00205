@@ -4601,3 +4601,236 @@ class HPONodeOverrideResponse(BaseModel):
     node_id: Optional[str] = None
     search_space_override: Optional[Dict[str, Any]] = None
     fixed_params: Optional[Dict[str, Any]] = None
+
+
+# ============================================================
+# 风险热力图与传播可视化
+# ============================================================
+
+# ---------- 图节点 ----------
+
+class RiskGraphNodeSchema(BaseModel):
+    """风险图节点"""
+    id: str
+    name: str
+    node_type: str
+    level: int
+    risk_score: float
+    risk_level: str
+    status_code: int
+    status: str
+    confidence: float
+    parent_id: Optional[str] = None
+    position: Optional[Dict[str, float]] = None
+    extra_info: Optional[Dict[str, Any]] = None
+
+
+# ---------- 图边 ----------
+
+class RiskGraphEdgeSchema(BaseModel):
+    """风险图边"""
+    source: str
+    target: str
+    weight: float
+    weight_type: str
+    co_fault_weight: float = 0.0
+    physical_weight: float = 0.0
+    granger_weight: float = 0.0
+    granger_p_value: Optional[float] = None
+    granger_lag: Optional[int] = None
+    co_fault_count: int = 0
+    extra_info: Optional[Dict[str, Any]] = None
+
+
+# ---------- 传播图 ----------
+
+class PropagationGraphResponse(BaseModel):
+    """传播图响应"""
+    nodes: List[RiskGraphNodeSchema]
+    edges: List[RiskGraphEdgeSchema]
+    node_count: int
+    edge_count: int
+    graph_type: str
+    timestamp: str
+    metadata: Optional[Dict[str, Any]] = None
+
+
+# ---------- GeoJSON 热力图 ----------
+
+class GeoJSONHeatmapRequest(BaseModel):
+    """GeoJSON热力图请求"""
+    tenant_id: int = Field(..., description="租户ID")
+    node_type: Optional[str] = Field("all", description="节点类型: all/bolt/flange/unit")
+    value_field: Optional[str] = Field("risk_score", description="热力值字段")
+    aggregate_level: Optional[str] = Field(None, description="聚合层级: group/factory/unit/flange")
+
+
+# ---------- ECharts 图结构 ----------
+
+class EChartsGraphRequest(BaseModel):
+    """ECharts图结构请求"""
+    tenant_id: int = Field(..., description="租户ID")
+    graph_type: Optional[str] = Field("composite", description="图类型")
+    layout: Optional[str] = Field("force", description="布局类型: force/circular/none")
+    include_levels: Optional[List[str]] = Field(None, description="包含的节点级别")
+
+
+class EChartsGraphResponse(BaseModel):
+    """ECharts图结构响应"""
+    nodes: List[Dict[str, Any]]
+    links: List[Dict[str, Any]]
+    categories: List[Dict[str, str]]
+    layout: str
+    metadata: Dict[str, Any]
+
+
+# ---------- 时间切片 ----------
+
+class TimeSliceRequest(BaseModel):
+    """时间切片请求"""
+    tenant_id: int = Field(..., description="租户ID")
+    history_hours: Optional[int] = Field(24, description="历史时长（小时）", ge=1, le=168)
+    interval_minutes: Optional[int] = Field(60, description="时间间隔（分钟）", ge=5, le=360)
+    include_edges: Optional[bool] = Field(False, description="是否包含边")
+    use_mock: Optional[bool] = Field(True, description="是否使用模拟数据")
+
+
+class TimeSliceNodeSchema(BaseModel):
+    """时间切片节点"""
+    id: str
+    name: str
+    node_type: str
+    level: int
+    risk_score: float
+    risk_level: str
+    status_code: int
+    status: str
+    confidence: float
+    parent_id: Optional[str] = None
+
+
+class TimeSliceDataSchema(BaseModel):
+    """时间切片数据"""
+    timestamp: str
+    slice_index: int
+    nodes: List[TimeSliceNodeSchema]
+    edges: Optional[List[RiskGraphEdgeSchema]] = None
+    stats: Optional[Dict[str, Any]] = None
+
+
+class TimeSeriesResponse(BaseModel):
+    """时间序列响应"""
+    time_slices: List[TimeSliceDataSchema]
+    total_slices: int
+    time_range: Dict[str, str]
+    interval_minutes: int
+    metadata: Dict[str, Any]
+
+
+# ---------- 传播路径 ----------
+
+class PropagationPathRequest(BaseModel):
+    """传播路径请求"""
+    tenant_id: int = Field(..., description="租户ID")
+    source_node: str = Field(..., description="源节点ID")
+    top_k: Optional[int] = Field(10, description="返回前k条路径", ge=1, le=100)
+    max_depth: Optional[int] = Field(3, description="最大路径深度", ge=1, le=10)
+
+
+class PropagationPathSchema(BaseModel):
+    """传播路径"""
+    path: List[str]
+    total_weight: float
+    avg_weight: float
+    depth: int
+
+
+class PropagationPathListResponse(BaseModel):
+    """传播路径列表响应"""
+    source_node: str
+    total_paths: int
+    paths: List[PropagationPathSchema]
+
+
+# ---------- 风险汇总 ----------
+
+class RiskSummaryResponse(BaseModel):
+    """风险汇总响应"""
+    total_nodes: int
+    total_edges: int
+    avg_risk_score: float
+    max_risk_score: float
+    min_risk_score: float
+    risk_distribution: Dict[str, int]
+    high_risk_ratio: float
+    high_risk_nodes: List[RiskGraphNodeSchema]
+    timestamp: str
+
+
+# ---------- 边权重配置 ----------
+
+class EdgeWeightConfigRequest(BaseModel):
+    """边权重配置请求"""
+    co_fault_weight: Optional[float] = Field(None, description="共故障权重", ge=0, le=1)
+    physical_weight: Optional[float] = Field(None, description="物理邻接权重", ge=0, le=1)
+    granger_weight: Optional[float] = Field(None, description="Granger因果权重", ge=0, le=1)
+
+
+class EdgeWeightConfigResponse(BaseModel):
+    """边权重配置响应"""
+    co_fault_weight: float
+    physical_weight: float
+    granger_weight: float
+
+
+# ---------- 显著变化检测 ----------
+
+class SignificantChangeRequest(BaseModel):
+    """显著变化检测请求"""
+    tenant_id: int = Field(..., description="租户ID")
+    threshold: Optional[float] = Field(2.0, description="变化阈值", gt=0, le=10)
+    history_hours: Optional[int] = Field(24, description="历史时长（小时）")
+    use_mock: Optional[bool] = Field(True, description="是否使用模拟数据")
+
+
+class SignificantChangeItemSchema(BaseModel):
+    """显著变化项"""
+    node_id: str
+    node_name: str
+    prev_risk: float
+    curr_risk: float
+    delta: float
+    direction: str
+
+
+class SignificantChangeSliceSchema(BaseModel):
+    """显著变化切片"""
+    slice_index: int
+    timestamp: str
+    change_count: int
+    changes: List[SignificantChangeItemSchema]
+
+
+class SignificantChangeListResponse(BaseModel):
+    """显著变化列表响应"""
+    total_slices: int
+    change_slices: int
+    threshold: float
+    changes: List[SignificantChangeSliceSchema]
+
+
+# ---------- WebSocket 消息 ----------
+
+class WSMessageSchema(BaseModel):
+    """WebSocket消息"""
+    type: str
+    data: Optional[Dict[str, Any]] = None
+    timestamp: str
+
+
+# ---------- 增量更新 ----------
+
+class IncrementalUpdateSchema(BaseModel):
+    """增量更新"""
+    type: str
+    data: Dict[str, Any]
