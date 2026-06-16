@@ -1,0 +1,14 @@
+{{- if .Values.configMap.create -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}-config
+  namespace: {{ .Values.global.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.configMap.data }}
+  {{ $key }}: |
+    {{- tpl $value $ | nindent 4 }}
+  {{- end }}
+{{- end }}

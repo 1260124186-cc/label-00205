@@ -1,0 +1,483 @@
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: ""
+  namespace: bolt-prediction
+
+nameOverride: ""
+fullnameOverride: ""
+
+commonLabels:
+  app.kubernetes.io/part-of: bolt-prediction
+  app.kubernetes.io/managed-by: helm
+
+commonAnnotations: {}
+
+image:
+  repository: bolt-prediction/backend
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+api:
+  name: api
+  replicaCount: 3
+  minReadySeconds: 30
+
+  command: ["python", "main.py"]
+  args: []
+
+  service:
+    type: ClusterIP
+    port: 8000
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "8000"
+      prometheus.io/path: "/metrics"
+
+  resources:
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    customMetrics:
+      - type: Pods
+        pods:
+          metric:
+            name: stream_ingest_qps
+          target:
+            type: AverageValue
+            averageValue: "1000"
+
+  probes:
+    liveness:
+      enabled: true
+      path: /health
+      port: http
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 3
+      successThreshold: 1
+    readiness:
+      enabled: true
+      path: /health
+      port: http
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+    startup:
+      enabled: true
+      path: /health
+      port: http
+      initialDelaySeconds: 60
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 30
+
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 25%
+
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: api.bolt-prediction.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  env:
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: PYTHONPATH
+      value: "/app"
+    - name: CONFIG_PATH
+      value: "/app/config/config.yaml"
+
+worker:
+  name: worker
+  replicaCount: 2
+
+  command: ["python", "main.py"]
+  args: ["--predict"]
+
+  cron:
+    enabled: true
+    schedule: "*/30 * * * *"
+    concurrencyPolicy: Forbid
+    failedJobsHistoryLimit: 3
+    successfulJobsHistoryLimit: 3
+    activeDeadlineSeconds: 3600
+    backoffLimit: 2
+
+  resources:
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: worker
+            topologyKey: kubernetes.io/hostname
+
+  probes:
+    liveness:
+      enabled: false
+    readiness:
+      enabled: false
+
+  env:
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: PYTHONPATH
+      value: "/app"
+    - name: CONFIG_PATH
+      value: "/app/config/config.yaml"
+    - name: WORKER_MODE
+      value: "batch"
+
+streamConsumer:
+  name: stream-consumer
+  replicaCount: 2
+  minReadySeconds: 30
+
+  command: ["python", "-c"]
+  args:
+    - |
+      from app.streaming import get_stream_engine
+      engine = get_stream_engine()
+      engine.set_prediction_mode("stream")
+      engine.start()
+      import time
+      while True:
+          time.sleep(3600)
+
+  service:
+    type: ClusterIP
+    port: 8000
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "8000"
+      prometheus.io/path: "/metrics"
+
+  resources:
+    limits:
+      cpu: "3"
+      memory: "6Gi"
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+    customMetrics:
+      - type: Pods
+        pods:
+          metric:
+            name: stream_ingest_qps
+          target:
+            type: AverageValue
+            averageValue: "5000"
+
+  probes:
+    liveness:
+      enabled: true
+      path: /health
+      port: http
+      initialDelaySeconds: 45
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 3
+    readiness:
+      enabled: true
+      path: /health
+      port: http
+      initialDelaySeconds: 20
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 1
+
+  env:
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: PYTHONPATH
+      value: "/app"
+    - name: CONFIG_PATH
+      value: "/app/config/config.yaml"
+    - name: STREAM_MODE
+      value: "true"
+    - name: STREAM_PREDICTION_ENABLED
+      value: "true"
+
+scheduler:
+  name: scheduler
+  replicaCount: 1
+
+  command: ["python", "-c"]
+  args:
+    - |
+      from app.schedulers.scheduler import scheduler
+      scheduler.start()
+      import time
+      while True:
+          time.sleep(3600)
+
+  podAnnotations:
+    leader-election: "true"
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  resources:
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+
+  probes:
+    liveness:
+      enabled: true
+      path: /health
+      port: http
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 3
+    readiness:
+      enabled: true
+      path: /health
+      port: http
+      initialDelaySeconds: 30
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: scheduler
+          topologyKey: kubernetes.io/hostname
+
+  strategy:
+    type: Recreate
+
+  env:
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: PYTHONPATH
+      value: "/app"
+    - name: CONFIG_PATH
+      value: "/app/config/config.yaml"
+    - name: SCHEDULER_ENABLED
+      value: "true"
+    - name: SCHEDULER_LEADER_ELECTION_REQUIRED
+      value: "true"
+
+persistence:
+  modelVolume:
+    enabled: true
+    name: trained-models
+    size: 20Gi
+    accessModes:
+      - ReadWriteMany
+    storageClass: ""
+    mountPath: /app/trained_models
+
+  dataVolume:
+    enabled: true
+    name: data
+    size: 50Gi
+    accessModes:
+      - ReadWriteMany
+    storageClass: ""
+    mountPath: /app/data
+
+  logsVolume:
+    enabled: true
+    name: logs
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+    storageClass: ""
+    mountPath: /app/logs
+
+configMap:
+  create: true
+  name: bolt-prediction-config
+  data:
+    config.yaml: |
+      api:
+        host: 0.0.0.0
+        port: 8000
+        debug: false
+      
+      database:
+        host: {{ .Release.Name }}-mysql
+        port: 3306
+        name: bolt_prediction
+        user: bolt_user
+        pool_size: 20
+        max_overflow: 10
+      
+      redis:
+        host: {{ .Release.Name }}-redis-master
+        port: 6379
+        db: 0
+      
+      scheduler:
+        enabled: true
+        leader_election:
+          required: true
+          jobs:
+            - prediction_job
+            - monthly_prediction_job
+        sharding:
+          default_num_shards: 4
+        leader_lease_ttl: 300
+      
+      stream_prediction:
+        enabled: true
+        window:
+          storage_type: redis
+          size: 100
+          ttl_seconds: 3600
+      
+      model:
+        save_path: /app/trained_models
+      
+      logging:
+        level: INFO
+        file: /app/logs/app.log
+        max_size: 10485760
+        backup_count: 5
+
+secret:
+  create: true
+  name: bolt-prediction-secret
+  type: Opaque
+  data: {}
+  stringData:
+    database-password: "bolt_password"
+    redis-password: "redis_password"
+    jwt-secret-key: "your-super-secret-jwt-key-change-me-in-production"
+    api-encryption-key: "your-encryption-key-change-me-in-production"
+    sso-client-secret: "your-sso-client-secret"
+
+mysql:
+  enabled: true
+  nameOverride: mysql
+  auth:
+    rootPassword: "root_password"
+    username: "bolt_user"
+    password: "bolt_password"
+    database: "bolt_prediction"
+  architecture: standalone
+  primary:
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClass: ""
+    resources:
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+
+redis:
+  enabled: true
+  nameOverride: redis
+  auth:
+    password: "redis_password"
+  architecture: standalone
+  master:
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""
+    resources:
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  interval: 30s
+  scrapeTimeout: 10s
+  labels:
+    release: prometheus
+
+networkPolicy:
+  enabled: false
+  ingressRules:
+    api:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: ingress-nginx
+        ports:
+          - port: 8000
+
+tolerations: []
+
+nodeSelector: {}
+
+affinity: {}
+
+podAnnotations: {}

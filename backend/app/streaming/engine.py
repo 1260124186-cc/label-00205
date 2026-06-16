@@ -12,6 +12,7 @@
 import time
 import threading
 import numpy as np
+from collections import deque
 from enum import Enum
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from app.streaming.stream_adapters import (
 )
 from app.services.prediction import PredictionOrchestrator
 from app.utils.config import config
+from app.core.prometheus import metrics
 
 
 class StreamPredictionMode(str, Enum):
@@ -120,6 +122,12 @@ class StreamPredictionEngine:
         self._total_predictions = 0
         self._status_changes = 0
         self._active_streams = set()
+
+        # QPS统计 - 使用滑动窗口计算最近60秒的QPS
+        self._ingest_timestamps: deque = deque(maxlen=10000)
+        self._ingest_lock = threading.Lock()
+        self._current_qps = 0.0
+        self._component_name = "stream-consumer"
 
         # 初始化组件
         self._init_components(
@@ -427,6 +435,20 @@ class StreamPredictionEngine:
                 logger.debug(f"消息被限流: {stream_id}")
                 return
 
+            # 记录数据摄入QPS指标
+            data_count = len(message.values)
+            self._record_ingest(node_type=message.node_type, count=data_count)
+            
+            # 更新窗口填充度指标
+            window = self.window_manager.get_window(message.node_id)
+            if window:
+                fill_ratio = min(len(window.values) / window.window_size, 1.0)
+                metrics.update_window_fill_ratio(
+                    component=self._component_name,
+                    bolt_id=message.node_id,
+                    ratio=fill_ratio
+                )
+            
             # 添加到滑动窗口
             if message.is_batch():
                 is_full = self.window_manager.add_batch(
@@ -444,7 +466,8 @@ class StreamPredictionEngine:
             logger.debug(
                 f"消息处理完成: {stream_id}, "
                 f"batch_size={len(message.values)}, "
-                f"window_full={is_full}"
+                f"window_full={is_full}, "
+                f"current_qps={self._current_qps:.2f}"
             )
 
         except Exception as e:
@@ -580,6 +603,44 @@ class StreamPredictionEngine:
         )
         cleanup_thread.start()
 
+    def _record_ingest(self, node_type: str, count: int = 1) -> None:
+        """记录数据摄入并更新QPS指标"""
+        now = time.time()
+        with self._ingest_lock:
+            for _ in range(count):
+                self._ingest_timestamps.append(now)
+        
+        metrics.record_stream_ingest(
+            component=self._component_name,
+            node_type=node_type,
+            success=True,
+            count=count
+        )
+        
+        self._update_qps_metric(node_type)
+    
+    def _update_qps_metric(self, node_type: str) -> None:
+        """更新QPS指标 - 计算最近60秒的QPS"""
+        now = time.time()
+        cutoff = now - 60.0
+        
+        with self._ingest_lock:
+            recent_count = sum(1 for ts in self._ingest_timestamps if ts >= cutoff)
+        
+        qps = recent_count / 60.0
+        self._current_qps = qps
+        
+        metrics.update_stream_qps(
+            component=self._component_name,
+            node_type=node_type,
+            qps=qps
+        )
+        
+        metrics.update_stream_active_count(
+            component=self._component_name,
+            count=len(self._active_streams)
+        )
+    
     def _cleanup_loop(self) -> None:
         """清理循环"""
         while self._is_running:
@@ -596,12 +657,22 @@ class StreamPredictionEngine:
                 for stream_id in streams_to_remove:
                     self.backpressure_manager.unregister_stream(stream_id)
                     self._active_streams.discard(stream_id)
+                
+                # 更新活跃流数指标
+                metrics.update_stream_active_count(
+                    component=self._component_name,
+                    count=len(self._active_streams)
+                )
+                
+                # 定期更新QPS指标（即使没有新数据）
+                if len(self._ingest_timestamps) > 0:
+                    self._update_qps_metric("bolt")
 
-                # 每60秒执行一次
-                time.sleep(60)
+                # 每30秒执行一次
+                time.sleep(30)
             except Exception as e:
                 logger.error(f"清理任务异常: {e}")
-                time.sleep(60)
+                time.sleep(30)
 
     # ============ 查询接口 ============
 
@@ -656,6 +727,10 @@ class StreamPredictionEngine:
             adapter_stats=[
                 adapter.get_stats() for adapter in self.stream_adapters
             ],
+            qps_stats={
+                'current_qps': self._current_qps,
+                'recent_ingest_count': len(self._ingest_timestamps),
+            },
         )
 
     def get_stats_dict(self) -> Dict[str, Any]:

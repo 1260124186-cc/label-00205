@@ -1,0 +1,58 @@
+{{- if .Values.streamConsumer.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}-stream-consumer
+  namespace: {{ .Values.global.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: stream-consumer
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "bolt-prediction.fullname" . }}-stream-consumer
+  minReplicas: {{ .Values.streamConsumer.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.streamConsumer.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.streamConsumer.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.streamConsumer.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.streamConsumer.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.streamConsumer.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+    {{- range .Values.streamConsumer.autoscaling.customMetrics }}
+    - {{- toYaml . | nindent 6 }}
+    {{- end }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Percent
+          value: 20
+          periodSeconds: 300
+        - type: Pods
+          value: 1
+          periodSeconds: 300
+      selectPolicy: Min
+{{- end }}

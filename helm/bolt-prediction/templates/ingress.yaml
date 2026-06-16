@@ -1,0 +1,41 @@
+{{- if .Values.api.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}-api
+  namespace: {{ .Values.global.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  annotations:
+    {{- toYaml .Values.api.ingress.annotations | nindent 4 }}
+spec:
+  {{- if .Values.api.ingress.className }}
+  ingressClassName: {{ .Values.api.ingress.className }}
+  {{- end }}
+  {{- if .Values.api.ingress.tls }}
+  tls:
+    {{- range .Values.api.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.api.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "bolt-prediction.fullname" $ }}-api
+                port:
+                  number: {{ $.Values.api.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

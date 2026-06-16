@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}-scheduler
+  namespace: {{ .Values.global.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scheduler
+  annotations:
+    {{- toYaml .Values.podAnnotations | nindent 4 }}
+spec:
+  replicas: {{ .Values.scheduler.replicaCount }}
+  revisionHistoryLimit: 10
+  strategy:
+    {{- toYaml .Values.scheduler.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "bolt-prediction.componentSelectorLabels" (dict "component" "scheduler" "Values" .Values "Release" .Release "Chart" .Chart) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bolt-prediction.componentSelectorLabels" (dict "component" "scheduler" "Values" .Values "Release" .Release "Chart" .Chart) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- toYaml .Values.scheduler.podAnnotations | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "bolt-prediction.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Values.scheduler.name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.scheduler.command | nindent 12 }}
+          args:
+            {{- toYaml .Values.scheduler.args | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          {{- include "bolt-prediction.probes" (dict "component" "scheduler" "Values" .Values) | nindent 10 }}
+          env:
+            {{- include "bolt-prediction.env" (dict "component" "scheduler" "Values" .Values "Release" .Release "Chart" .Chart) | nindent 12 }}
+          resources:
+            {{- toYaml .Values.scheduler.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "bolt-prediction.volumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "bolt-prediction.volumes" . | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scheduler.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 120

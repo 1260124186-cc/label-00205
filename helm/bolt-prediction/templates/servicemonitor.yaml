@@ -1,0 +1,35 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}
+  namespace: {{ .Values.serviceMonitor.namespace | default (.Values.global.namespace | default .Release.Namespace) }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+    {{- toYaml .Values.serviceMonitor.labels | nindent 4 }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      {{- include "bolt-prediction.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.global.namespace | default .Release.Namespace }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      honorLabels: true
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          targetLabel: component
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'http_requests_total|prediction_requests_total|prediction_status_total|prediction_task_total|stream_ingest_qps'
+          action: keep
+{{- end }}

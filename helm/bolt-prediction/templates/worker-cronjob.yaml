@@ -1,0 +1,75 @@
+{{- if .Values.worker.cron.enabled -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}-worker
+  namespace: {{ .Values.global.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  schedule: {{ .Values.worker.cron.schedule | quote }}
+  concurrencyPolicy: {{ .Values.worker.cron.concurrencyPolicy }}
+  failedJobsHistoryLimit: {{ .Values.worker.cron.failedJobsHistoryLimit }}
+  successfulJobsHistoryLimit: {{ .Values.worker.cron.successfulJobsHistoryLimit }}
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.worker.cron.activeDeadlineSeconds }}
+      backoffLimit: {{ .Values.worker.cron.backoffLimit }}
+      parallelism: {{ .Values.worker.replicaCount }}
+      completions: {{ .Values.worker.replicaCount }}
+      completionMode: Indexed
+      template:
+        metadata:
+          labels:
+            {{- include "bolt-prediction.componentSelectorLabels" (dict "component" "worker" "Values" .Values "Release" .Release "Chart" .Chart) | nindent 12 }}
+          annotations:
+            checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+            checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        spec:
+          serviceAccountName: {{ include "bolt-prediction.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          restartPolicy: OnFailure
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: {{ .Values.worker.name }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                {{- toYaml .Values.worker.command | nindent 16 }}
+              args:
+                {{- toYaml .Values.worker.args | nindent 16 }}
+              env:
+                {{- include "bolt-prediction.env" (dict "component" "worker" "Values" .Values "Release" .Release "Chart" .Chart) | nindent 16 }}
+                - name: JOB_COMPLETION_INDEX
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+                - name: TOTAL_SHARDS
+                  value: {{ .Values.worker.replicaCount | quote }}
+              resources:
+                {{- toYaml .Values.worker.resources | nindent 16 }}
+              volumeMounts:
+                {{- include "bolt-prediction.volumeMounts" . | nindent 16 }}
+          volumes:
+            {{- include "bolt-prediction.volumes" . | nindent 12 }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.worker.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

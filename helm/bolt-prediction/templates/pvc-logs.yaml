@@ -1,0 +1,20 @@
+{{- if and .Values.persistence.logsVolume.enabled (ne .Values.persistence.logsVolume.accessModes "ReadWriteOnce") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}-logs
+  namespace: {{ .Values.global.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.logsVolume.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.logsVolume.size }}
+  {{- if or .Values.global.storageClass .Values.persistence.logsVolume.storageClass }}
+  storageClassName: {{ .Values.persistence.logsVolume.storageClass | default .Values.global.storageClass }}
+  {{- end }}
+  volumeMode: Filesystem
+{{- end }}

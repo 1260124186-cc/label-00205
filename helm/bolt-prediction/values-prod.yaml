@@ -1,0 +1,187 @@
+global:
+  imageRegistry: "your-registry.example.com"
+  storageClass: "ssd-premium"
+  namespace: "bolt-prediction-prod"
+
+image:
+  repository: "bolt-prediction/backend"
+  tag: "1.0.0"
+  pullPolicy: "Always"
+
+api:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 15
+    targetCPUUtilizationPercentage: 60
+    targetMemoryUtilizationPercentage: 70
+    customMetrics:
+      - type: Pods
+        pods:
+          metric:
+            name: stream_ingest_qps
+          target:
+            type: AverageValue
+            averageValue: "800"
+
+  resources:
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+
+  rollingUpdate:
+    maxSurge: 2
+    maxUnavailable: 1
+
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+      nginx.ingress.kubernetes.io/rate-limit: "1000r/s"
+    hosts:
+      - host: api.bolt-prediction.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - hosts:
+          - api.bolt-prediction.example.com
+        secretName: bolt-prediction-tls
+
+streamConsumer:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 12
+    targetCPUUtilizationPercentage: 70
+    customMetrics:
+      - type: Pods
+        pods:
+          metric:
+            name: stream_ingest_qps
+          target:
+            type: AverageValue
+            averageValue: "3000"
+
+  resources:
+    limits:
+      cpu: "6"
+      memory: "12Gi"
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+worker:
+  replicaCount: 4
+  cron:
+    schedule: "*/15 * * * *"
+    activeDeadlineSeconds: 1800
+    backoffLimit: 3
+
+  resources:
+    limits:
+      cpu: "8"
+      memory: "16Gi"
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+
+scheduler:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+
+persistence:
+  modelVolume:
+    size: 50Gi
+  dataVolume:
+    size: 200Gi
+  logsVolume:
+    size: 50Gi
+    accessModes:
+      - ReadWriteMany
+
+mysql:
+  enabled: true
+  architecture: "replication"
+  auth:
+    rootPassword: ""
+    username: "bolt_user"
+    password: ""
+    database: "bolt_prediction"
+  primary:
+    persistence:
+      size: 200Gi
+    resources:
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+  secondary:
+    replicaCount: 2
+    persistence:
+      size: 200Gi
+    resources:
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+
+redis:
+  enabled: true
+  architecture: "replication"
+  auth:
+    password: ""
+  master:
+    persistence:
+      size: 50Gi
+    resources:
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+  replica:
+    replicaCount: 2
+    persistence:
+      size: 50Gi
+    resources:
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+
+secret:
+  create: false
+  name: "bolt-prediction-secret"
+
+serviceMonitor:
+  enabled: true
+  namespace: "monitoring"
+
+networkPolicy:
+  enabled: true

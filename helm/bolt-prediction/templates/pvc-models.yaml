@@ -1,0 +1,22 @@
+{{- if .Values.persistence.modelVolume.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}-models
+  namespace: {{ .Values.global.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: storage
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.modelVolume.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.modelVolume.size }}
+  {{- if or .Values.global.storageClass .Values.persistence.modelVolume.storageClass }}
+  storageClassName: {{ .Values.persistence.modelVolume.storageClass | default .Values.global.storageClass }}
+  {{- end }}
+  volumeMode: Filesystem
+{{- end }}

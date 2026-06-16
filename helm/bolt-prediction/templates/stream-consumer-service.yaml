@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bolt-prediction.fullname" . }}-stream-consumer
+  namespace: {{ .Values.global.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "bolt-prediction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: stream-consumer
+  annotations:
+    {{- toYaml .Values.streamConsumer.service.annotations | nindent 4 }}
+spec:
+  type: {{ .Values.streamConsumer.service.type }}
+  ports:
+    - port: {{ .Values.streamConsumer.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "bolt-prediction.componentSelectorLabels" (dict "component" "streamConsumer" "Values" .Values "Release" .Release "Chart" .Chart) | nindent 4 }}
