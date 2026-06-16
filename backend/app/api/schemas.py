@@ -3715,3 +3715,132 @@ class CarbonModelConfigUpdateRequest(BaseModel):
     operator_id: Optional[str] = Field(None, description="操作人ID")
     operator_name: Optional[str] = Field(None, description="操作人姓名")
     description: Optional[str] = Field(None, description="变更说明")
+
+
+# ============================================================
+# 合规与检验标准检查引擎
+# ============================================================
+
+class ChecklistItemSchema(BaseModel):
+    """检验清单条目"""
+    item_code: str = Field(..., description="检验项编码")
+    content: str = Field(..., description="检验内容")
+    is_mandatory: bool = Field(False, description="是否必检项")
+    severity: str = Field("medium", description="严重度 critical/high/medium/low")
+    inspection_method: Optional[str] = Field(None, description="检验方法")
+    acceptance_criteria: Optional[str] = Field(None, description="合格标准")
+    standard_code: Optional[str] = Field(None, description="所属标准编码")
+    standard_name: Optional[str] = Field(None, description="所属标准名称")
+    checked: bool = Field(False, description="是否已检验")
+    auto_checked: bool = Field(False, description="是否自动勾选")
+    result: Optional[str] = Field(None, description="检验结果 pass/fail/auto_required/na")
+    evidence: Optional[Dict[str, Any]] = Field(None, description="检验证据（含预测证据截图数据）")
+    inspector_id: Optional[str] = Field(None, description="检验人ID")
+    inspector_name: Optional[str] = Field(None, description="检验人姓名")
+    inspect_time: Optional[str] = Field(None, description="检验时间")
+    remarks: Optional[str] = Field(None, description="备注")
+
+
+class StandardTemplateCreateRequest(BaseModel):
+    """创建标准模板请求"""
+    code: str = Field(..., min_length=1, max_length=64, description="标准编码")
+    name: str = Field(..., min_length=1, max_length=256, description="标准名称")
+    description: Optional[str] = Field(None, description="标准描述")
+    version: Optional[str] = Field("1.0", description="标准版本")
+    category: Optional[str] = Field("general", description="装置类别")
+    checklist_items: List[ChecklistItemSchema] = Field(default_factory=list, description="检验清单条目")
+
+
+class StandardTemplateUpdateRequest(BaseModel):
+    """更新标准模板请求"""
+    name: Optional[str] = Field(None, max_length=256)
+    description: Optional[str] = None
+    version: Optional[str] = None
+    category: Optional[str] = None
+    checklist_items: Optional[List[ChecklistItemSchema]] = None
+
+
+class StandardTemplateResponse(BaseModel):
+    """标准模板响应"""
+    id: Optional[int] = None
+    code: str
+    name: str
+    description: Optional[str] = None
+    version: Optional[str] = None
+    category: Optional[str] = None
+    checklist_items: List[ChecklistItemSchema] = Field(default_factory=list)
+    create_time: Optional[str] = None
+    update_time: Optional[str] = None
+
+
+class StandardTemplateListResponse(BaseModel):
+    """标准模板列表响应"""
+    total: int
+    items: List[StandardTemplateResponse]
+
+
+class InspectionTaskCreateRequest(BaseModel):
+    """创建检验任务请求"""
+    work_order_id: int = Field(..., description="关联工单ID")
+    equipment_type: str = Field(..., description="装置类型")
+    standard_codes: Optional[List[str]] = Field(None, description="适用标准编码列表（空则按装置类型自动匹配）")
+    node_type: Optional[str] = Field(None, description="节点类型 bolt/flange")
+    node_id: Optional[str] = Field(None, description="节点ID")
+    alert_level: Optional[int] = Field(None, ge=1, le=4, description="关联预警级别")
+    auto_check_mandatory: bool = Field(True, description="紧急预警时是否自动勾选必检项")
+
+
+class InspectionItemCheckRequest(BaseModel):
+    """检验项勾选请求"""
+    item_code: str = Field(..., description="检验项编码")
+    result: str = Field(..., description="检验结果 pass/fail/na")
+    inspector_id: Optional[str] = Field(None, description="检验人ID")
+    inspector_name: Optional[str] = Field(None, description="检验人姓名")
+    evidence: Optional[Dict[str, Any]] = Field(None, description="检验证据（含预测证据截图数据字段）")
+    remarks: Optional[str] = Field(None, description="备注")
+
+
+class AutoCheckMandatoryRequest(BaseModel):
+    """自动勾选必检项请求"""
+    alert_level: int = Field(..., ge=1, le=4, description="预警级别")
+    prediction_evidence: Optional[Dict[str, Any]] = Field(None, description="预测证据数据（含截图数据）")
+
+
+class InspectionTaskResponse(BaseModel):
+    """检验任务响应"""
+    id: int
+    task_no: str
+    work_order_id: Optional[int] = None
+    equipment_type: Optional[str] = None
+    standard_codes: List[str] = Field(default_factory=list)
+    checklist_items: List[ChecklistItemSchema] = Field(default_factory=list)
+    node_type: Optional[str] = None
+    node_id: Optional[str] = None
+    alert_level: Optional[int] = None
+    completion_score: float = 0.0
+    status: str = "pending"
+    auto_check_mandatory: bool = True
+    create_time: Optional[str] = None
+    update_time: Optional[str] = None
+
+
+class InspectionTaskListResponse(BaseModel):
+    """检验任务列表响应"""
+    total: int
+    items: List[InspectionTaskResponse]
+
+
+class WorkOrderCloseCheckResponse(BaseModel):
+    """工单关闭检查响应"""
+    can_close: bool
+    completion_score: float = 0.0
+    min_required_score: float = 80.0
+    mandatory_unchecked: List[Dict[str, Any]] = Field(default_factory=list)
+    mandatory_unchecked_count: int = 0
+    reason: str = ""
+
+
+class InspectionPdfExportResponse(BaseModel):
+    """检验PDF导出响应"""
+    html_content: str = Field(..., description="HTML内容，可直接转PDF")
+    export_time: str

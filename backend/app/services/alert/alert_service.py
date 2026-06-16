@@ -321,6 +321,25 @@ class AlertService:
                         logger.info(
                             f"已为告警 {created.alert_no} 自动创建工单: {wo.order_no}"
                         )
+
+                        if created.alert_level >= 3:
+                            try:
+                                from app.services.compliance import ComplianceInspectionService
+                                compliance_service = ComplianceInspectionService()
+                                equipment_type = created.node_type or 'flange'
+                                compliance_service.create_inspection_task(
+                                    work_order_id=wo.id,
+                                    equipment_type=equipment_type,
+                                    node_type=created.node_type,
+                                    node_id=created.node_id,
+                                    alert_level=created.alert_level,
+                                    auto_check_mandatory=True,
+                                )
+                                logger.info(
+                                    f"已为工单 {wo.order_no} 自动创建合规检验任务"
+                                )
+                            except Exception as ce:
+                                logger.error(f"自动创建合规检验任务失败: {ce}")
                 except Exception as e:
                     logger.error(f"自动创建工单失败: {e}")
 

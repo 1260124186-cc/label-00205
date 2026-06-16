@@ -161,6 +161,11 @@ from app.api.schemas import (
     ESGReportSummarySchema, ESGTrendAnalysisSchema,
     CarbonModelConfigResponse, CarbonModelConfigUpdateRequest,
     DegradationParamsSchema, LeakageParamsSchema, EnergyCarbonParamsSchema,
+    ChecklistItemSchema,
+    StandardTemplateCreateRequest, StandardTemplateUpdateRequest, StandardTemplateResponse, StandardTemplateListResponse,
+    InspectionTaskCreateRequest, InspectionItemCheckRequest, AutoCheckMandatoryRequest,
+    InspectionTaskResponse, InspectionTaskListResponse,
+    WorkOrderCloseCheckResponse, InspectionPdfExportResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -9424,4 +9429,319 @@ async def update_carbon_model_config(request: CarbonModelConfigUpdateRequest):
         raise
     except Exception as e:
         logger.error(f"更新碳排模型配置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 合规与检验标准检查引擎 ====================
+
+def get_compliance_service():
+    from app.services.compliance import ComplianceInspectionService
+    return ComplianceInspectionService()
+
+
+@router.get(
+    "/compliance/templates",
+    response_model=StandardTemplateListResponse,
+    tags=["合规检验"],
+    summary="获取标准模板库列表",
+)
+async def list_standard_templates(
+    category: Optional[str] = Query(None, description="装置类别过滤"),
+):
+    try:
+        service = get_compliance_service()
+        templates = service.list_standard_templates(category=category)
+        return StandardTemplateListResponse(
+            total=len(templates),
+            items=[StandardTemplateResponse(**t) for t in templates],
+        )
+    except Exception as e:
+        logger.error(f"获取标准模板列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/compliance/templates/{code}",
+    response_model=StandardTemplateResponse,
+    tags=["合规检验"],
+    summary="获取标准模板详情",
+)
+async def get_standard_template(code: str):
+    try:
+        service = get_compliance_service()
+        template = service.get_standard_template(code)
+        if not template:
+            raise HTTPException(status_code=404, detail=f"标准模板 {code} 不存在")
+        return StandardTemplateResponse(**template)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取标准模板详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/compliance/templates",
+    response_model=StandardTemplateResponse,
+    tags=["合规检验"],
+    summary="创建标准模板",
+)
+async def create_standard_template(request: StandardTemplateCreateRequest):
+    try:
+        service = get_compliance_service()
+        template = service.create_standard_template(request.model_dump())
+        return StandardTemplateResponse(**template)
+    except Exception as e:
+        logger.error(f"创建标准模板失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/compliance/templates/{template_id}",
+    response_model=StandardTemplateResponse,
+    tags=["合规检验"],
+    summary="更新标准模板",
+)
+async def update_standard_template(template_id: int, request: StandardTemplateUpdateRequest):
+    try:
+        service = get_compliance_service()
+        template = service.update_standard_template(template_id, request.model_dump(exclude_unset=True))
+        if not template:
+            raise HTTPException(status_code=404, detail="标准模板不存在")
+        return StandardTemplateResponse(**template)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新标准模板失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/compliance/templates/{template_id}",
+    tags=["合规检验"],
+    summary="删除标准模板（软删除）",
+)
+async def delete_standard_template(template_id: int):
+    try:
+        service = get_compliance_service()
+        success = service.delete_standard_template(template_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="标准模板不存在")
+        return {"message": "删除成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除标准模板失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/compliance/checklist/{equipment_type}",
+    tags=["合规检验"],
+    summary="按装置类型加载检查清单",
+)
+async def load_checklist_by_equipment_type(equipment_type: str):
+    try:
+        service = get_compliance_service()
+        items = service.load_checklist_by_equipment_type(equipment_type)
+        return {"equipment_type": equipment_type, "items": items, "total": len(items)}
+    except Exception as e:
+        logger.error(f"加载检查清单失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/compliance/inspection/tasks",
+    response_model=InspectionTaskResponse,
+    tags=["合规检验"],
+    summary="创建检验任务",
+)
+async def create_inspection_task(request: InspectionTaskCreateRequest):
+    try:
+        service = get_compliance_service()
+        task = service.create_inspection_task(
+            work_order_id=request.work_order_id,
+            equipment_type=request.equipment_type,
+            standard_codes=request.standard_codes,
+            node_type=request.node_type,
+            node_id=request.node_id,
+            alert_level=request.alert_level,
+            auto_check_mandatory=request.auto_check_mandatory,
+        )
+        return InspectionTaskResponse(**task)
+    except Exception as e:
+        logger.error(f"创建检验任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/compliance/inspection/tasks",
+    response_model=InspectionTaskListResponse,
+    tags=["合规检验"],
+    summary="查询检验任务列表",
+)
+async def list_inspection_tasks(
+    status: Optional[str] = Query(None, description="状态过滤 pending/in_progress/completed"),
+    equipment_type: Optional[str] = Query(None, description="装置类型过滤"),
+    work_order_id: Optional[int] = Query(None, description="工单ID过滤"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    try:
+        service = get_compliance_service()
+        result = service.list_inspection_tasks(
+            status=status,
+            equipment_type=equipment_type,
+            work_order_id=work_order_id,
+            limit=limit,
+            offset=offset,
+        )
+        return InspectionTaskListResponse(
+            total=result["total"],
+            items=[InspectionTaskResponse(**t) for t in result["items"]],
+        )
+    except Exception as e:
+        logger.error(f"查询检验任务列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/compliance/inspection/tasks/{task_id}",
+    response_model=InspectionTaskResponse,
+    tags=["合规检验"],
+    summary="获取检验任务详情",
+)
+async def get_inspection_task(task_id: int):
+    try:
+        service = get_compliance_service()
+        task = service.get_inspection_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="检验任务不存在")
+        return InspectionTaskResponse(**task)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取检验任务详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/compliance/inspection/work-order/{work_order_id}",
+    response_model=InspectionTaskResponse,
+    tags=["合规检验"],
+    summary="根据工单ID获取检验任务",
+)
+async def get_inspection_task_by_work_order(work_order_id: int):
+    try:
+        service = get_compliance_service()
+        task = service.get_inspection_task_by_work_order(work_order_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="该工单无关联检验任务")
+        return InspectionTaskResponse(**task)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取工单检验任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/compliance/inspection/tasks/{task_id}/check",
+    response_model=InspectionTaskResponse,
+    tags=["合规检验"],
+    summary="勾选检验项",
+)
+async def check_inspection_item(task_id: int, request: InspectionItemCheckRequest):
+    try:
+        service = get_compliance_service()
+        task = service.check_inspection_item(
+            task_id=task_id,
+            item_code=request.item_code,
+            result=request.result,
+            inspector_id=request.inspector_id,
+            inspector_name=request.inspector_name,
+            evidence=request.evidence,
+            remarks=request.remarks,
+        )
+        if not task:
+            raise HTTPException(status_code=404, detail="检验任务或检验项不存在")
+        return InspectionTaskResponse(**task)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"勾选检验项失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/compliance/inspection/tasks/{task_id}/auto-check",
+    response_model=InspectionTaskResponse,
+    tags=["合规检验"],
+    summary="紧急预警自动勾选必检项",
+)
+async def auto_check_mandatory_items(task_id: int, request: AutoCheckMandatoryRequest):
+    try:
+        service = get_compliance_service()
+        task = service.auto_check_mandatory_items(
+            task_id=task_id,
+            alert_level=request.alert_level,
+            prediction_evidence=request.prediction_evidence,
+        )
+        if not task:
+            raise HTTPException(status_code=404, detail="检验任务不存在")
+        return InspectionTaskResponse(**task)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"自动勾选必检项失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/compliance/inspection/tasks/{task_id}/score",
+    tags=["合规检验"],
+    summary="获取检验完成度评分",
+)
+async def get_completion_score(task_id: int):
+    try:
+        service = get_compliance_service()
+        score = service.calculate_completion_score(task_id)
+        return {"task_id": task_id, "completion_score": score}
+    except Exception as e:
+        logger.error(f"获取完成度评分失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/compliance/work-order/{work_order_id}/close-check",
+    response_model=WorkOrderCloseCheckResponse,
+    tags=["合规检验"],
+    summary="检查工单是否可以关闭",
+)
+async def check_work_order_close(work_order_id: int):
+    try:
+        service = get_compliance_service()
+        result = service.can_close_work_order(work_order_id)
+        return WorkOrderCloseCheckResponse(**result)
+    except Exception as e:
+        logger.error(f"检查工单关闭条件失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/compliance/inspection/tasks/{task_id}/export-pdf",
+    response_model=InspectionPdfExportResponse,
+    tags=["合规检验"],
+    summary="导出PDF检验报告",
+)
+async def export_inspection_pdf(task_id: int):
+    try:
+        service = get_compliance_service()
+        html_content = service.generate_pdf_html(task_id)
+        return InspectionPdfExportResponse(
+            html_content=html_content,
+            export_time=datetime.now().isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"导出PDF检验报告失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

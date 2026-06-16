@@ -308,6 +308,7 @@ class WorkOrderService:
         operator_id: str = None,
         operator_name: str = None,
         note: str = None,
+        skip_compliance_check: bool = False,
     ) -> Optional[WorkOrder]:
         """
         更新工单状态
@@ -318,6 +319,7 @@ class WorkOrderService:
             operator_id: 操作人ID
             operator_name: 操作人姓名
             note: 备注
+            skip_compliance_check: 是否跳过合规检验检查（关闭工单时）
 
         Returns:
             更新后的工单
@@ -334,6 +336,20 @@ class WorkOrderService:
             ).first()
             if not wo:
                 return None
+
+            if status == 'closed' and not skip_compliance_check:
+                try:
+                    from app.services.compliance import ComplianceInspectionService
+                    compliance_service = ComplianceInspectionService()
+                    close_check = compliance_service.can_close_work_order(work_order_id)
+                    if not close_check['can_close']:
+                        raise ValueError(
+                            f"工单无法关闭: {close_check['reason']}"
+                        )
+                except ValueError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"合规检验关闭检查失败，跳过: {e}")
 
             wo.status = status
             if note:

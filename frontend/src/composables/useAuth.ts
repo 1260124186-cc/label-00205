@@ -29,7 +29,7 @@ export function useAuth() {
   const displayName = computed<string>(() => currentUser.value?.display_name || '未登录')
   const authMethod = computed(() => currentUser.value?.auth_method || 'none')
 
-  const availableViews = computed<Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon'>>(() => {
+  const availableViews = computed<Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon' | 'compliance'>>(() => {
     const role = userRole.value
     return RoleViewPermissions[role] || []
   })
@@ -41,6 +41,7 @@ export function useAuth() {
   const canViewConfig = computed(() => availableViews.value.includes('config'))
   const canViewFederated = computed(() => availableViews.value.includes('federated'))
   const canViewCarbon = computed(() => availableViews.value.includes('carbon'))
+  const canViewCompliance = computed(() => availableViews.value.includes('compliance'))
 
   const canWrite = computed(() => {
     const perms = permissions.value
@@ -210,6 +211,7 @@ export function useAuth() {
     canViewConfig,
     canViewFederated,
     canViewCarbon,
+    canViewCompliance,
     canWrite,
     isAdmin,
     isOperator,

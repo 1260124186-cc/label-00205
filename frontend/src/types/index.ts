@@ -792,13 +792,13 @@ export interface APIKeyLoginRequest {
 }
 
 // 角色到视图的映射（哪些角色可以看到哪些导航页面）
-export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon'>> = {
-  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon'],
-  admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon'],
-  operator: ['monitoring', 'alert', 'trend', 'model', 'carbon'],
-  viewer: ['monitoring', 'alert', 'trend', 'carbon'],
+export const RoleViewPermissions: Record<UserRole, Array<'monitoring' | 'alert' | 'trend' | 'model' | 'config' | 'federated' | 'carbon' | 'compliance'>> = {
+  tenant_admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance'],
+  admin: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance'],
+  operator: ['monitoring', 'alert', 'trend', 'model', 'carbon', 'compliance'],
+  viewer: ['monitoring', 'alert', 'trend', 'carbon', 'compliance'],
   anonymous: [],
-  api_key: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon']
+  api_key: ['monitoring', 'alert', 'trend', 'model', 'config', 'federated', 'carbon', 'compliance']
 }
 
 // 角色到权限的映射
@@ -1223,3 +1223,121 @@ export const CarbonViewModeMap: Record<CarbonViewMode, string> = {
   esg: 'ESG 报表导出',
   config: '模型系数配置'
 }
+
+// ==================== 合规与检验标准检查引擎 ====================
+
+export interface ChecklistItem {
+  item_code: string
+  content: string
+  is_mandatory: boolean
+  severity: 'critical' | 'high' | 'medium' | 'low'
+  inspection_method?: string
+  acceptance_criteria?: string
+  standard_code?: string
+  standard_name?: string
+  checked: boolean
+  auto_checked: boolean
+  result?: 'pass' | 'fail' | 'auto_required' | 'na' | null
+  evidence?: Record<string, any>
+  inspector_id?: string
+  inspector_name?: string
+  inspect_time?: string
+  remarks?: string
+}
+
+export const SeverityMap: Record<string, string> = {
+  critical: '致命',
+  high: '严重',
+  medium: '中等',
+  low: '轻微'
+}
+
+export const SeverityColorMap: Record<string, string> = {
+  critical: '#ef4444',
+  high: '#f97316',
+  medium: '#eab308',
+  low: '#22c55e'
+}
+
+export const InspectionResultMap: Record<string, string> = {
+  pass: '合格',
+  fail: '不合格',
+  auto_required: '自动必检',
+  na: '不适用',
+}
+
+export const InspectionResultColorMap: Record<string, string> = {
+  pass: '#22c55e',
+  fail: '#ef4444',
+  auto_required: '#f97316',
+  na: '#64748b',
+}
+
+export interface StandardTemplate {
+  id: number | null
+  code: string
+  name: string
+  description?: string
+  version?: string
+  category?: string
+  checklist_items: ChecklistItem[]
+  create_time?: string
+  update_time?: string
+}
+
+export interface StandardTemplateListResponse {
+  total: number
+  items: StandardTemplate[]
+}
+
+export interface InspectionTask {
+  id: number
+  task_no: string
+  work_order_id?: number
+  equipment_type?: string
+  standard_codes: string[]
+  checklist_items: ChecklistItem[]
+  node_type?: string
+  node_id?: string
+  alert_level?: number
+  completion_score: number
+  status: 'pending' | 'in_progress' | 'completed'
+  auto_check_mandatory: boolean
+  create_time?: string
+  update_time?: string
+}
+
+export interface InspectionTaskListResponse {
+  total: number
+  items: InspectionTask[]
+}
+
+export interface WorkOrderCloseCheck {
+  can_close: boolean
+  completion_score: number
+  min_required_score: number
+  mandatory_unchecked: Array<{
+    item_code: string
+    content: string
+    severity: string
+  }>
+  mandatory_unchecked_count: number
+  reason: string
+}
+
+export interface InspectionPdfExportResponse {
+  html_content: string
+  export_time: string
+}
+
+export interface InspectionTaskCreateRequest {
+  work_order_id: number
+  equipment_type: string
+  standard_codes?: string[]
+  node_type?: string
+  node_id?: string
+  alert_level?: number
+  auto_check_mandatory?: boolean
+}
+
+export type ComplianceViewMode = 'templates' | 'tasks' | 'checklist'
