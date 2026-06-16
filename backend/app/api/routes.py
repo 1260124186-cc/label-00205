@@ -11880,7 +11880,7 @@ async def run_what_if_simulation(
     **口径对齐**:
     - HI 0-100，等级与 /health/calculate 完全一致
     - 劣化模型(linear/exponential/polynomial)与 /rul/predict 完全一致
-    - 风险评分(risk_score = 100 - HI)与 /risk/assess 完全一致
+    - 风险评分 1-10分（越高越安全），等级「低/中/高」（中文），与 /risk/assess 的 BayesianRiskModel 完全一致
     - RUL天数定义为首次穿越failure_threshold的天数，与RUL模块一致
     - 推荐措施与 /alert/retest/schedule 风格一致
     """

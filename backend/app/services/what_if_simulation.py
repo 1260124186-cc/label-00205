@@ -52,11 +52,10 @@ class HealthLevel(Enum):
 
 
 class RiskLevel(Enum):
-    """风险等级（与risk_model一致）"""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
+    """风险等级（与risk_model一致：中文，低/中/高）"""
+    LOW = "低"
+    MEDIUM = "中"
+    HIGH = "高"
 
 
 @dataclass
@@ -486,17 +485,21 @@ class WhatIfSimulator:
         if maint_recovery > 0:
             intervention_thr = thresholds["intervention_threshold"]
             hist_end_idx = len(parsed_history.day_offsets)
-            triggered = False
+            last_maint_idx = -999
+            maint_cooldown_days = 90
             for i in range(hist_end_idx, len(all_offsets)):
-                if not triggered and base_hi[i] <= intervention_thr:
-                    triggered = True
+                days_since_last_maint = i - last_maint_idx
+                if (
+                    days_since_last_maint >= maint_cooldown_days
+                    and base_hi[i] <= intervention_thr
+                ):
                     maint_idx = min(i + maint_delay, len(all_offsets) - 1)
                     if maint_idx < len(all_offsets):
                         base_hi[maint_idx:] += maint_recovery
                         maint_day_from_base = int(round(all_offsets[maint_idx] - last_hist_offset))
                         maintenance_days.add(maint_day_from_base)
                         base_hi = np.clip(base_hi, 0.0, 100.0)
-                        triggered = False
+                        last_maint_idx = maint_idx
 
         noise_level = float(hypothesis.get("noise_level", 0.0))
         if noise_level > 0:
@@ -882,7 +885,7 @@ class WhatIfSimulator:
         his = [p["predicted_hi"] for p in trajectory]
         risk_scores = [p["risk_score"] for p in trajectory]
         high_risk_days = sum(
-            1 for p in trajectory if p["risk_level"] in {"high", "critical"}
+            1 for p in trajectory if p["risk_level"] == "高"
         )
 
         failure_cross = first_crossings.get("failure", {})
@@ -908,7 +911,7 @@ class WhatIfSimulator:
             "avg_degradation_rate": round(avg_rate, 4),
             "rul_days": rul_days,
             "rul_confidence": rul_confidence,
-            "total_risk_exposure": round(sum(risk_scores), 2),
+            "total_risk_exposure": round(sum(11.0 - s for s in risk_scores), 2),
             "high_risk_days": high_risk_days,
             "maintenance_count": maintenance_count,
         }
@@ -1113,18 +1116,28 @@ class WhatIfSimulator:
 
     @staticmethod
     def _hi_to_risk_score(hi: float, thresholds: Dict[str, float]) -> float:
-        """HI → 风险评分"""
-        score = 100.0 - hi
-        return float(np.clip(score, 0, 100))
+        """HI → 风险评分（与BayesianRiskModel口径一致：1-10分，越高越安全）
+
+        BayesianRiskModel 口径:
+        - risk_score = weighted_score * 9 + 1 → [1, 10]
+        - 1-3分: 高风险
+        - 4-7分: 中风险
+        - 8-10分: 低风险
+        """
+        score = 1.0 + hi * 0.09
+        return float(np.clip(score, 1.0, 10.0))
 
     @staticmethod
     def _risk_score_to_level(score: float) -> str:
-        """风险评分 → 风险等级"""
-        if score >= 70:
-            return RiskLevel.CRITICAL.value
-        elif score >= 50:
+        """风险评分 → 风险等级（与BayesianRiskModel口径一致：中文）
+
+        - 高风险: score ≤ 3
+        - 中风险: 3 < score ≤ 7
+        - 低风险: score > 7
+        """
+        if score <= 3.0:
             return RiskLevel.HIGH.value
-        elif score >= 30:
+        elif score <= 7.0:
             return RiskLevel.MEDIUM.value
         else:
             return RiskLevel.LOW.value

@@ -5068,11 +5068,11 @@ class SimulatedTrajectoryPointSchema(BaseModel):
     )
     risk_level: str = Field(
         ...,
-        description="风险等级: low/medium/high/critical，与风险评估模块一致"
+        description="风险等级: 低/中/高，与BayesianRiskModel一致"
     )
     risk_score: float = Field(
         ...,
-        description="风险评分 0-100，与风险评估模块一致（越高越危险）"
+        description="风险评分 1-10，与BayesianRiskModel一致（越高越安全）"
     )
     temperature_effect: Optional[float] = Field(
         None,
@@ -5120,7 +5120,7 @@ class RiskLevelTimelineItemSchema(BaseModel):
     """
     风险等级时间线条目
     """
-    risk_level: str = Field(..., description="风险等级: low/medium/high/critical")
+    risk_level: str = Field(..., description="风险等级: 低/中/高")
     start_day_offset: int = Field(..., description="该风险等级起始偏移天数")
     end_day_offset: Optional[int] = Field(
         None,
@@ -5201,11 +5201,11 @@ class ScenarioSummarySchema(BaseModel):
     )
     total_risk_exposure: float = Field(
         ...,
-        description="总风险暴露量 = Σ(每日风险评分)"
+        description="总风险暴露量 = Σ(11 - 每日风险评分)，越高越危险"
     )
     high_risk_days: int = Field(
         ...,
-        description="处于高/极高风险的总天数"
+        description="处于高风险（风险评分≤3分）的总天数"
     )
     maintenance_count: int = Field(
         ...,
@@ -5319,8 +5319,8 @@ class WhatIfSimulationResponse(BaseModel):
     base_date: datetime = Field(..., description="仿真基准日期（最后一个历史数据点的日期）")
     current_hi: float = Field(..., description="当前HI值（基准日）")
     current_hi_level: str = Field(..., description="当前HI等级")
-    current_risk_level: str = Field(..., description="当前风险等级")
-    current_risk_score: float = Field(..., description="当前风险评分")
+    current_risk_level: str = Field(..., description="当前风险等级: 低/中/高，与BayesianRiskModel一致")
+    current_risk_score: float = Field(..., description="当前风险评分 1-10，与BayesianRiskModel一致（越高越安全）")
 
     thresholds: SimulationThresholdsSchema = Field(
         ...,
