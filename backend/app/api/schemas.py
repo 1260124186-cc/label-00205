@@ -4834,3 +4834,510 @@ class IncrementalUpdateSchema(BaseModel):
     """增量更新"""
     type: str
     data: Dict[str, Any]
+
+
+# ============================================================
+# What-if 情景仿真引擎
+# ============================================================
+
+# ---------- 情景假设参数 ----------
+
+class SimulationScenarioHypothesis(BaseModel):
+    """
+    情景仿真假设参数
+
+    Attributes:
+        slope_adjustment: 斜率调整系数（相对历史斜率），1.0=不变，>1.0=加速劣化，<1.0=减缓劣化
+        step_changes: 阶跃变化列表，每项为 {day_offset, hi_delta}，表示从某天起HI发生阶跃
+        noise_level: 噪声水平标准差（HI单位），0=无噪声
+        temperature_scenario: 温度场景名称，如 normal/high/extreme/custom，或具体温度值数组
+    """
+    slope_adjustment: Optional[float] = Field(
+        1.0,
+        description="斜率调整系数（相对历史斜率），1.0=维持原状，>1.0=加速劣化，<1.0=减缓劣化",
+        ge=0.0,
+        le=5.0
+    )
+    step_changes: Optional[List[Dict[str, float]]] = Field(
+        default_factory=list,
+        description="阶跃变化列表，每项为 {day_offset: 整数天, hi_delta: HI变化量}",
+        examples=[[
+            {"day_offset": 30, "hi_delta": -5.0},
+            {"day_offset": 90, "hi_delta": -10.0},
+        ]]
+    )
+    noise_level: Optional[float] = Field(
+        0.0,
+        description="噪声水平（标准差，HI单位），0=无噪声，建议范围0~5",
+        ge=0.0,
+        le=20.0
+    )
+    temperature_scenario: Optional[str] = Field(
+        "normal",
+        description="温度场景: normal/高温(high)/极端高温(extreme)/低温(cold)/自定义(custom)，"
+                    "或直接传具体日均温度数组JSON（配合 temperature_values 使用）"
+    )
+    temperature_values: Optional[List[float]] = Field(
+        None,
+        description="自定义温度序列（当 temperature_scenario=custom 时使用），单位°C，长度应覆盖 forecast_days"
+    )
+    humidity_scenario: Optional[str] = Field(
+        "normal",
+        description="湿度场景: normal/高湿(high)/低湿(low)/自定义(custom)"
+    )
+    vibration_scenario: Optional[str] = Field(
+        "normal",
+        description="振动场景: normal/增强(elevated)/剧烈(severe)/自定义(custom)"
+    )
+    maintenance_delay_days: Optional[int] = Field(
+        0,
+        description="维护延迟天数，0=正常维护，正值=延迟维护天数",
+        ge=0,
+        le=365
+    )
+    maintenance_recovery_hi: Optional[float] = Field(
+        30.0,
+        description="维护后HI恢复量（加到当前HI），0=不进行维护",
+        ge=0,
+        le=80
+    )
+    custom_notes: Optional[str] = Field(
+        None,
+        description="情景备注说明，用于批量对比时区分不同情景"
+    )
+
+
+# ---------- 阈值配置 ----------
+
+class SimulationThresholdsSchema(BaseModel):
+    """
+    仿真阈值配置（与现有RUL/风险模块口径一致）
+    """
+    failure_threshold: float = Field(
+        30.0,
+        description="故障阈值HI（低于此值视为故障），与RUL模块一致",
+        ge=0,
+        le=100
+    )
+    warning_threshold: float = Field(
+        50.0,
+        description="预警阈值HI（低于此值需要关注），与RUL模块一致",
+        ge=0,
+        le=100
+    )
+    intervention_threshold: float = Field(
+        60.0,
+        description="建议干预阈值HI（低于此值建议主动干预）",
+        ge=0,
+        le=100
+    )
+    excellent_threshold: float = Field(
+        90.0,
+        description="优秀阈值，与健康等级一致",
+        ge=0,
+        le=100
+    )
+    good_threshold: float = Field(
+        70.0,
+        description="良好阈值",
+        ge=0,
+        le=100
+    )
+    fair_threshold: float = Field(
+        50.0,
+        description="一般阈值",
+        ge=0,
+        le=100
+    )
+    poor_threshold: float = Field(
+        30.0,
+        description="差阈值",
+        ge=0,
+        le=100
+    )
+
+
+# ---------- 单个情景请求 ----------
+
+class WhatIfScenarioRequest(BaseModel):
+    """
+    单个 What-if 情景请求
+    """
+    scenario_id: Optional[str] = Field(
+        None,
+        description="情景ID（用于批量对比时唯一标识），不传则自动生成"
+    )
+    scenario_name: Optional[str] = Field(
+        None,
+        description="情景名称（展示用），如 '正常维护' / '延迟30天维护' / '高温加速劣化'"
+    )
+    hypothesis: SimulationScenarioHypothesis = Field(
+        ...,
+        description="情景假设参数"
+    )
+    forecast_days: Optional[int] = Field(
+        180,
+        description="预测仿真天数",
+        ge=1,
+        le=730
+    )
+    degradation_model: Optional[str] = Field(
+        None,
+        description="劣化模型类型: linear/exponential/polynomial，None则自动选择最优，与RUL模块一致"
+    )
+    seed: Optional[int] = Field(
+        42,
+        description="随机种子，用于噪声复现"
+    )
+
+
+# ---------- 主请求 ----------
+
+class WhatIfSimulationRequest(BaseModel):
+    """
+    What-if 情景仿真请求（支持批量情景对比）
+
+    Attributes:
+        node_id: 节点ID（螺栓或法兰面）
+        node_type: 节点类型 bolt/flange
+        history_sequence: 历史HI/预紧力序列 [[时间戳, HI值或预紧力值], ...]
+        history_type: 历史数据类型 hi（健康度指数）/ preload（预紧力值）
+        scenarios: 多个情景假设列表，用于批量对比（如正常维护 vs 延迟维护）
+        thresholds: 可选自定义阈值，不传则使用系统默认
+        nominal_preload: 额定预紧力（当 history_type=preload 时用于换算HI）
+        working_condition: 基准工况信息（可选）
+    """
+    node_id: str = Field(..., description="节点ID（螺栓或法兰面）")
+    node_type: str = Field(..., description="节点类型: bolt/flange")
+
+    history_sequence: List[List[Any]] = Field(
+        ...,
+        description="历史时序数据 [[时间戳, 数值], ...]，可以是HI序列或预紧力序列",
+        min_length=3
+    )
+    history_type: Optional[str] = Field(
+        "hi",
+        description="历史数据类型: hi=健康度指数(0-100) / preload=预紧力值(kN)",
+        pattern="^(hi|preload)$"
+    )
+
+    scenarios: List[WhatIfScenarioRequest] = Field(
+        ...,
+        description="多个仿真情景列表，支持批量对比（如正常维护vs延迟维护）",
+        min_length=1
+    )
+
+    thresholds: Optional[SimulationThresholdsSchema] = Field(
+        None,
+        description="自定义阈值配置，不传则使用与RUL模块一致的默认值"
+    )
+    nominal_preload: Optional[float] = Field(
+        600.0,
+        description="额定预紧力(kN)，当 history_type=preload 时用于换算HI"
+    )
+    working_condition: Optional[Dict[str, Any]] = Field(
+        None,
+        description="基准工况: temperature/humidity/vibration/load_condition 等"
+    )
+    use_db_history: Optional[bool] = Field(
+        False,
+        description="是否优先使用数据库中的历史HI数据，True时history_sequence可缩短或仅作补充"
+    )
+    use_history_days: Optional[int] = Field(
+        90,
+        description="当 use_db_history=True 时，使用多少天数据库历史数据",
+        ge=7,
+        le=365
+    )
+
+
+# ---------- 输出数据结构 ----------
+
+class SimulatedTrajectoryPointSchema(BaseModel):
+    """
+    模拟轨迹点（与RUL的 forecast_series 口径一致）
+    """
+    date: datetime = Field(..., description="日期时间")
+    day_offset: int = Field(..., description="相对于仿真起始日的偏移天数")
+    predicted_hi: float = Field(..., description="模拟HI值，0-100")
+    lower_bound: float = Field(..., description="HI下限（置信区间）")
+    upper_bound: float = Field(..., description="HI上限（置信区间）")
+    hi_level: str = Field(
+        ...,
+        description="HI等级: excellent/good/fair/poor/critical，与健康度模块一致"
+    )
+    risk_level: str = Field(
+        ...,
+        description="风险等级: low/medium/high/critical，与风险评估模块一致"
+    )
+    risk_score: float = Field(
+        ...,
+        description="风险评分 0-100，与风险评估模块一致（越高越危险）"
+    )
+    temperature_effect: Optional[float] = Field(
+        None,
+        description="温度对HI的贡献/影响量（正/负）"
+    )
+    maintenance_applied: Optional[bool] = Field(
+        False,
+        description="该时间点是否执行了维护"
+    )
+    is_prediction: bool = Field(
+        True,
+        description="是否为预测值（历史拟合段为False，未来仿真段为True）"
+    )
+
+
+class FirstThresholdCrossingSchema(BaseModel):
+    """
+    首次触阈信息
+    """
+    threshold_name: str = Field(..., description="阈值名称: intervention/warning/failure")
+    threshold_value: float = Field(..., description="阈值HI值")
+    crossing_date: Optional[datetime] = Field(
+        None,
+        description="首次穿越阈值的日期，None表示仿真期内未触及"
+    )
+    crossing_day_offset: Optional[int] = Field(
+        None,
+        description="首次穿越阈值的偏移天数，None表示仿真期内未触及"
+    )
+    hi_at_crossing: Optional[float] = Field(
+        None,
+        description="穿越时的HI值"
+    )
+    confidence: Optional[float] = Field(
+        None,
+        description="触阈时间置信度 0-1"
+    )
+    was_already_below: bool = Field(
+        False,
+        description="仿真开始时HI是否已低于该阈值"
+    )
+
+
+class RiskLevelTimelineItemSchema(BaseModel):
+    """
+    风险等级时间线条目
+    """
+    risk_level: str = Field(..., description="风险等级: low/medium/high/critical")
+    start_day_offset: int = Field(..., description="该风险等级起始偏移天数")
+    end_day_offset: Optional[int] = Field(
+        None,
+        description="该风险等级结束偏移天数，None表示至仿真结束"
+    )
+    start_date: datetime = Field(..., description="该风险等级起始日期")
+    end_date: Optional[datetime] = Field(
+        None,
+        description="该风险等级结束日期，None表示至仿真结束"
+    )
+    duration_days: int = Field(..., description="该风险等级持续天数")
+    hi_range: Dict[str, Optional[float]] = Field(
+        ...,
+        description="该时间段的HI范围 {min, max, avg}"
+    )
+
+
+class RecommendedInterventionSchema(BaseModel):
+    """
+    建议干预时间点
+    """
+    intervention_type: str = Field(
+        ...,
+        description="干预类型: preventive(预防性)/corrective(纠正性)/urgent(紧急)"
+    )
+    priority: str = Field(
+        ...,
+        description="优先级: low/medium/high/urgent"
+    )
+    recommended_date: Optional[datetime] = Field(
+        None,
+        description="建议执行日期，None表示无需干预"
+    )
+    recommended_day_offset: Optional[int] = Field(
+        None,
+        description="建议执行的偏移天数"
+    )
+    deadline_date: Optional[datetime] = Field(
+        None,
+        description="最晚执行日期（截止到预警阈值前）"
+    )
+    deadline_day_offset: Optional[int] = Field(
+        None,
+        description="最晚执行偏移天数"
+    )
+    reason: str = Field(..., description="建议理由")
+    expected_risk_reduction: Optional[float] = Field(
+        None,
+        description="执行干预后预期风险评分降低量"
+    )
+    maintenance_window_days: Optional[int] = Field(
+        None,
+        description="建议维护窗口（可灵活安排的天数范围）"
+    )
+    measures: List[str] = Field(
+        default_factory=list,
+        description="具体推荐措施列表，与预测/复检模块口径一致"
+    )
+
+
+class ScenarioSummarySchema(BaseModel):
+    """
+    单情景仿真汇总
+    """
+    final_hi: float = Field(..., description="仿真期末HI值")
+    min_hi: float = Field(..., description="仿真期内最低HI")
+    avg_degradation_rate: float = Field(
+        ...,
+        description="平均劣化速率（HI/天，负值表示下降）"
+    )
+    rul_days: Optional[float] = Field(
+        None,
+        description="剩余使用寿命（距故障阈值的天数），None表示仿真期内未到故障"
+    )
+    rul_confidence: Optional[float] = Field(
+        None,
+        description="RUL置信度 0-1，与RUL模块一致"
+    )
+    total_risk_exposure: float = Field(
+        ...,
+        description="总风险暴露量 = Σ(每日风险评分)"
+    )
+    high_risk_days: int = Field(
+        ...,
+        description="处于高/极高风险的总天数"
+    )
+    maintenance_count: int = Field(
+        ...,
+        description="情景内执行的维护次数"
+    )
+
+
+# ---------- 单个情景响应 ----------
+
+class WhatIfScenarioResultSchema(BaseModel):
+    """
+    单个 What-if 情景仿真结果
+    """
+    scenario_id: str = Field(..., description="情景ID")
+    scenario_name: str = Field(..., description="情景名称")
+    hypothesis: SimulationScenarioHypothesis = Field(..., description="使用的假设参数")
+
+    trajectory: List[SimulatedTrajectoryPointSchema] = Field(
+        ...,
+        description="模拟轨迹（含历史拟合段+未来仿真段）"
+    )
+
+    first_crossings: Dict[str, FirstThresholdCrossingSchema] = Field(
+        ...,
+        description="首次触阈信息，key=intervention/warning/failure"
+    )
+
+    risk_timeline: List[RiskLevelTimelineItemSchema] = Field(
+        ...,
+        description="风险等级时间线（按时间顺序排列）"
+    )
+
+    recommended_interventions: List[RecommendedInterventionSchema] = Field(
+        ...,
+        description="建议干预时间点列表（按优先级排序）"
+    )
+
+    summary: ScenarioSummarySchema = Field(
+        ...,
+        description="情景汇总指标"
+    )
+
+    degradation_model_used: str = Field(
+        ...,
+        description="实际使用的劣化模型类型: linear/exponential/polynomial"
+    )
+    model_r_squared: Optional[float] = Field(
+        None,
+        description="劣化模型拟合优度R²"
+    )
+    model_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="劣化模型参数（与RUL模块一致口径）"
+    )
+
+
+# ---------- 情景对比汇总 ----------
+
+class ScenarioComparisonItemSchema(BaseModel):
+    """
+    跨情景对比单项指标
+    """
+    metric_code: str = Field(..., description="指标编码，如 rul_days / first_warning_day / total_risk")
+    metric_name: str = Field(..., description="指标中文名")
+    unit: Optional[str] = Field(None, description="单位，如 天 / HI / 分")
+    scenario_values: Dict[str, Optional[float]] = Field(
+        ...,
+        description="各情景的指标值，key=scenario_id"
+    )
+    best_scenario_id: Optional[str] = Field(
+        None,
+        description="最优情景ID（RUL类越大越好，风险类越小越好）"
+    )
+    delta_vs_baseline: Optional[Dict[str, Optional[float]]] = Field(
+        None,
+        description="相对于第一个情景（通常为基准）的差值"
+    )
+
+
+class WhatIfScenarioComparisonSchema(BaseModel):
+    """
+    批量情景对比分析
+    """
+    baseline_scenario_id: str = Field(
+        ...,
+        description="基准情景ID（通常是第一个：正常维护）"
+    )
+    comparison_metrics: List[ScenarioComparisonItemSchema] = Field(
+        ...,
+        description="核心指标跨情景对比表"
+    )
+    recommendation_summary: str = Field(
+        ...,
+        description="综合推荐结论（文字说明）"
+    )
+    ranked_scenarios: List[Dict[str, Any]] = Field(
+        ...,
+        description="情景综合评分排名 [{scenario_id, score, rank, pros, cons}]"
+    )
+
+
+# ---------- 主响应 ----------
+
+class WhatIfSimulationResponse(BaseModel):
+    """
+    What-if 情景仿真响应
+    """
+    node_id: str = Field(..., description="节点ID")
+    node_type: str = Field(..., description="节点类型 bolt/flange")
+    simulation_time: datetime = Field(..., description="仿真执行时间")
+    base_date: datetime = Field(..., description="仿真基准日期（最后一个历史数据点的日期）")
+    current_hi: float = Field(..., description="当前HI值（基准日）")
+    current_hi_level: str = Field(..., description="当前HI等级")
+    current_risk_level: str = Field(..., description="当前风险等级")
+    current_risk_score: float = Field(..., description="当前风险评分")
+
+    thresholds: SimulationThresholdsSchema = Field(
+        ...,
+        description="本次仿真使用的阈值配置"
+    )
+
+    scenarios: List[WhatIfScenarioResultSchema] = Field(
+        ...,
+        description="各情景仿真结果列表（顺序与请求一致）"
+    )
+
+    comparison: Optional[WhatIfScenarioComparisonSchema] = Field(
+        None,
+        description="跨情景对比分析（当scenarios数量>=2时返回）"
+    )
+
+    data_quality_note: Optional[str] = Field(
+        None,
+        description="数据质量备注（如历史数据不足时的警告信息）"
+    )

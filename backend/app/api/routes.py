@@ -203,11 +203,20 @@ from app.api.schemas import (
     SignificantChangeRequest, SignificantChangeSliceSchema, SignificantChangeListResponse,
     SignificantChangeItemSchema,
     WSMessageSchema, IncrementalUpdateSchema,
+    # What-if 情景仿真
+    WhatIfSimulationRequest, WhatIfSimulationResponse,
+    SimulationScenarioHypothesis, SimulationThresholdsSchema,
+    WhatIfScenarioRequest, SimulatedTrajectoryPointSchema,
+    FirstThresholdCrossingSchema, RiskLevelTimelineItemSchema,
+    RecommendedInterventionSchema, ScenarioSummarySchema,
+    WhatIfScenarioResultSchema, ScenarioComparisonItemSchema,
+    WhatIfScenarioComparisonSchema,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
 from app.services.visualization_3d import Visualization3DService
 from app.services.risk_visualization.service import RiskVisualizationService
+from app.services.what_if_simulation import WhatIfSimulator
 from app.api.validators import (
     DataValidator,
     ValidationMode,
@@ -229,6 +238,7 @@ prediction_service = None
 training_service = None
 visualization_3d_service = None
 risk_visualization_service = None
+what_if_simulator = None
 federated_server = None
 federated_clients: Dict[str, Any] = {}
 
@@ -239,6 +249,14 @@ def get_prediction_service() -> PredictionService:
     if prediction_service is None:
         prediction_service = PredictionService()
     return prediction_service
+
+
+def get_what_if_simulator() -> WhatIfSimulator:
+    """获取What-if仿真引擎实例"""
+    global what_if_simulator
+    if what_if_simulator is None:
+        what_if_simulator = WhatIfSimulator()
+    return what_if_simulator
 
 
 def get_training_service() -> TrainingService:
@@ -11830,4 +11848,53 @@ async def detect_significant_changes(
         raise
     except Exception as e:
         logger.error(f"检测显著变化失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/simulation/what-if",
+    response_model=WhatIfSimulationResponse,
+    tags=["情景仿真"],
+    summary="What-if 情景仿真引擎"
+)
+async def run_what_if_simulation(
+    request: WhatIfSimulationRequest,
+):
+    """
+    What-if 情景仿真引擎
+
+    基于历史HI/预紧力序列，在不同情景假设下模拟未来劣化轨迹。
+
+    **输入**:
+    - 节点信息(node_id/node_type)
+    - 历史序列(HI或预紧力)
+    - 多情景列表(斜率调整、阶跃变化、噪声、温湿度/振动场景、维护策略)
+
+    **输出**:
+    - 模拟未来轨迹(含HI、风险、上下界、维护标记)
+    - 首次触阈时间(干预/预警/故障三个阈值)
+    - 风险等级时间线
+    - 建议干预时间点(预防性/纠正性/紧急三级)
+    - 批量情景对比(综合排名+推荐结论)
+
+    **口径对齐**:
+    - HI 0-100，等级与 /health/calculate 完全一致
+    - 劣化模型(linear/exponential/polynomial)与 /rul/predict 完全一致
+    - 风险评分(risk_score = 100 - HI)与 /risk/assess 完全一致
+    - RUL天数定义为首次穿越failure_threshold的天数，与RUL模块一致
+    - 推荐措施与 /alert/retest/schedule 风格一致
+    """
+    try:
+        simulator = get_what_if_simulator()
+        request_dict = request.model_dump()
+        result = simulator.run_simulation(request_dict)
+        return WhatIfSimulationResponse(**result)
+
+    except HTTPException:
+        raise
+    except ValueError as ve:
+        logger.warning(f"What-if仿真参数错误: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"What-if仿真执行失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
