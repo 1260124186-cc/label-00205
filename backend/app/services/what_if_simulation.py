@@ -58,6 +58,13 @@ class RiskLevel(Enum):
     HIGH = "高"
 
 
+class RiskStatus(Enum):
+    """风险状态（与复检排程模块一致：英文，normal/warning/critical）"""
+    NORMAL = "normal"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
 @dataclass
 class FittedModel:
     """拟合后的劣化模型"""
@@ -139,6 +146,8 @@ class WhatIfSimulator:
         current_hi_level = self._hi_to_level(current_hi, thresholds)
         current_risk_score = self._hi_to_risk_score(current_hi, thresholds)
         current_risk_level = self._risk_score_to_level(current_risk_score)
+        current_risk_score_100 = self._risk_score_10_to_100(current_risk_score)
+        current_risk_status = self._risk_level_to_status(current_risk_level)
 
         scenarios_request = request_data["scenarios"]
         scenario_results = []
@@ -184,6 +193,8 @@ class WhatIfSimulator:
             "current_hi_level": current_hi_level,
             "current_risk_level": current_risk_level,
             "current_risk_score": round(current_risk_score, 2),
+            "current_risk_status": current_risk_status,
+            "current_risk_score_100": round(current_risk_score_100, 2),
             "thresholds": thresholds,
             "scenarios": scenario_results,
             "comparison": comparison,
@@ -637,6 +648,8 @@ class WhatIfSimulator:
             hi_level = self._hi_to_level(hi, thresholds)
             risk_score = self._hi_to_risk_score(hi, thresholds)
             risk_level = self._risk_score_to_level(risk_score)
+            risk_score_100 = self._risk_score_10_to_100(risk_score)
+            risk_status = self._risk_level_to_status(risk_level)
 
             uncertainty = fitted_model.residuals_std * (
                 1.0 + abs(offset - last_hist_day) / max(forecast_days, 1) * 0.5
@@ -663,6 +676,8 @@ class WhatIfSimulator:
                 "hi_level": hi_level,
                 "risk_level": risk_level,
                 "risk_score": round(risk_score, 2),
+                "risk_status": risk_status,
+                "risk_score_100": round(risk_score_100, 2),
                 "temperature_effect": temp_eff_val,
                 "maintenance_applied": maint_applied,
                 "is_prediction": is_prediction,
@@ -735,6 +750,7 @@ class WhatIfSimulator:
 
         timeline = []
         current_level = trajectory[0]["risk_level"]
+        current_status = trajectory[0]["risk_status"]
         start_idx = 0
         n = len(trajectory)
 
@@ -748,6 +764,7 @@ class WhatIfSimulator:
                 is_last_segment = last_point
                 timeline.append({
                     "risk_level": current_level,
+                    "risk_status": current_status,
                     "start_day_offset": segment[0]["day_offset"],
                     "end_day_offset": segment[-1]["day_offset"] if not is_last_segment else None,
                     "start_date": segment[0]["date"],
@@ -762,6 +779,7 @@ class WhatIfSimulator:
 
                 if not last_point:
                     current_level = trajectory[i]["risk_level"]
+                    current_status = trajectory[i]["risk_status"]
                     start_idx = i
 
         return timeline
@@ -884,8 +902,15 @@ class WhatIfSimulator:
         """计算情景汇总指标"""
         his = [p["predicted_hi"] for p in trajectory]
         risk_scores = [p["risk_score"] for p in trajectory]
+        risk_scores_100 = [p["risk_score_100"] for p in trajectory]
         high_risk_days = sum(
             1 for p in trajectory if p["risk_level"] == "高"
+        )
+        critical_days = sum(
+            1 for p in trajectory if p["risk_status"] == "critical"
+        )
+        warning_days = sum(
+            1 for p in trajectory if p["risk_status"] == "warning"
         )
 
         failure_cross = first_crossings.get("failure", {})
@@ -913,6 +938,9 @@ class WhatIfSimulator:
             "rul_confidence": rul_confidence,
             "total_risk_exposure": round(sum(11.0 - s for s in risk_scores), 2),
             "high_risk_days": high_risk_days,
+            "total_risk_exposure_100": round(sum(risk_scores_100), 2),
+            "critical_days": critical_days,
+            "warning_days": warning_days,
             "maintenance_count": maintenance_count,
         }
 
@@ -1141,3 +1169,73 @@ class WhatIfSimulator:
             return RiskLevel.MEDIUM.value
         else:
             return RiskLevel.LOW.value
+
+    @staticmethod
+    def _risk_score_10_to_100(score_10: float) -> float:
+        """Bayesian 1-10分（越高越安全）→ 复检排程 0-100分（越高越危险）
+
+        线性映射: risk_100 = (10 - risk_10) / 9 * 100
+
+        对应关系:
+        - score_10=10 (最安全) → score_100=0
+        - score_10=5.5 (中间) → score_100=50
+        - score_10=1 (最危险) → score_100=100
+        """
+        score_100 = (10.0 - float(score_10)) / 9.0 * 100.0
+        return float(np.clip(score_100, 0.0, 100.0))
+
+    @staticmethod
+    def _risk_score_100_to_10(score_100: float) -> float:
+        """复检排程 0-100分（越高越危险）→ Bayesian 1-10分（越高越安全）
+
+        线性映射: risk_10 = 10 - risk_100 / 100 * 9
+
+        对应关系:
+        - score_100=0 → score_10=10
+        - score_100=50 → score_10=5.5
+        - score_100=100 → score_10=1
+        """
+        score_10 = 10.0 - float(score_100) / 100.0 * 9.0
+        return float(np.clip(score_10, 1.0, 10.0))
+
+    @staticmethod
+    def _risk_level_to_status(level: str) -> str:
+        """Bayesian中文等级（低/中/高）→ 复检排程英文状态（normal/warning/critical）
+
+        与 retest_service._risk_to_status 对齐:
+        - normal: 风险评分 < 40（对应 Bayesian 低风险 "低"）
+        - warning: 40 ≤ 风险评分 < 70（对应 Bayesian 中风险 "中"）
+        - critical: 风险评分 ≥ 70（对应 Bayesian 高风险 "高"）
+        """
+        if level == RiskLevel.HIGH.value:
+            return RiskStatus.CRITICAL.value
+        elif level == RiskLevel.MEDIUM.value:
+            return RiskStatus.WARNING.value
+        else:
+            return RiskStatus.NORMAL.value
+
+    @staticmethod
+    def _risk_status_to_level(status: str) -> str:
+        """复检排程英文状态（normal/warning/critical）→ Bayesian中文等级（低/中/高）"""
+        if status == RiskStatus.CRITICAL.value:
+            return RiskLevel.HIGH.value
+        elif status == RiskStatus.WARNING.value:
+            return RiskLevel.MEDIUM.value
+        else:
+            return RiskLevel.LOW.value
+
+    @staticmethod
+    def _risk_score_100_to_status(score_100: float) -> str:
+        """复检排程 0-100分 → 状态 normal/warning/critical
+
+        与 retest_service._risk_to_status 完全一致:
+        - ≥70: critical
+        - ≥40: warning
+        - <40: normal
+        """
+        if score_100 >= 70.0:
+            return RiskStatus.CRITICAL.value
+        elif score_100 >= 40.0:
+            return RiskStatus.WARNING.value
+        else:
+            return RiskStatus.NORMAL.value

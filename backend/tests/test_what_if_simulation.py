@@ -389,6 +389,219 @@ class TestRiskScoreCalibration:
             "Safe scenario should have lower total_risk_exposure"
         )
 
+    def test_risk_score_10_to_100_conversion_formula(self):
+        """验证 1-10 ↔ 0-100 双向转换公式正确性"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        test_cases = [
+            (10.0, 0.0),
+            (7.0, 33.3333),
+            (5.5, 50.0),
+            (3.0, 77.7778),
+            (1.0, 100.0),
+        ]
+
+        for score_10, expected_100 in test_cases:
+            actual_100 = WhatIfSimulator._risk_score_10_to_100(score_10)
+            assert abs(actual_100 - expected_100) < 0.01, (
+                f"10→100: score_10={score_10}, expected {expected_100}, got {actual_100}"
+            )
+
+            roundtrip = WhatIfSimulator._risk_score_100_to_10(actual_100)
+            assert abs(roundtrip - score_10) < 0.01, (
+                f"100→10 roundtrip: score_10={score_10}, got {roundtrip}"
+            )
+
+    def test_risk_score_100_range_clipping(self):
+        """验证 0-100 分范围裁剪"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        assert WhatIfSimulator._risk_score_10_to_100(11.0) == 0.0
+        assert WhatIfSimulator._risk_score_10_to_100(0.0) == 100.0
+        assert WhatIfSimulator._risk_score_100_to_10(110.0) == 1.0
+        assert WhatIfSimulator._risk_score_100_to_10(-10.0) == 10.0
+
+    def test_risk_level_to_status_mapping(self):
+        """验证中文等级 → 英文状态映射正确性"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        assert WhatIfSimulator._risk_level_to_status("低") == "normal"
+        assert WhatIfSimulator._risk_level_to_status("中") == "warning"
+        assert WhatIfSimulator._risk_level_to_status("高") == "critical"
+
+    def test_risk_status_to_level_mapping(self):
+        """验证英文状态 → 中文等级映射正确性"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        assert WhatIfSimulator._risk_status_to_level("normal") == "低"
+        assert WhatIfSimulator._risk_status_to_level("warning") == "中"
+        assert WhatIfSimulator._risk_status_to_level("critical") == "高"
+
+    def test_risk_score_100_to_status_thresholds(self):
+        """验证 0-100 分 → normal/warning/critical 阈值划分（与retest_service完全一致）"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        assert WhatIfSimulator._risk_score_100_to_status(39.9) == "normal"
+        assert WhatIfSimulator._risk_score_100_to_status(40.0) == "warning"
+        assert WhatIfSimulator._risk_score_100_to_status(69.9) == "warning"
+        assert WhatIfSimulator._risk_score_100_to_status(70.0) == "critical"
+        assert WhatIfSimulator._risk_score_100_to_status(100.0) == "critical"
+
+    def test_dual_system_consistency_end_to_end(self):
+        """端到端验证：轨迹中每个点的两套体系完全一致"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        sim = WhatIfSimulator()
+        history = [
+            ["2024-01-01", 95.0], ["2024-01-10", 85.0], ["2024-01-20", 75.0],
+            ["2024-02-01", 65.0], ["2024-02-10", 55.0], ["2024-02-20", 45.0],
+        ]
+        request = {
+            "node_id": "bolt_dual",
+            "node_type": "bolt",
+            "history_sequence": history,
+            "history_type": "hi",
+            "scenarios": [{
+                "scenario_id": "s1",
+                "scenario_name": "dual_test",
+                "hypothesis": {},
+                "forecast_days": 10,
+            }],
+        }
+        result = sim.run_simulation(request)
+
+        for point in result["scenarios"][0]["trajectory"]:
+            rs10 = point["risk_score"]
+            rs100 = point["risk_score_100"]
+            rl = point["risk_level"]
+            rs = point["risk_status"]
+
+            assert abs(WhatIfSimulator._risk_score_10_to_100(rs10) - rs100) < 0.1, (
+                f"Point {point['day_offset']}: risk_score={rs10}→{rs100} mismatch"
+            )
+            assert WhatIfSimulator._risk_level_to_status(rl) == rs, (
+                f"Point {point['day_offset']}: risk_level={rl}→{rs} mismatch"
+            )
+
+    def test_dual_system_current_state(self):
+        """验证当前状态的双口径字段都存在且一致"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        sim = WhatIfSimulator()
+        history = [
+            ["2024-01-01", 60.0], ["2024-01-10", 60.0], ["2024-01-20", 60.0],
+            ["2024-02-01", 60.0], ["2024-02-10", 60.0], ["2024-02-20", 60.0],
+        ]
+        request = {
+            "node_id": "bolt_curr",
+            "node_type": "bolt",
+            "history_sequence": history,
+            "history_type": "hi",
+            "scenarios": [{
+                "scenario_id": "s1",
+                "scenario_name": "current_test",
+                "hypothesis": {},
+                "forecast_days": 5,
+            }],
+        }
+        result = sim.run_simulation(request)
+
+        assert "current_risk_score" in result
+        assert "current_risk_score_100" in result
+        assert "current_risk_level" in result
+        assert "current_risk_status" in result
+
+        rs10 = result["current_risk_score"]
+        rs100 = result["current_risk_score_100"]
+        rl = result["current_risk_level"]
+        rs = result["current_risk_status"]
+
+        assert abs(WhatIfSimulator._risk_score_10_to_100(rs10) - rs100) < 0.1
+        assert WhatIfSimulator._risk_level_to_status(rl) == rs
+
+    def test_dual_system_summary_metrics(self):
+        """验证情景汇总的双口径统计指标"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        sim = WhatIfSimulator()
+        history = [
+            ["2024-01-01", 80.0], ["2024-01-10", 78.0], ["2024-01-20", 76.0],
+            ["2024-02-01", 74.0], ["2024-02-10", 72.0], ["2024-02-20", 70.0],
+        ]
+        request = {
+            "node_id": "bolt_sum",
+            "node_type": "bolt",
+            "history_sequence": history,
+            "history_type": "hi",
+            "scenarios": [{
+                "scenario_id": "s1",
+                "scenario_name": "summary_test",
+                "hypothesis": {},
+                "forecast_days": 30,
+            }],
+        }
+        result = sim.run_simulation(request)
+        summary = result["scenarios"][0]["summary"]
+        trajectory = result["scenarios"][0]["trajectory"]
+
+        assert "total_risk_exposure_100" in summary
+        assert "critical_days" in summary
+        assert "warning_days" in summary
+
+        expected_total_100 = round(sum(p["risk_score_100"] for p in trajectory), 2)
+        assert summary["total_risk_exposure_100"] == expected_total_100
+
+        expected_critical = sum(1 for p in trajectory if p["risk_status"] == "critical")
+        assert summary["critical_days"] == expected_critical
+
+        expected_warning = sum(1 for p in trajectory if p["risk_status"] == "warning")
+        assert summary["warning_days"] == expected_warning
+
+    def test_dual_system_risk_timeline(self):
+        """验证风险等级时间线包含双口径字段"""
+        from app.services.what_if_simulation import WhatIfSimulator
+
+        sim = WhatIfSimulator()
+        history = [
+            ["2024-01-01", 90.0], ["2024-01-10", 80.0], ["2024-01-20", 70.0],
+            ["2024-02-01", 60.0], ["2024-02-10", 50.0], ["2024-02-20", 40.0],
+        ]
+        request = {
+            "node_id": "bolt_tl",
+            "node_type": "bolt",
+            "history_sequence": history,
+            "history_type": "hi",
+            "scenarios": [{
+                "scenario_id": "s1",
+                "scenario_name": "timeline_test",
+                "hypothesis": {},
+                "forecast_days": 15,
+            }],
+        }
+        result = sim.run_simulation(request)
+        timeline = result["scenarios"][0]["risk_timeline"]
+
+        assert len(timeline) > 0
+        for item in timeline:
+            assert "risk_level" in item
+            assert "risk_status" in item
+            assert WhatIfSimulator._risk_level_to_status(item["risk_level"]) == item["risk_status"]
+
+    def test_consistency_with_retest_service_thresholds(self):
+        """验证与 retest_service._risk_to_status 阈值完全一致"""
+        from app.services.what_if_simulation import WhatIfSimulator
+        from app.services.alert.retest_service import RetestService
+
+        rs = RetestService()
+
+        test_scores = [0.0, 39.9, 40.0, 55.0, 69.9, 70.0, 85.0, 100.0]
+        for score_100 in test_scores:
+            sim_status = WhatIfSimulator._risk_score_100_to_status(score_100)
+            retest_status = rs._risk_to_status(score_100)
+            assert sim_status == retest_status, (
+                f"score_100={score_100}: sim={sim_status} vs retest={retest_status}"
+            )
+
 
 class TestWhatIfSimulatorCore:
     """仿真引擎核心功能测试"""

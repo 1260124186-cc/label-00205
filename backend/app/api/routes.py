@@ -11880,7 +11880,9 @@ async def run_what_if_simulation(
     **口径对齐**:
     - HI 0-100，等级与 /health/calculate 完全一致
     - 劣化模型(linear/exponential/polynomial)与 /rul/predict 完全一致
-    - 风险评分 1-10分（越高越安全），等级「低/中/高」（中文），与 /risk/assess 的 BayesianRiskModel 完全一致
+    - 风险评分体系一（BayesianRiskModel）：risk_score 1-10分（越高越安全），risk_level「低/中/高」（中文），与 /risk/assess 完全一致
+    - 风险评分体系二（复检排程）：risk_score_100 0-100分（越高越危险），risk_status normal/warning/critical（英文），与 /alert/retest 完全一致
+    - 双向映射：risk_score_100 = (10 - risk_score) / 9 × 100，risk_status = _risk_level_to_status(risk_level)
     - RUL天数定义为首次穿越failure_threshold的天数，与RUL模块一致
     - 推荐措施与 /alert/retest/schedule 风格一致
     """

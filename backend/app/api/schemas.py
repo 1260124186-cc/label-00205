@@ -5074,6 +5074,14 @@ class SimulatedTrajectoryPointSchema(BaseModel):
         ...,
         description="风险评分 1-10，与BayesianRiskModel一致（越高越安全）"
     )
+    risk_status: str = Field(
+        ...,
+        description="风险状态: normal/warning/critical，与复检排程模块一致"
+    )
+    risk_score_100: float = Field(
+        ...,
+        description="风险评分 0-100，与复检排程模块一致（越高越危险）"
+    )
     temperature_effect: Optional[float] = Field(
         None,
         description="温度对HI的贡献/影响量（正/负）"
@@ -5120,7 +5128,8 @@ class RiskLevelTimelineItemSchema(BaseModel):
     """
     风险等级时间线条目
     """
-    risk_level: str = Field(..., description="风险等级: 低/中/高")
+    risk_level: str = Field(..., description="风险等级: 低/中/高，与BayesianRiskModel一致")
+    risk_status: str = Field(..., description="风险状态: normal/warning/critical，与复检排程模块一致")
     start_day_offset: int = Field(..., description="该风险等级起始偏移天数")
     end_day_offset: Optional[int] = Field(
         None,
@@ -5201,11 +5210,23 @@ class ScenarioSummarySchema(BaseModel):
     )
     total_risk_exposure: float = Field(
         ...,
-        description="总风险暴露量 = Σ(11 - 每日风险评分)，越高越危险"
+        description="总风险暴露量 = Σ(11 - 每日风险评分)，越高越危险（Bayesian 1-10体系）"
     )
     high_risk_days: int = Field(
         ...,
-        description="处于高风险（风险评分≤3分）的总天数"
+        description="处于高风险（风险评分≤3分，即等级「高」）的总天数"
+    )
+    total_risk_exposure_100: float = Field(
+        ...,
+        description="总风险暴露量 = Σ(每日风险评分_100)，越高越危险（复检排程 0-100体系）"
+    )
+    critical_days: int = Field(
+        ...,
+        description="处于critical状态（风险评分_100≥70）的总天数"
+    )
+    warning_days: int = Field(
+        ...,
+        description="处于warning状态（40≤风险评分_100<70）的总天数"
     )
     maintenance_count: int = Field(
         ...,
@@ -5321,6 +5342,8 @@ class WhatIfSimulationResponse(BaseModel):
     current_hi_level: str = Field(..., description="当前HI等级")
     current_risk_level: str = Field(..., description="当前风险等级: 低/中/高，与BayesianRiskModel一致")
     current_risk_score: float = Field(..., description="当前风险评分 1-10，与BayesianRiskModel一致（越高越安全）")
+    current_risk_status: str = Field(..., description="当前风险状态: normal/warning/critical，与复检排程模块一致")
+    current_risk_score_100: float = Field(..., description="当前风险评分 0-100，与复检排程模块一致（越高越危险）")
 
     thresholds: SimulationThresholdsSchema = Field(
         ...,
