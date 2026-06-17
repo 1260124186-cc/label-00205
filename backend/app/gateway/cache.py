@@ -109,6 +109,45 @@ class OfflineCache:
             logger.debug(f"缓存添加: {count} 条, 当前缓存: {self.size} 条")
         return count
 
+    def add_points_to_head(self, points: List[DataPoint]) -> int:
+        """
+        添加数据点到缓存队首（用于续传失败后的优先重试）
+
+        Args:
+            points: 数据点列表
+
+        Returns:
+            int: 成功缓存的数量
+        """
+        if not points:
+            return 0
+
+        count = 0
+        with self._lock:
+            # 倒序插入队首
+            for point in reversed(points):
+                if len(self._memory_cache) >= self._max_memory_size:
+                    # 内存满了先刷一部分到磁盘，腾出队首空间
+                    last = self._memory_cache.pop()
+                    tmp = [last]
+                    while self._memory_cache:
+                        tmp.append(self._memory_cache.pop())
+                    self._flush_memory_to_disk()
+                    # tmp 是倒序出来的，重新 append 回去
+                    for p in reversed(tmp):
+                        self._memory_cache.append(p)
+
+                self._memory_cache.appendleft(point)
+                count += 1
+                self._total_cached += 1
+
+        if count > 0:
+            logger.debug(
+                f"缓存队首添加: {count} 条（续传失败重试）, "
+                f"当前缓存: {self.size} 条"
+            )
+        return count
+
     def add_point(self, point: DataPoint) -> bool:
         """
         添加单个数据点到缓存

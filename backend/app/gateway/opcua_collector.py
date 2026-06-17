@@ -107,6 +107,12 @@ class OPUACollector(BaseCollector):
     支持 OPC UA 协议的数据采集，提供两种模式：
     - 订阅模式：通过订阅机制实时获取数据变化
     - 轮询模式：定时轮询读取数据
+
+    证书策略：
+    - 如果传入了 cert_manager，则优先使用它：
+        1. 若 device_config.connection_config 指定了 cert_name，则按名称查找
+        2. 否则尝试获取默认证书（没有则自动生成）
+    - 没有 cert_manager 时，回退到配置中的 certificate_path / private_key_path
     """
 
     def __init__(
@@ -115,6 +121,7 @@ class OPUACollector(BaseCollector):
         data_callback: Optional[Callable[[List[DataPoint]], None]] = None,
         status_callback: Optional[Callable[[str, DeviceStatus, str], None]] = None,
         use_subscription: bool = True,
+        cert_manager: Optional[Any] = None,
     ):
         """
         初始化 OPC UA 采集器
@@ -124,6 +131,7 @@ class OPUACollector(BaseCollector):
             data_callback: 数据回调
             status_callback: 状态回调
             use_subscription: 是否使用订阅模式
+            cert_manager: 证书管理器（可选，推荐传入）
         """
         super().__init__(device_config, data_callback, status_callback)
 
@@ -132,9 +140,112 @@ class OPUACollector(BaseCollector):
         self._subscription = None
         self._subscribed_nodes = []
         self._node_cache: Dict[str, Any] = {}
+        self._cert_manager = cert_manager
 
         if not _has_opcua:
             logger.error("opcua 库未安装，OPC UA 采集器无法使用")
+
+    # ============ 证书解析 ============
+
+    def _resolve_certificate(
+        self,
+        security_mode: str,
+        security_policy: str,
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        解析用于安全连接的证书和私钥路径
+
+        优先级：
+        1. 显式 certificate_path/private_key_path
+        2. 通过 cert_manager 按 cert_name 加载
+        3. 通过 cert_manager 获取/生成默认证书
+        4. 返回 None（降级为无安全连接）
+
+        Args:
+            security_mode: 安全模式
+            security_policy: 安全策略
+
+        Returns:
+            (cert_path, key_path, server_cert_path)
+        """
+        if security_mode == 'None' or security_policy == 'None':
+            return None, None, None
+
+        conn_cfg = self._config.connection_config or {}
+
+        # 优先级1：显式文件路径
+        explicit_cert = conn_cfg.get('certificate_path')
+        explicit_key = conn_cfg.get('private_key_path')
+        if explicit_cert and explicit_key:
+            logger.debug(
+                f"OPC UA 使用显式证书: {explicit_cert}"
+            )
+            return (
+                explicit_cert,
+                explicit_key,
+                conn_cfg.get('server_certificate_path'),
+            )
+
+        # 没有 cert_manager → 无法获取证书
+        if self._cert_manager is None:
+            logger.warning(
+                f"设备 {self._config.device_id} 未提供证书路径，"
+                "且未接入证书管理器，将尝试无安全连接"
+            )
+            return None, None, None
+
+        # 优先级2：按 cert_name 加载
+        cert_name = conn_cfg.get('cert_name')
+        if cert_name:
+            cert_info = self._cert_manager.get_certificate(cert_name)
+            if cert_info is None:
+                logger.warning(
+                    f"未找到证书 {cert_name}，将尝试自动生成"
+                )
+                cert_info = self._cert_manager.generate_self_signed(
+                    cert_name=cert_name,
+                    common_name=f"Gateway-{self._config.device_id}",
+                )
+        else:
+            # 优先级3：获取默认证书，不存在则自动生成
+            cert_info = self._cert_manager.get_default_certificate()
+            if cert_info is None:
+                logger.info(
+                    f"未找到默认证书，为设备 {self._config.device_id} 自动生成"
+                )
+                cert_info = self._cert_manager.generate_self_signed(
+                    cert_name=self._cert_manager._default_cert_name,
+                    common_name=f"Industrial-Gateway-Default",
+                )
+
+        if cert_info is None:
+            logger.error("证书解析失败，无法建立安全连接")
+            return None, None, None
+
+        # 验证有效期，临近过期自动续期
+        resolved_cert_name = conn_cfg.get('cert_name') or self._cert_manager._default_cert_name
+        ok, msg = self._cert_manager.validate_certificate(resolved_cert_name)
+        if not ok:
+            logger.warning(f"证书校验异常: {msg}，尝试续期")
+            try:
+                cert_info = self._cert_manager.renew_certificate(
+                    cert_name=resolved_cert_name,
+                )
+            except Exception as e:
+                logger.error(f"证书续期失败: {e}")
+
+        # 临近过期告警
+        if cert_info.days_remaining <= 30:
+            logger.warning(
+                f"证书即将过期（剩余 {cert_info.days_remaining} 天），"
+                f"请及时续期"
+            )
+
+        server_cert_path = conn_cfg.get('server_certificate_path')
+        logger.debug(
+            f"OPC UA 使用证书管理器提供的证书: {cert_info.cert_path}"
+        )
+        return cert_info.cert_path, cert_info.key_path, server_cert_path
 
     # ============ 连接管理 ============
 
@@ -160,20 +271,33 @@ class OPUACollector(BaseCollector):
             # 创建客户端
             self._client = Client(url=url, timeout=self._config.timeout)
 
-            # 设置安全策略
+            # 设置安全策略（通过证书管理器优先解析）
             if security_mode != 'None':
-                cert_path = self._config.connection_config.get('certificate_path')
-                key_path = self._config.connection_config.get('private_key_path')
+                cert_path, key_path, server_cert = self._resolve_certificate(
+                    security_mode=security_mode,
+                    security_policy=security_policy,
+                )
 
                 if cert_path and key_path:
-                    self._client.set_security(
-                        getattr(ua, f'SecurityPolicy{security_policy}'),
-                        cert_path,
-                        key_path,
-                        server_certificate=None,
-                        mode=getattr(ua, f'MessageSecurityMode_{security_mode}'),
+                    try:
+                        self._client.set_security(
+                            getattr(ua, f'SecurityPolicy{security_policy}'),
+                            cert_path,
+                            key_path,
+                            server_certificate=server_cert,
+                            mode=getattr(ua, f'MessageSecurityMode_{security_mode}'),
+                        )
+                        logger.debug(
+                            f"OPC UA 安全模式已设置: {security_mode}/{security_policy}"
+                        )
+                    except Exception as sec_e:
+                        logger.warning(
+                            f"设置 OPC UA 安全策略失败，将尝试无安全连接: {sec_e}"
+                        )
+                else:
+                    logger.warning(
+                        "未获取到可用证书，将降级为无安全连接"
                     )
-                    logger.debug(f"OPC UA 安全模式: {security_mode}/{security_policy}")
 
             # 身份验证
             username = self._config.connection_config.get('username')
@@ -508,6 +632,7 @@ def create_opcua_collector(
     data_callback: Optional[Callable[[List[DataPoint]], None]] = None,
     status_callback: Optional[Callable[[str, DeviceStatus, str], None]] = None,
     use_subscription: bool = True,
+    cert_manager: Optional[Any] = None,
 ) -> OPUACollector:
     """
     创建 OPC UA 采集器
@@ -517,6 +642,7 @@ def create_opcua_collector(
         data_callback: 数据回调
         status_callback: 状态回调
         use_subscription: 是否使用订阅模式
+        cert_manager: 证书管理器（推荐传入）
 
     Returns:
         OPUACollector
@@ -526,4 +652,5 @@ def create_opcua_collector(
         data_callback=data_callback,
         status_callback=status_callback,
         use_subscription=use_subscription,
+        cert_manager=cert_manager,
     )

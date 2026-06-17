@@ -11,7 +11,7 @@ import json
 import time
 import threading
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Callable
 from queue import Queue, Empty
 from loguru import logger
 import httpx
@@ -23,12 +23,20 @@ from app.gateway.models import (
 )
 
 
+BatchResultCallback = Callable[[List[DataPoint], List[DataPoint], bool], None]
+# callback(success_points: List[DataPoint], failed_points: List[DataPoint], is_replay: bool)
+
+
 class GatewayDataWriter:
     """
     网关数据写入器
 
     支持异步批量写入，提高写入性能。
     支持多种写入目标：数据库、流式接口。
+
+    注意：write_point / write_batch 返回的是"入队成功"数量，
+          不等于"真实写入成功"。真实写入结果通过 batch_result_callback
+          异步通知给上层，由上层决定是否将失败数据回退到缓存。
     """
 
     def __init__(
@@ -37,6 +45,7 @@ class GatewayDataWriter:
         stream_ingest_url: str = "http://localhost:8000/stream/ingest",
         batch_size: int = 100,
         flush_interval: float = 1.0,
+        batch_result_callback: Optional[BatchResultCallback] = None,
     ):
         """
         初始化数据写入器
@@ -46,20 +55,24 @@ class GatewayDataWriter:
             stream_ingest_url: stream/ingest 接口地址
             batch_size: 批量写入大小
             flush_interval: 刷新间隔（秒）
+            batch_result_callback: 批次真实写入结果回调
+                (success_points, failed_points, is_replay) -> None
         """
         self._data_target = data_target
         self._stream_ingest_url = stream_ingest_url
         self._batch_size = batch_size
         self._flush_interval = flush_interval
+        self._batch_result_callback = batch_result_callback
 
         self._write_queue: Queue = Queue()
         self._flush_thread: Optional[threading.Thread] = None
         self._is_running: bool = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # 统计信息
         self._total_written: int = 0
         self._total_failed: int = 0
+        self._total_enqueued: int = 0
         self._last_write_time: Optional[datetime] = None
 
         # HTTP 客户端
@@ -110,6 +123,32 @@ class GatewayDataWriter:
 
         logger.info("数据写入器已停止")
 
+    # ============ 结果回调 ============
+
+    def set_batch_result_callback(self, callback: Optional[BatchResultCallback]) -> None:
+        """
+        设置批次结果回调
+
+        Args:
+            callback: 回调函数 (success_points, failed_points, is_replay) -> None
+        """
+        with self._lock:
+            self._batch_result_callback = callback
+
+    def _fire_batch_result(
+        self,
+        success_points: List[DataPoint],
+        failed_points: List[DataPoint],
+        is_replay: bool,
+    ) -> None:
+        """触发批次结果回调"""
+        try:
+            cb = self._batch_result_callback
+            if cb is not None:
+                cb(success_points, failed_points, is_replay)
+        except Exception as e:
+            logger.error(f"批次结果回调执行异常: {e}")
+
     # ============ 数据写入 ============
 
     def write_point(self, point: DataPoint) -> bool:
@@ -128,6 +167,8 @@ class GatewayDataWriter:
 
         try:
             self._write_queue.put(point)
+            with self._lock:
+                self._total_enqueued += 1
             return True
         except Exception as e:
             logger.error(f"数据点加入写入队列失败: {e}")
@@ -136,6 +177,9 @@ class GatewayDataWriter:
     def write_batch(self, points: List[DataPoint]) -> int:
         """
         批量写入数据点（异步）
+
+        注意：此方法返回的是入队数量，不是真实写入成功数量。
+        真实写入结果请通过 batch_result_callback 异步获取。
 
         Args:
             points: 数据点列表
@@ -152,6 +196,48 @@ class GatewayDataWriter:
             if self.write_point(point):
                 count += 1
         return count
+
+    def write_batch_sync(
+        self, points: List[DataPoint], is_replay: bool = True
+    ) -> Tuple[int, int]:
+        """
+        批量同步写入（阻塞）
+
+        续传等必须知道真实结果的场景使用。
+        不走异步队列，直接执行写入逻辑并返回真实结果。
+
+        Args:
+            points: 数据点列表
+            is_replay: 是否为续传场景（影响结果回调中的标记）
+
+        Returns:
+            (success_count, failed_count)
+        """
+        if not points:
+            return 0, 0
+
+        success_points, failed_points = self._execute_batch_write(points)
+
+        # 更新统计
+        with self._lock:
+            self._total_written += len(success_points)
+            self._total_failed += len(failed_points)
+            self._last_write_time = datetime.now()
+
+        # 触发回调
+        self._fire_batch_result(
+            success_points=success_points,
+            failed_points=failed_points,
+            is_replay=is_replay,
+        )
+
+        if len(success_points) > 0:
+            logger.debug(
+                f"同步写入完成: 成功 {len(success_points)}, "
+                f"失败 {len(failed_points)} (replay={is_replay})"
+            )
+
+        return len(success_points), len(failed_points)
 
     # ============ 刷新逻辑 ============
 
@@ -179,7 +265,7 @@ class GatewayDataWriter:
 
     def _flush_batch(self, count: int) -> None:
         """
-        刷新一批数据
+        刷新一批数据（异步刷新线程中调用）
 
         Args:
             count: 刷新数量
@@ -195,29 +281,69 @@ class GatewayDataWriter:
         if not points:
             return
 
-        success_count = 0
-
-        # 根据目标类型写入
-        if self._data_target in (DataSourceType.SC_BOLT_DATA, DataSourceType.BOTH):
-            db_success = self._write_to_database(points)
-            if db_success:
-                success_count += len(points)
-
-        if self._data_target in (DataSourceType.STREAM_INGEST, DataSourceType.BOTH):
-            stream_success = self._write_to_stream_ingest(points)
-            if stream_success:
-                success_count += len(points)
+        success_points, failed_points = self._execute_batch_write(points)
 
         # 更新统计
         with self._lock:
-            if self._data_target == DataSourceType.BOTH:
-                actual_success = len(points) if success_count > 0 else 0
-                self._total_written += actual_success
-                self._total_failed += len(points) - actual_success
-            else:
-                self._total_written += success_count
-                self._total_failed += len(points) - success_count
+            self._total_written += len(success_points)
+            self._total_failed += len(failed_points)
             self._last_write_time = datetime.now()
+
+        # 触发结果回调（实时采集场景：is_replay=False）
+        self._fire_batch_result(
+            success_points=success_points,
+            failed_points=failed_points,
+            is_replay=False,
+        )
+
+        if failed_points:
+            logger.warning(
+                f"批次写入: 成功 {len(success_points)}/{len(points)}, "
+                f"失败 {len(failed_points)}，将通过回调通知上层回退缓存"
+            )
+
+    def _execute_batch_write(
+        self, points: List[DataPoint]
+    ) -> Tuple[List[DataPoint], List[DataPoint]]:
+        """
+        真正执行一次批量写入，返回成功/失败的点
+
+        对于 BOTH 模式：两个目标都失败才算失败；
+        至少一个目标成功就算该点写入成功。
+
+        Args:
+            points: 待写入数据点
+
+        Returns:
+            (success_points, failed_points)
+        """
+        if not points:
+            return [], []
+
+        db_success = False
+        stream_success = False
+
+        if self._data_target in (DataSourceType.SC_BOLT_DATA, DataSourceType.BOTH):
+            db_success = self._write_to_database(points)
+
+        if self._data_target in (DataSourceType.STREAM_INGEST, DataSourceType.BOTH):
+            stream_success = self._write_to_stream_ingest(points)
+
+        # 判断整体结果
+        if self._data_target == DataSourceType.SC_BOLT_DATA:
+            overall_success = db_success
+        elif self._data_target == DataSourceType.STREAM_INGEST:
+            overall_success = stream_success
+        elif self._data_target == DataSourceType.BOTH:
+            # BOTH 模式：至少一个成功就视为成功
+            overall_success = db_success or stream_success
+        else:
+            overall_success = False
+
+        if overall_success:
+            return points, []
+        else:
+            return [], points
 
     def _flush_all(self) -> None:
         """刷新所有数据"""
@@ -381,6 +507,7 @@ class GatewayDataWriter:
             return {
                 'is_running': self._is_running,
                 'queue_size': self._write_queue.qsize(),
+                'total_enqueued': self._total_enqueued,
                 'total_written': self._total_written,
                 'total_failed': self._total_failed,
                 'last_write_time': self._last_write_time.isoformat() if self._last_write_time else None,

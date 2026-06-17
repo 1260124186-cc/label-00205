@@ -106,7 +106,7 @@ class IndustrialGatewayService:
 
         # 采集器管理
         self._collectors: Dict[str, BaseCollector] = {}
-        self._collectors_lock = threading.Lock()
+        self._collectors_lock = threading.RLock()
 
         # 运行状态
         self._is_running: bool = False
@@ -117,6 +117,9 @@ class IndustrialGatewayService:
 
         # 注册配置变更回调
         self._config_manager.register_change_callback(self._on_config_change)
+
+        # 注册数据写入结果回调（异步真实写入结果回传）
+        self._data_writer.set_batch_result_callback(self._on_write_result)
 
         logger.info("工业协议采集网关服务初始化完成")
 
@@ -322,6 +325,7 @@ class IndustrialGatewayService:
                 device_config=device_config,
                 data_callback=data_callback,
                 status_callback=status_callback,
+                cert_manager=self._cert_manager,
             )
         elif device_config.protocol in (
             ProtocolType.MODBUS_TCP,
@@ -387,13 +391,16 @@ class IndustrialGatewayService:
         """
         数据采集回调
 
+        这里只做入队处理。真实写入结果通过 _on_write_result 异步接收，
+        只有失败的数据才会回退到离线缓存。
+
         Args:
             data_points: 数据点列表
         """
         if not data_points:
             return
 
-        # 更新健康监控
+        # 更新健康监控（采样成功/失败只跟采集质量挂钩）
         for dp in data_points:
             self._health_monitor.update_point_sample(
                 device_id=dp.device_id,
@@ -402,19 +409,90 @@ class IndustrialGatewayService:
                 success=(dp.quality == "good"),
             )
 
-        # 尝试写入数据
-        write_success = self._data_writer.write_batch(data_points) > 0
-
-        # 如果写入失败且缓存启用，加入缓存
-        if not write_success and self._config_manager.get_config().cache_enabled:
-            cached = self._offline_cache.add_points(data_points)
-            if cached > 0:
-                logger.debug(
-                    f"数据写入失败，已缓存 {cached} 条数据"
-                )
+        # 只要入队成功就先往下走（队列本身是内存缓冲）
+        # 真实写入失败由 _on_write_result 统一回退缓存
+        enqueued = self._data_writer.write_batch(data_points)
+        if enqueued == 0:
+            # 连入队都失败了，直接进缓存
+            logger.warning("数据入队失败，全部回退到离线缓存")
+            self._fallback_to_cache(data_points)
 
         # 更新缓存大小统计
         self._health_monitor.update_cache_size(self._offline_cache.size)
+
+    def _on_write_result(
+        self,
+        success_points: List[DataPoint],
+        failed_points: List[DataPoint],
+        is_replay: bool,
+    ) -> None:
+        """
+        批次真实写入结果回调
+
+        Args:
+            success_points: 写入成功的数据点
+            failed_points: 写入失败的数据点
+            is_replay: 是否为续传批次
+        """
+        # 统计写入成功
+        if success_points:
+            self._health_monitor._total_written_batches = getattr(
+                self._health_monitor, "_total_written_batches", 0
+            ) + 1
+
+        # 失败的数据回退缓存（实时采集与续传都需要）
+        if failed_points:
+            if is_replay:
+                # 续传失败：数据放回缓存队首，等待下次续传
+                logger.warning(
+                    f"续传批次写入失败: {len(failed_points)} 条，将在下次续传时重试"
+                )
+                self._reinsert_to_cache_head(failed_points)
+            else:
+                # 实时采集失败：回退到缓存等待自动续传
+                logger.warning(
+                    f"实时写入失败: {len(failed_points)} 条，回退到离线缓存"
+                )
+                self._fallback_to_cache(failed_points)
+
+        # 更新缓存大小统计
+        self._health_monitor.update_cache_size(self._offline_cache.size)
+
+    def _fallback_to_cache(self, points: List[DataPoint]) -> None:
+        """
+        将数据写入离线缓存（队尾，等待后续自动续传）
+
+        Args:
+            points: 需要缓存的数据点
+        """
+        if not points:
+            return
+        if not self._config_manager.get_config().cache_enabled:
+            logger.warning(
+                f"缓存未启用，丢弃 {len(points)} 条写入失败数据"
+            )
+            return
+        cached = self._offline_cache.add_points(points)
+        if cached > 0:
+            logger.debug(f"写入失败，已缓存 {cached} 条数据（等待自动续传）")
+
+    def _reinsert_to_cache_head(self, points: List[DataPoint]) -> None:
+        """
+        将续传失败的数据放回缓存队首（优先重传）
+
+        Args:
+            points: 续传失败的数据点
+        """
+        if not points:
+            return
+        if not self._config_manager.get_config().cache_enabled:
+            logger.warning(
+                f"缓存未启用，丢弃 {len(points)} 条续传失败数据"
+            )
+            return
+        # 利用 pop + 倒序 add 的方式无法直接插队首，
+        # 通过 cache 内部把 failed_points 优先添加到队首
+        self._offline_cache.add_points_to_head(points)
 
     def _on_device_status_change(
         self, device_id: str, status: DeviceStatus, error: str = ""
@@ -442,17 +520,34 @@ class IndustrialGatewayService:
         """
         缓存续传回调
 
+        使用同步写入 API，必须返回真实的写入结果，
+        才能决定缓存数据是确认弹出还是放回。
+
         Args:
             data_points: 数据点列表
 
         Returns:
-            bool: 是否续传成功
+            bool: 是否续传成功（所有点都写入成功才算成功）
         """
         if not data_points:
             return True
 
-        count = self._data_writer.write_batch(data_points)
-        return count > 0
+        success_count, failed_count = self._data_writer.write_batch_sync(
+            data_points, is_replay=True
+        )
+        total = len(data_points)
+
+        # 全部成功才返回 True，让缓存把数据弹出
+        if failed_count == 0 and success_count == total:
+            logger.debug(f"续传成功: {success_count} 条")
+            return True
+        else:
+            logger.warning(
+                f"续传未完全成功: {success_count}/{total} 成功, "
+                f"{failed_count} 失败，数据将放回缓存重试"
+            )
+            # 返回 False → cache 会自动把数据放回队首
+            return False
 
     # ============ 配置变更 ============
 
@@ -483,43 +578,72 @@ class IndustrialGatewayService:
 
     def _sync_devices(self, config: GatewayConfig) -> None:
         """
-        同步设备配置
+        同步设备配置（热加载）
+
+        本方法需要避免在 _collectors_lock 内部再次调用 _start_device_collector，
+        以防锁重入/死锁。做法：在锁内计算待启动/移除的设备清单，
+        在锁外实际执行启停操作。
 
         Args:
             config: 网关配置
         """
         enabled_devices = {d.device_id: d for d in config.get_enabled_devices()}
 
+        devices_to_remove: List[str] = []
+        devices_to_update: List[DeviceConfig] = []
+        devices_to_start: List[DeviceConfig] = []
+
+        # ============ 锁内：只做状态计算，不做 IO ============
         with self._collectors_lock:
-            # 停止已删除或禁用的设备
-            devices_to_remove = []
-            for device_id in self._collectors:
+            for device_id in list(self._collectors.keys()):
                 if device_id not in enabled_devices:
                     devices_to_remove.append(device_id)
 
-            for device_id in devices_to_remove:
-                try:
-                    self._collectors[device_id].stop()
-                except Exception:
-                    pass
-                del self._collectors[device_id]
-                self._health_monitor.unregister_device(device_id)
-                logger.info(f"设备已移除: {device_id}")
-
-            # 启动或更新设备
             for device_id, device_config in enabled_devices.items():
                 if device_id in self._collectors:
-                    # 更新现有设备
-                    try:
-                        self._collectors[device_id].update_config(device_config)
-                    except Exception as e:
-                        logger.error(f"更新设备配置失败 {device_id}: {e}")
+                    devices_to_update.append(device_config)
                 else:
-                    # 启动新设备
-                    try:
-                        self._start_device_collector(device_config)
-                    except Exception as e:
-                        logger.error(f"启动新设备失败 {device_id}: {e}")
+                    devices_to_start.append(device_config)
+
+            # 移除设备（stop 可能涉及IO，但此处移除的是停用/删除的设备，
+            # 并且在锁内只操作字典，调用 stop 之前先 pop 出来在锁外执行）
+            collectors_to_stop = {}
+            for device_id in devices_to_remove:
+                if device_id in self._collectors:
+                    collectors_to_stop[device_id] = self._collectors.pop(device_id)
+
+        # ============ 锁外：执行 IO 和启停 ============
+
+        # 停止移除的设备
+        for device_id, collector in collectors_to_stop.items():
+            try:
+                collector.stop()
+            except Exception as e:
+                logger.error(f"停止设备采集器失败 {device_id}: {e}")
+            try:
+                self._health_monitor.unregister_device(device_id)
+            except Exception:
+                pass
+            logger.info(f"设备已移除: {device_id}")
+
+        # 更新现有设备配置
+        for device_config in devices_to_update:
+            collector = self._collectors.get(device_config.device_id)
+            if collector is not None:
+                try:
+                    collector.update_config(device_config)
+                except Exception as e:
+                    logger.error(
+                        f"更新设备配置失败 {device_config.device_id}: {e}"
+                    )
+
+        # 启动新设备（在锁外调用 _start_device_collector，
+        # 其内部会再次获取锁，此时不会死锁）
+        for device_config in devices_to_start:
+            try:
+                self._start_device_collector(device_config)
+            except Exception as e:
+                logger.error(f"启动新设备失败 {device_config.device_id}: {e}")
 
     # ============ 监控循环 ============
 
@@ -552,25 +676,34 @@ class IndustrialGatewayService:
         """检查并重连断开的设备"""
         config = self._config_manager.get_config()
 
-        for device in config.get_enabled_devices():
-            device_status = self._health_monitor.get_device_status(device.device_id)
+        devices_to_reconnect: List[DeviceConfig] = []
 
-            if device_status and device_status.status in (
-                DeviceStatus.DISCONNECTED,
-                DeviceStatus.ERROR,
-            ):
-                # 尝试重连
-                logger.info(f"尝试重连设备: {device.device_id}")
-                with self._collectors_lock:
+        # 锁内：只做判定
+        with self._collectors_lock:
+            for device in config.get_enabled_devices():
+                device_status = self._health_monitor.get_device_status(
+                    device.device_id
+                )
+                if device_status and device_status.status in (
+                    DeviceStatus.DISCONNECTED,
+                    DeviceStatus.ERROR,
+                ):
+                    # 先取出并停止现有采集器
                     if device.device_id in self._collectors:
                         try:
-                            collector = self._collectors[device.device_id]
+                            collector = self._collectors.pop(device.device_id)
                             collector.stop()
                         except Exception:
                             pass
+                    devices_to_reconnect.append(device)
 
-                    # 重新启动
-                    self._start_device_collector(device)
+        # 锁外：真正执行重连（_start_device_collector 内部会重新拿锁）
+        for device in devices_to_reconnect:
+            logger.info(f"尝试重连设备: {device.device_id}")
+            try:
+                self._start_device_collector(device)
+            except Exception as e:
+                logger.error(f"重连设备失败 {device.device_id}: {e}")
 
     # ============ 数据查询 ============
 
