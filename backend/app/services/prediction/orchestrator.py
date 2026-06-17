@@ -660,9 +660,18 @@ class PredictionOrchestrator:
         condition_prediction = None
         if self.enable_working_condition and len(data) >= 50:
             try:
+                ts_array = None
+                if timestamps is not None and len(timestamps) > 0:
+                    try:
+                        import pandas as pd
+                        ts_array = pd.to_datetime(timestamps).values
+                    except Exception:
+                        ts_array = np.array(timestamps)
+
                 condition_prediction = self.condition_adaptive_predictor.predict(
                     node_id=str(bolt_id),
                     data=data,
+                    timestamps=ts_array,
                     forecast_days=1,
                     node_type='bolt',
                 )
@@ -670,6 +679,13 @@ class PredictionOrchestrator:
                 condition = condition_prediction.condition
                 condition_label = condition_prediction.condition_label
                 condition_conf = condition_prediction.condition_confidence
+
+                prophet_info = None
+                seasonal_info = None
+                if condition_prediction.prophet_forecast is not None:
+                    prophet_info = condition_prediction.prophet_forecast
+                if condition_prediction.seasonal_decomposition is not None:
+                    seasonal_info = condition_prediction.seasonal_decomposition
 
                 working_condition_info = {
                     'condition': condition.value,
@@ -692,6 +708,8 @@ class PredictionOrchestrator:
                         'anomaly_ratio': condition_prediction.anomaly_summary.get('anomaly_ratio', 0.0),
                     },
                     'baseline': condition_prediction.baseline,
+                    'prophet_forecast': prophet_info,
+                    'seasonal_decomposition': seasonal_info,
                 }
 
                 # ---- 3.6a: 基线异常检测修正状态码 ----
@@ -1655,6 +1673,7 @@ class PredictionOrchestrator:
         self,
         flange_id: str,
         multi_bolt_data: List[np.ndarray],
+        timestamps: Optional[List[str]] = None,
         save_to_db: bool = True,
         bolt_ids: Optional[List[str]] = None,
         bolt_data_dict: Optional[Dict[str, np.ndarray]] = None,
@@ -1671,6 +1690,7 @@ class PredictionOrchestrator:
         Args:
             flange_id: 法兰面ID
             multi_bolt_data: 多螺栓数据列表
+            timestamps: 时间戳列表
             save_to_db: 是否保存到数据库
             bolt_ids: 螺栓ID列表（与multi_bolt_data对应）
             bolt_data_dict: 螺栓数据字典 {bolt_id: data}，优先于multi_bolt_data+bolt_ids
@@ -1694,6 +1714,7 @@ class PredictionOrchestrator:
         main_result = self._run_flange_prediction(
             flange_id=flange_id,
             multi_bolt_data=multi_bolt_data,
+            timestamps=timestamps,
             bolt_ids=bolt_ids,
             bolt_data_dict=bolt_data_dict,
             enable_correlation_analysis=enable_correlation_analysis,
@@ -1709,6 +1730,7 @@ class PredictionOrchestrator:
                 shadow_result = self._run_flange_prediction(
                     flange_id=flange_id,
                     multi_bolt_data=multi_bolt_data,
+                    timestamps=timestamps,
                     bolt_ids=bolt_ids,
                     bolt_data_dict=bolt_data_dict,
                     enable_correlation_analysis=enable_correlation_analysis,
@@ -1742,6 +1764,7 @@ class PredictionOrchestrator:
         enable_correlation_analysis: bool,
         version: Optional[str],
         save_to_db: bool,
+        timestamps: Optional[List[str]] = None,
         is_shadow: bool = False,
         generate_diagnosis: bool = False,
     ) -> Dict[str, Any]:
@@ -1756,9 +1779,9 @@ class PredictionOrchestrator:
             enable_correlation_analysis: 是否启用关联分析
             version: 模型版本号
             save_to_db: 是否保存到数据库
+            timestamps: 时间戳列表
             is_shadow: 是否为影子模式
             generate_diagnosis: 是否生成 LLM 智能诊断报告
-            is_shadow: 是否为影子模式
 
         Returns:
             预测结果字典
@@ -1849,25 +1872,58 @@ class PredictionOrchestrator:
         flange_condition_prediction = None
         if self.enable_working_condition and len(all_data) >= 50:
             try:
+                ts_array = None
+                prophet_data = all_data
+                if timestamps is not None and len(timestamps) > 0:
+                    try:
+                        import pandas as pd
+                        ts_array = pd.to_datetime(timestamps).values
+                    except Exception:
+                        ts_array = np.array(timestamps)
+
+                    if len(ts_array) != len(all_data) and len(multi_bolt_data) > 0:
+                        prophet_data = multi_bolt_data[0]
+
                 flange_condition_prediction = self.condition_adaptive_predictor.predict(
                     node_id=str(flange_id),
                     data=all_data,
+                    timestamps=ts_array,
                     forecast_days=1,
                     node_type='flange',
                 )
 
                 flange_condition = flange_condition_prediction.condition
+
+                prophet_info = None
+                seasonal_info = None
+                if flange_condition_prediction.prophet_forecast is not None:
+                    prophet_info = flange_condition_prediction.prophet_forecast
+                if flange_condition_prediction.seasonal_decomposition is not None:
+                    seasonal_info = flange_condition_prediction.seasonal_decomposition
+
                 flange_condition_info = {
                     'condition': flange_condition.value,
                     'condition_label': flange_condition_prediction.condition_label,
                     'confidence': flange_condition_prediction.condition_confidence,
                     'is_transition': flange_condition_prediction.is_transition,
                     'condition_changed': flange_condition_prediction.condition_changed,
+                    'previous_condition': (
+                        flange_condition_prediction.previous_condition.value
+                        if flange_condition_prediction.previous_condition else None
+                    ),
+                    'probabilities': {
+                        cond.value: prob
+                        for cond, prob in flange_condition_prediction.condition_probabilities.items()
+                    },
                     'baseline_anomaly': {
                         'status': flange_condition_prediction.overall_status,
                         'anomaly_count': flange_condition_prediction.anomaly_summary.get('anomaly_count', 0),
                         'warning_count': flange_condition_prediction.anomaly_summary.get('warning_count', 0),
+                        'anomaly_ratio': flange_condition_prediction.anomaly_summary.get('anomaly_ratio', 0.0),
                     },
+                    'baseline': flange_condition_prediction.baseline,
+                    'prophet_forecast': prophet_info,
+                    'seasonal_decomposition': seasonal_info,
                 }
 
                 if flange_condition_prediction.condition_confidence >= self.condition_confidence_threshold:

@@ -451,8 +451,20 @@ class ConditionAdaptivePredictor:
             return None
 
         try:
+            flat_data = np.asarray(data, dtype=np.float64).flatten()
+            ts_array = np.asarray(timestamps).flatten() if timestamps is not None else None
+
+            if ts_array is None or len(ts_array) == 0:
+                return None
+
+            if len(ts_array) != len(flat_data):
+                if len(flat_data) > len(ts_array):
+                    flat_data = flat_data[:len(ts_array)]
+                else:
+                    ts_array = ts_array[:len(flat_data)]
+
             if not self.prophet.is_fitted:
-                self.prophet.fit(data, timestamps)
+                self.prophet.fit(flat_data, ts_array)
 
             forecast = self.prophet.forecast(days=forecast_days)
 

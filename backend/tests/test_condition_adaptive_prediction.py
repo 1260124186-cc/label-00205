@@ -395,5 +395,166 @@ class TestConditionAuditIntegration:
         assert 'previous_condition' in wc1
 
 
+class TestProphetComplement:
+    """Prophet 互补功能集成测试"""
+
+    @pytest.fixture
+    def orch(self):
+        return PredictionOrchestrator()
+
+    @pytest.fixture
+    def timestamps(self):
+        """生成时间戳列表"""
+        from datetime import datetime, timedelta
+        start_date = datetime(2025, 1, 1)
+        n = 200
+        return [(start_date + timedelta(hours=i)).isoformat() for i in range(n)]
+
+    def test_bolt_with_timestamps_has_prophet(self, orch, timestamps):
+        """测试螺栓预测带时间戳时有 Prophet 结果"""
+        np.random.seed(42)
+        data = np.random.normal(loc=500, scale=10, size=(200, 1))
+
+        result = orch.predict_bolt('prophet_bolt_ts', data, timestamps=timestamps)
+        wc = result.get('working_condition', {})
+
+        assert 'prophet_forecast' in wc
+        assert 'seasonal_decomposition' in wc
+        assert wc['prophet_forecast'] is not None
+        assert wc['seasonal_decomposition'] is not None
+
+    def test_bolt_without_timestamps_no_prophet(self, orch):
+        """测试螺栓预测不带时间戳时无 Prophet 结果"""
+        np.random.seed(42)
+        data = np.random.normal(loc=500, scale=10, size=(200, 1))
+
+        result = orch.predict_bolt('prophet_bolt_no_ts', data)
+        wc = result.get('working_condition', {})
+
+        assert 'prophet_forecast' in wc
+        assert 'seasonal_decomposition' in wc
+        assert wc['prophet_forecast'] is None
+        assert wc['seasonal_decomposition'] is None
+
+    def test_prophet_forecast_structure(self, orch, timestamps):
+        """测试 Prophet 预测结果结构完整"""
+        np.random.seed(42)
+        data = np.random.normal(loc=500, scale=10, size=(200, 1))
+
+        result = orch.predict_bolt('prophet_structure', data, timestamps=timestamps)
+        wc = result.get('working_condition', {})
+        pf = wc.get('prophet_forecast')
+
+        assert pf is not None
+        assert 'values' in pf
+        assert 'lower_bound' in pf
+        assert 'upper_bound' in pf
+        assert 'dates' in pf
+        assert 'confidence' in pf
+        assert 'anomaly_dates' in pf
+        assert isinstance(pf['values'], list)
+        assert isinstance(pf['dates'], list)
+        assert len(pf['values']) >= 1
+
+    def test_seasonal_decomposition_structure(self, orch, timestamps):
+        """测试季节性分解结果结构完整"""
+        np.random.seed(42)
+        data = np.random.normal(loc=500, scale=10, size=(200, 1))
+
+        result = orch.predict_bolt('seasonal_structure', data, timestamps=timestamps)
+        wc = result.get('working_condition', {})
+        sd = wc.get('seasonal_decomposition')
+
+        assert sd is not None
+        assert 'trend' in sd
+        assert 'weekly_seasonal' in sd
+        assert 'daily_seasonal' in sd
+        assert 'residual' in sd
+
+    def test_flange_with_timestamps_has_prophet(self, orch, timestamps):
+        """测试法兰面预测带时间戳时有 Prophet 结果"""
+        np.random.seed(123)
+        flange_data = [
+            np.random.normal(loc=500 + i * 5, scale=8 + i, size=(200, 1))
+            for i in range(4)
+        ]
+        bolt_ids = [f'flange_bolt_{i}' for i in range(4)]
+
+        result = orch.predict_flange(
+            flange_id='prophet_flange_ts',
+            multi_bolt_data=flange_data,
+            timestamps=timestamps,
+            bolt_ids=bolt_ids,
+            bolt_data_dict=None,
+            enable_correlation_analysis=False,
+            version=None,
+            save_to_db=False,
+        )
+        wc = result.get('working_condition', {})
+
+        assert 'prophet_forecast' in wc
+        assert 'seasonal_decomposition' in wc
+        assert wc['prophet_forecast'] is not None
+        assert wc['seasonal_decomposition'] is not None
+
+    def test_flange_without_timestamps_no_prophet(self, orch):
+        """测试法兰面预测不带时间戳时无 Prophet 结果"""
+        np.random.seed(123)
+        flange_data = [
+            np.random.normal(loc=500 + i * 5, scale=8 + i, size=(200, 1))
+            for i in range(4)
+        ]
+        bolt_ids = [f'flange_bolt_{i}' for i in range(4)]
+
+        result = orch.predict_flange(
+            flange_id='prophet_flange_no_ts',
+            multi_bolt_data=flange_data,
+            bolt_ids=bolt_ids,
+            bolt_data_dict=None,
+            enable_correlation_analysis=False,
+            version=None,
+            save_to_db=False,
+        )
+        wc = result.get('working_condition', {})
+
+        assert wc['prophet_forecast'] is None
+        assert wc['seasonal_decomposition'] is None
+
+    def test_condition_amplitude_factors(self, orch):
+        """测试不同工况的季节性振幅系数"""
+        predictor = orch.condition_adaptive_predictor
+
+        steady_amp = predictor._get_condition_amplitude(WorkingCondition.STEADY_STATE)
+        inc_amp = predictor._get_condition_amplitude(WorkingCondition.LOAD_INCREASE)
+        dec_amp = predictor._get_condition_amplitude(WorkingCondition.LOAD_DECREASE)
+        shutdown_amp = predictor._get_condition_amplitude(WorkingCondition.SHUTDOWN_COOLING)
+        recovery_amp = predictor._get_condition_amplitude(WorkingCondition.POST_MAINTENANCE_RECOVERY)
+
+        assert steady_amp == 1.0
+        assert inc_amp < 1.0
+        assert dec_amp < 1.0
+        assert shutdown_amp < 0.5
+        assert recovery_amp > shutdown_amp
+        assert recovery_amp < 1.0
+
+    def test_condition_info_complete_with_prophet(self, orch, timestamps):
+        """测试带 Prophet 时工况信息完整性"""
+        np.random.seed(999)
+        data = np.random.normal(loc=500, scale=8, size=(200, 1))
+
+        result = orch.predict_bolt('prophet_complete', data, timestamps=timestamps)
+        wc = result.get('working_condition', {})
+
+        expected_keys = [
+            'condition', 'condition_label', 'confidence',
+            'is_transition', 'condition_changed',
+            'previous_condition', 'probabilities',
+            'baseline_anomaly', 'baseline',
+            'prophet_forecast', 'seasonal_decomposition',
+        ]
+        for key in expected_keys:
+            assert key in wc, f"缺少工况信息字段: {key}"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '--tb=short'])
