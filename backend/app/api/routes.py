@@ -22,7 +22,7 @@ import torch
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends, Request
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends, Request, Body
 from loguru import logger
 
 from app.api.auth import get_tenant_context, revoke_tenant_token, verify_api_key, require_permission, api_key_manager, per_key_rate_limiter, audit_logger, APIKeyManager
@@ -11942,7 +11942,7 @@ async def get_bolt_trend_compat(
                 sensor_id=str(sensor_id),
                 start_time=start_time,
                 end_time=end_time,
-                aggregation_level=aggregation,
+                aggregation=aggregation,
             )
 
             # 兼容旧格式输出
@@ -12073,31 +12073,38 @@ async def get_bolt_statistics_compat(
 )
 async def get_bolt_period_compare_compat(
     sensor_id: str,
-    request: dict,
+    request_body: dict = Body(..., description="周期对比请求"),
 ):
     """
     螺栓周期对比（同比/环比）
 
     请求体:
-        compare_type: "yoy"（同比）/ "mom"（环比）/ "custom"（自定义）
+        compare_type: "yoy"（同比）/ "mom"（环比）
         start_time: 本期开始时间
         end_time: 本期结束时间
-        baseline_start: 对比期开始时间（custom时必填）
-        baseline_end: 对比期结束时间（custom时必填）
     """
     try:
         from app.timeseries.factory import is_timeseries_enabled
         from app.services.timeseries_service import get_timeseries_analysis_service
+        from datetime import datetime
 
         if is_timeseries_enabled():
             service = get_timeseries_analysis_service()
+
+            # 解析时间字符串（如果是字符串）
+            current_start = request_body.get('start_time')
+            current_end = request_body.get('end_time')
+
+            if isinstance(current_start, str):
+                current_start = datetime.fromisoformat(current_start.replace('Z', '+00:00'))
+            if isinstance(current_end, str):
+                current_end = datetime.fromisoformat(current_end.replace('Z', '+00:00'))
+
             result = service.get_period_compare(
                 sensor_id=str(sensor_id),
-                compare_type=request.get('compare_type', 'mom'),
-                current_start=request.get('start_time'),
-                current_end=request.get('end_time'),
-                baseline_start=request.get('baseline_start'),
-                baseline_end=request.get('baseline_end'),
+                current_start=current_start,
+                current_end=current_end,
+                compare_type=request_body.get('compare_type', 'mom'),
             )
             result['datasource'] = 'timeseries'
             return result
@@ -12120,14 +12127,17 @@ async def get_bolt_period_compare_compat(
     summary="时序库原生 SQL 查询（历史分析，仅 TimescaleDB 支持）"
 )
 async def timeseries_sql_query_compat(
-    sql: str = Query(..., description="SQL 查询语句"),
-    timeout_seconds: int = Query(30, description="超时秒数"),
+    request_body: dict = Body(..., description="SQL 查询请求"),
 ):
     """
     直接执行时序库 SQL 查询（用于复杂历史分析）
 
     **仅在启用 TimescaleDB 后端时可用**。
     可使用 time_bucket、continuous aggregate 等 Timescale 特性。
+
+    请求体:
+        sql: SQL 查询语句
+        params: 查询参数字典（可选）
     """
     try:
         from app.timeseries.factory import is_timeseries_enabled, create_timeseries_repository
@@ -12150,7 +12160,13 @@ async def timeseries_sql_query_compat(
         if repo is None:
             raise HTTPException(status_code=503, detail="时序数据库不可用")
 
-        result = repo.execute_sql(sql, params={}, timeout_seconds=timeout_seconds)
+        sql = request_body.get('sql', '')
+        params = request_body.get('params', {})
+
+        if not sql:
+            raise HTTPException(status_code=400, detail="SQL 语句不能为空")
+
+        result = repo.execute_sql(sql, params=params)
         return {
             'success': True,
             'datasource': 'timescaledb',
