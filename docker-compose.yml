@@ -55,6 +55,8 @@ services:
       - CONFIG_PATH=/app/config/config.yaml
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
+      - TIMESERIES_ENABLED=${TIMESERIES_ENABLED:-false}
+      - TIMESERIES_BACKEND=${TIMESERIES_BACKEND:-timescaledb}
     ports:
       - "8081:8000"
     volumes:
@@ -86,8 +88,80 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  # InfluxDB 时序数据库（可选 profile: influxdb）
+  influxdb:
+    image: influxdb:2.7
+    container_name: bolt_influxdb
+    profiles: ["influxdb"]
+    restart: unless-stopped
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=admin123
+      - DOCKER_INFLUXDB_INIT_ORG=bolt
+      - DOCKER_INFLUXDB_INIT_BUCKET=bolt_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-token
+      - TZ=Asia/Shanghai
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+      - ./backups/influxdb:/backups
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - bolt_network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # TimescaleDB 时序数据库（可选 profile: timescaledb）
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: bolt_timescaledb
+    profiles: ["timescaledb"]
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=bolt_timeseries
+      - TZ=Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./backups/timescaledb:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - bolt_network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
 volumes:
   mysql_data:
+    driver: local
+  influxdb_data:
+    driver: local
+  influxdb_config:
+    driver: local
+  timescaledb_data:
     driver: local
 
 networks:

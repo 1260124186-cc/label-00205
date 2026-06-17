@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from app import __version__
 from app.api.routes import router
 from app.api.sso_routes import router as sso_router
+from app.api.timeseries_routes import router as timeseries_router
 from app.schedulers.scheduler import scheduler
 from app.utils.config import config
 from app.utils.database import db_manager
@@ -189,6 +190,7 @@ def create_app() -> FastAPI:
     # 注册路由
     app.include_router(router, prefix="/api/v1")
     app.include_router(sso_router)
+    app.include_router(timeseries_router, prefix="/api/v1")
 
     from app.bff.schema import create_bff_router
     bff_router = create_bff_router()

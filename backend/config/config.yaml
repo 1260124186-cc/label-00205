@@ -735,3 +735,50 @@ spare_parts:
     due_time_hours:
       urgent: 24
       critical: 8
+
+# ============================================================
+# 时序数据库配置
+# ============================================================
+timeseries:
+  # 是否启用时序数据库
+  enabled: false
+
+  # 后端类型: influxdb / timescaledb
+  backend: "timescaledb"
+
+  # InfluxDB 配置
+  influxdb:
+    url: "http://localhost:8086"
+    token: "my-token"
+    org: "bolt"
+    bucket: "bolt_data"
+    timeout: 30
+
+  # TimescaleDB 配置
+  timescaledb:
+    host: "localhost"
+    port: 5432
+    user: "postgres"
+    password: "postgres"
+    database: "bolt_timeseries"
+    pool_size: 10
+    max_overflow: 20
+
+  # 降采样配置
+  downsampling:
+    # 是否启用自动降采样
+    enabled: true
+    # 定时任务 cron 表达式（每小时执行）
+    cron: "0 * * * *"
+    # 保留策略
+    retention:
+      raw_days: 7          # 原始数据保留天数
+      minute_days: 30      # 分钟级聚合保留天数
+      hour_days: 365       # 小时级聚合保留天数
+
+  # 预测流水线配置
+  prediction:
+    # 是否从时序数据库读取数据
+    use_for_prediction: false
+    # 窗口大小（数据点数）
+    window_size: 100

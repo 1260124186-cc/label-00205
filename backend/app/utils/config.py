@@ -199,6 +199,18 @@ class Config:
             'LLM_OPENAI_BASE_URL': ('llm', 'openai', 'base_url'),
             'LLM_QWEN_API_KEY': ('llm', 'qwen', 'api_key'),
             'LLM_QWEN_MODEL': ('llm', 'qwen', 'model'),
+            # 时序数据库配置
+            'TIMESERIES_ENABLED': ('timeseries', 'enabled'),
+            'TIMESERIES_BACKEND': ('timeseries', 'backend'),
+            'INFLUXDB_URL': ('timeseries', 'influxdb', 'url'),
+            'INFLUXDB_TOKEN': ('timeseries', 'influxdb', 'token'),
+            'INFLUXDB_ORG': ('timeseries', 'influxdb', 'org'),
+            'INFLUXDB_BUCKET': ('timeseries', 'influxdb', 'bucket'),
+            'TIMESCALEDB_HOST': ('timeseries', 'timescaledb', 'host'),
+            'TIMESCALEDB_PORT': ('timeseries', 'timescaledb', 'port'),
+            'TIMESCALEDB_USER': ('timeseries', 'timescaledb', 'user'),
+            'TIMESCALEDB_PASSWORD': ('timeseries', 'timescaledb', 'password'),
+            'TIMESCALEDB_DATABASE': ('timeseries', 'timescaledb', 'database'),
         }
 
         for env_key, config_path in env_mappings.items():
