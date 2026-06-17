@@ -601,7 +601,7 @@ class BoltTorquePreloadModel:
             current_preload = preload_result.calculated_preload
 
         if current_preload is None:
-            raise ValueError("必须提供 current_preload 或 measured_torque")
+            current_preload = target_preload
 
         factor_low = retorque_factor_low or self.default_retorque_factor_low
         factor_high = retorque_factor_high or self.default_retorque_factor_high

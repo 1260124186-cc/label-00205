@@ -175,6 +175,7 @@ class DesignLimitCheck:
             "yield_ratio": round(self.yield_ratio, 4),
             "allowed_max_preload_N": round(self.allowed_max_preload_N, 2),
             "allowed_max_preload_kN": round(self.allowed_max_preload_N / 1000, 2),
+            "utilization_ratio": round(self.utilization_ratio, 4),
             "utilization_ratio_pct": round(self.utilization_ratio * 100, 2),
             "issues": self.issues,
             "recommendations": self.recommendations,

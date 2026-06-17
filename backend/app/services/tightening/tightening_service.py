@@ -379,10 +379,9 @@ class TighteningService:
 
         返回:
             RetorqueSuggestion: 包含复紧扭矩区间、建议动作、理由
+        说明:
+            若 current_preload_N 和 measured_torque_Nm 均未提供，则基于目标预紧力生成默认复紧范围（假设无预紧力损失）
         """
-        if current_preload_N is None and measured_torque_Nm is None:
-            raise ValueError("current_preload_N 和 measured_torque_Nm 至少提供一个")
-
         try:
             target_torque_result = self.torque_model.calculate_torque(
                 bolt_size=bolt_size,
@@ -413,6 +412,9 @@ class TighteningService:
                 preload_loss_pct = max(
                     0.0, (target_preload_N - estimated_current_preload) / target_preload_N * 100
                 )
+            else:
+                preload_loss_pct = 0.0
+                estimated_current_preload = target_preload_N
 
             action, severity, rationale = self._determine_retorque_action(
                 preload_loss_pct=preload_loss_pct,
@@ -728,7 +730,7 @@ class TighteningService:
                     proc = self.process_model.get_standard_procedure(procedure_id)
                     if proc:
                         expected_steps = [s.to_dict() for s in proc.steps]
-                if expected_steps:
+                if expected_steps and len(expected_steps) > 0:
                     step_count = len(expected_steps)
                     completed_step_dicts = [
                         {"step_number": i + 1, "measured_torque_Nm": None}
@@ -798,10 +800,15 @@ class TighteningService:
             except Exception:
                 pass
 
+            audit_id = f"AUD-{procedure_id or 'CUSTOM'}-{bolt_size}-{abs(hash(str(target_preload_N) + bolt_grade)) % 10000:04d}"
+            timestamp = __import__("datetime").datetime.now().isoformat()
+
             audit_result = {
-                "audit_id": f"AUD-{procedure_id or 'CUSTOM'}-{bolt_size}-{abs(hash(str(target_preload_N) + bolt_grade)) % 10000:04d}",
-                "timestamp": __import__("datetime").datetime.now().isoformat(),
+                "audit_id": audit_id,
+                "timestamp": timestamp,
                 "overview": {
+                    "audit_id": audit_id,
+                    "timestamp": timestamp,
                     "bolt_size": bolt_size,
                     "bolt_grade": bolt_grade,
                     "target_preload_N": target_preload_N,
