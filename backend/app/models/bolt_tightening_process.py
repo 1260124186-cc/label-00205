@@ -33,6 +33,7 @@ from app.models.bolt_torque_preload import (
     BoltTorquePreloadModel,
     LubricationType,
     LUBRICATION_LABELS,
+    _resolve_lubrication_type,
 )
 
 
@@ -611,7 +612,7 @@ class BoltTighteningProcessModel:
         self,
         bolt_size: str,
         target_preload: float,
-        lubrication_type: LubricationType = LubricationType.MACHINE_OIL,
+        lubrication_type=None,
         custom_mu_G: Optional[float] = None,
         custom_mu_K: Optional[float] = None,
         effective_length_mm: Optional[float] = None,
@@ -620,6 +621,9 @@ class BoltTighteningProcessModel:
         nut_type: str = "hex_nut",
         snug_torque_pct: Optional[float] = None,
     ) -> TurnAngleResult:
+        if lubrication_type is None:
+            lubrication_type = LubricationType.MACHINE_OIL
+        lubrication_type = _resolve_lubrication_type(lubrication_type)
         bolt_spec = self.torque_preload_model.get_thread_spec(bolt_size)
         if bolt_spec is None:
             raise ValueError(f"未知螺纹规格: {bolt_size}")
@@ -676,11 +680,25 @@ class BoltTighteningProcessModel:
         bolt_size: str,
         target_preload: float,
         bolt_count: int = 8,
-        lubrication_type: LubricationType = LubricationType.MACHINE_OIL,
+        lubrication_type=None,
         custom_mu_G: Optional[float] = None,
         custom_mu_K: Optional[float] = None,
         tolerance_band_type: ToleranceBandType = ToleranceBandType.NORMAL,
+        tolerance_band: Optional[str] = None,
+        start_index: int = 1,
+        passes: Optional[int] = None,
+        pattern: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if lubrication_type is None:
+            lubrication_type = LubricationType.MACHINE_OIL
+        lubrication_type = _resolve_lubrication_type(lubrication_type)
+
+        if tolerance_band is not None and tolerance_band_type == ToleranceBandType.NORMAL:
+            try:
+                tolerance_band_type = ToleranceBandType(tolerance_band)
+            except ValueError:
+                pass
+
         procedure = self.get_procedure(procedure_id)
         if procedure is None:
             raise ValueError(f"未知工艺规程ID: {procedure_id}")
@@ -715,11 +733,23 @@ class BoltTighteningProcessModel:
 
         seq_result = None
         if procedure.requires_cross_sequence and bolt_count >= 4:
-            seq_result = self.generate_cross_tightening_sequence(bolt_count)
+            seq_result = self.generate_cross_tightening_sequence(
+                bolt_count, start_index=start_index, passes=passes, pattern=pattern,
+            )
 
-        tolerance_band = self.get_tolerance_band(tolerance_band_type)
+        tolerance_band_obj = self.get_tolerance_band(tolerance_band_type)
+
+        process_id = self.generate_process_id(procedure_id, bolt_size)
+
+        tightening_method = TighteningMethod.TORQUE_CONTROL
+        if procedure.steps:
+            for step in procedure.steps:
+                if step.method in (TighteningMethod.ANGLE_CONTROL, TighteningMethod.HYDRAULIC_TENSIONING, TighteningMethod.YIELD_POINT):
+                    tightening_method = step.method
+                    break
 
         return {
+            "process_id": process_id,
             "procedure_id": procedure_id,
             "procedure_name": procedure.procedure_name,
             "standard_code": procedure.standard_code,
@@ -730,15 +760,18 @@ class BoltTighteningProcessModel:
             "target_preload_kN": round(target_preload / 1000, 2),
             "target_torque_Nm": round(target_torque_Nm, 2),
             "torque_tolerance_min_Nm": round(
-                target_torque_Nm * (1 - tolerance_band.torque_tolerance_pct / 100), 2
+                target_torque_Nm * (1 - tolerance_band_obj.torque_tolerance_pct / 100), 2
             ),
             "torque_tolerance_max_Nm": round(
-                target_torque_Nm * (1 + tolerance_band.torque_tolerance_pct / 100), 2
+                target_torque_Nm * (1 + tolerance_band_obj.torque_tolerance_pct / 100), 2
             ),
             "lubrication_type": lubrication_type.value,
             "lubrication_label": LUBRICATION_LABELS[lubrication_type],
-            "tolerance_band": tolerance_band.to_dict(),
+            "tightening_method": tightening_method.value,
+            "tolerance_band": tolerance_band_obj.to_dict(),
+            "tightening_steps": resolved_steps,
             "steps": resolved_steps,
+            "cross_sequence": seq_result.to_dict() if seq_result else None,
             "tightening_sequence": seq_result.to_dict() if seq_result else None,
             "lubrication_requirements": procedure.lubrication_requirements,
             "tool_requirements": procedure.tool_requirements,

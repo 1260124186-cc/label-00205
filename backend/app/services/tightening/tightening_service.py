@@ -269,13 +269,13 @@ class TighteningService:
                 bolt_size=bolt_size,
                 target_preload=target_preload_N,
                 lubrication_type=lubrication_type,
-                friction_coeff_thread=friction_coeff_thread,
-                friction_coeff_bearing=friction_coeff_bearing,
-                bearing_diameter_mm=bearing_diameter_mm,
+                custom_mu_G=friction_coeff_thread,
+                custom_mu_K=friction_coeff_bearing,
+                washer_outer_diameter=bearing_diameter_mm,
             )
             logger.info(
                 f"扭矩计算: {bolt_size} 预紧力={target_preload_N:.0f}N "
-                f"→ 扭矩={result.required_torque_Nm:.1f}Nm [{lubrication_type}]"
+                f"→ 扭矩={result.nominal_torque:.1f}Nm [{lubrication_type}]"
             )
             return result
         except Exception as e:
@@ -302,9 +302,9 @@ class TighteningService:
                 bolt_size=bolt_size,
                 measured_torque=measured_torque_Nm,
                 lubrication_type=lubrication_type,
-                friction_coeff_thread=friction_coeff_thread,
-                friction_coeff_bearing=friction_coeff_bearing,
-                bearing_diameter_mm=bearing_diameter_mm,
+                custom_mu_G=friction_coeff_thread,
+                custom_mu_K=friction_coeff_bearing,
+                washer_outer_diameter=bearing_diameter_mm,
             )
 
             utilization_ratio = None
@@ -315,12 +315,12 @@ class TighteningService:
                 limit_check = self.compliance_service.check_design_limits(
                     bolt_size=bolt_size,
                     bolt_grade=bolt_grade,
-                    preload=preload_result.estimated_preload_N,
+                    preload=preload_result.calculated_preload,
                 )
                 utilization_ratio = limit_check.utilization_ratio
                 compliance_status = limit_check.status.value
                 if limit_check.status != ComplianceStatus.PASS:
-                    warnings.extend(limit_check.warnings)
+                    warnings.extend(limit_check.issues)
 
             if preload_result.preload_uncertainty_pct > 20:
                 warnings.append(
@@ -331,13 +331,13 @@ class TighteningService:
             result = MeasurementPreloadResult(
                 bolt_size=bolt_size,
                 measured_torque_Nm=measured_torque_Nm,
-                estimated_preload_N=preload_result.estimated_preload_N,
-                preload_min_N=preload_result.preload_min_N,
-                preload_max_N=preload_result.preload_max_N,
+                estimated_preload_N=preload_result.calculated_preload,
+                preload_min_N=preload_result.preload_min,
+                preload_max_N=preload_result.preload_max,
                 preload_uncertainty_pct=preload_result.preload_uncertainty_pct,
-                friction_coeff_thread=preload_result.friction_coeff_thread,
-                friction_coeff_bearing=preload_result.friction_coeff_bearing,
-                lubrication_type=preload_result.lubrication_type,
+                friction_coeff_thread=preload_result.friction.mu_G,
+                friction_coeff_bearing=preload_result.friction.mu_K,
+                lubrication_type=preload_result.friction.lubrication_type.value,
                 utilization_ratio=utilization_ratio,
                 compliance_status=compliance_status,
                 warnings=warnings,
@@ -389,7 +389,7 @@ class TighteningService:
                 target_preload=target_preload_N,
                 lubrication_type=lubrication_type,
             )
-            target_torque_Nm = target_torque_result.required_torque_Nm
+            target_torque_Nm = target_torque_result.nominal_torque
 
             retorque_range = self.torque_model.calculate_retorque_range(
                 bolt_size=bolt_size,
@@ -406,7 +406,7 @@ class TighteningService:
                     measured_torque=measured_torque_Nm,
                     lubrication_type=lubrication_type,
                 )
-                estimated_current_preload = preload_res.estimated_preload_N
+                estimated_current_preload = preload_res.calculated_preload
 
             preload_loss_pct = None
             if estimated_current_preload is not None and target_preload_N > 0:
@@ -438,9 +438,9 @@ class TighteningService:
                 current_estimated_preload_N=estimated_current_preload,
                 measured_torque_Nm=measured_torque_Nm,
                 target_torque_Nm=target_torque_Nm,
-                suggested_min_torque_Nm=retorque_range["suggested_min_torque_Nm"],
-                suggested_max_torque_Nm=retorque_range["suggested_max_torque_Nm"],
-                nominal_retorque_Nm=retorque_range["nominal_retorque_Nm"],
+                suggested_min_torque_Nm=retorque_range["retorque_torque_min_Nm"],
+                suggested_max_torque_Nm=retorque_range["retorque_torque_max_Nm"],
+                nominal_retorque_Nm=retorque_range["retorque_torque_nominal_Nm"],
                 preload_loss_pct=preload_loss_pct,
                 action=action.value,
                 severity=severity,
@@ -482,7 +482,7 @@ class TighteningService:
                 preload=target_preload_N,
             )
             if limit_check.status == ComplianceStatus.FAIL:
-                rationale.append(f"目标预紧力超过设计极限: {'; '.join(limit_check.warnings)}")
+                rationale.append(f"目标预紧力超过设计极限: {'; '.join(limit_check.issues)}")
                 return RetorqueAction.REPLACE_AND_REASSEMBLE, "critical", rationale
 
             if estimated_current_preload:
@@ -499,7 +499,7 @@ class TighteningService:
             lubrication_type=lubrication_type,
         )
         if lub_eval.need_replace:
-            rationale.append(f"润滑剂状态异常: {'; '.join(lub_eval.warnings)}")
+            rationale.append(f"润滑剂状态异常: {'; '.join(lub_eval.issues)}")
 
         if preload_loss_pct <= self.retorque_warning_threshold_pct / 2:
             rationale.append(
@@ -567,7 +567,7 @@ class TighteningService:
                 target_preload=target_preload_N,
                 lubrication_type=lubrication_type,
             )
-            target_torque_Nm = torque_result.required_torque_Nm
+            target_torque_Nm = torque_result.nominal_torque
 
             full_procedure = self.process_model.generate_full_procedure(
                 procedure_id=procedure_id,
@@ -583,8 +583,8 @@ class TighteningService:
 
             process_id = full_procedure.get("process_id")
             tightening_steps = full_procedure.get("tightening_steps", [])
-            cross_sequence_data = full_procedure.get("cross_sequence", {})
-            cross_sequence = cross_sequence_data.get("sequence_matrix", [])
+            cross_sequence_data = full_procedure.get("tightening_sequence", {})
+            cross_sequence = cross_sequence_data.get("sequence_by_pass", []) if cross_sequence_data else []
             turn_angle = full_procedure.get("turn_angle", {})
             turn_angle_deg = turn_angle.get("total_angle_deg") if turn_angle else None
             tolerance_cfg = full_procedure.get("tolerance_band", {})
@@ -605,7 +605,7 @@ class TighteningService:
             )
             compliance_summary["design_limit"] = design_check.to_dict()
             if design_check.status != ComplianceStatus.PASS:
-                warnings.extend(design_check.warnings)
+                warnings.extend(design_check.issues)
 
             lub_eval = self.compliance_service.evaluate_lubricant(
                 lubrication_type=lubrication_type,
@@ -614,7 +614,7 @@ class TighteningService:
             )
             compliance_summary["lubricant"] = lub_eval.to_dict()
             if lub_eval.need_replace:
-                warnings.extend(lub_eval.warnings)
+                warnings.extend(lub_eval.issues)
 
             uniformity_ref = None
             if bolt_count >= 4:
@@ -624,9 +624,9 @@ class TighteningService:
                 )
                 compliance_summary["uniformity_reference"] = uniformity_ref
 
-            if torque_result.friction_uncertainty_pct > 15:
+            if torque_result.friction.uncertainty_factor > 1.5:
                 warnings.append(
-                    f"当前润滑状态摩擦系数不确定度较高（{torque_result.friction_uncertainty_pct:.1f}%），"
+                    f"当前润滑状态紧固系数较高（αA={torque_result.friction.uncertainty_factor:.2f}），"
                     f"建议使用角度法或液压张拉法提高预紧力精度"
                 )
 
@@ -645,9 +645,9 @@ class TighteningService:
                 cross_sequence=cross_sequence,
                 turn_angle_deg=turn_angle_deg,
                 retorque_range_Nm={
-                    "min_Nm": retorque_range["suggested_min_torque_Nm"],
-                    "nominal_Nm": retorque_range["nominal_retorque_Nm"],
-                    "max_Nm": retorque_range["suggested_max_torque_Nm"],
+                    "min_Nm": retorque_range["retorque_torque_min_Nm"],
+                    "nominal_Nm": retorque_range["retorque_torque_nominal_Nm"],
+                    "max_Nm": retorque_range["retorque_torque_max_Nm"],
                 },
                 compliance_summary=compliance_summary,
                 warnings=warnings,
@@ -700,7 +700,7 @@ class TighteningService:
                         measured_torque=t,
                         lubrication_type=lubrication_type,
                     )
-                    measured_preloads.append(res.estimated_preload_N)
+                    measured_preloads.append(res.calculated_preload)
 
             design_check = self.compliance_service.check_design_limits(
                 bolt_size=bolt_size,
@@ -729,21 +729,31 @@ class TighteningService:
                     if proc:
                         expected_steps = [s.to_dict() for s in proc.steps]
                 if expected_steps:
-                    avg_meas_torque = None
-                    if measured_torque_list:
-                        avg_meas_torque = sum(measured_torque_list) / len(measured_torque_list)
+                    step_count = len(expected_steps)
+                    completed_step_dicts = [
+                        {"step_number": i + 1, "measured_torque_Nm": None}
+                        for i in range(len(completed_steps))
+                    ]
+                    target_torque_for_compliance = 0.0
+                    try:
+                        tq_res = self.torque_model.calculate_torque(
+                            bolt_size=bolt_size,
+                            target_preload=target_preload_N,
+                            lubrication_type=lubrication_type,
+                        )
+                        target_torque_for_compliance = tq_res.nominal_torque
+                    except Exception:
+                        pass
                     process_check = self.compliance_service.check_process_compliance(
-                        expected_steps=expected_steps,
-                        completed_steps=completed_steps,
-                        target_torque_Nm=target_preload_N,
-                        measured_torque_Nm=avg_meas_torque,
+                        expected_steps=step_count,
+                        completed_steps=completed_step_dicts,
+                        target_torque_Nm=target_torque_for_compliance,
                     )
                     process_compliance = process_check.to_dict()
 
             knowledge_cases = self.compliance_service.find_related_knowledge_cases(
                 procedure_id=procedure_id,
                 bolt_size=bolt_size,
-                bolt_grade=bolt_grade,
                 tags=["compliance", "audit"],
             )
 
@@ -754,21 +764,21 @@ class TighteningService:
             if design_check.status == ComplianceStatus.FAIL:
                 overall_status = ComplianceStatus.FAIL
                 issues.append("设计极限不满足")
-                overall_warnings.extend(design_check.warnings)
+                overall_warnings.extend(design_check.issues)
             elif design_check.status == ComplianceStatus.WARNING and overall_status == ComplianceStatus.PASS:
                 overall_status = ComplianceStatus.WARNING
-                overall_warnings.extend(design_check.warnings)
+                overall_warnings.extend(design_check.issues)
 
             if lub_eval.need_replace:
                 if overall_status != ComplianceStatus.FAIL:
                     overall_status = ComplianceStatus.WARNING
                 issues.append("润滑剂需要更换")
-                overall_warnings.extend(lub_eval.warnings)
+                overall_warnings.extend(lub_eval.issues)
 
-            if uniformity_eval and uniformity_eval.get("status") != "ok":
+            if uniformity_eval and uniformity_eval.get("uniformity_quality") not in ("excellent", "good", None):
                 if overall_status != ComplianceStatus.FAIL:
                     overall_status = ComplianceStatus.WARNING
-                issues.append(f"预紧力均匀性: {uniformity_eval.get('status')}")
+                issues.append(f"预紧力均匀性: {uniformity_eval.get('uniformity_quality')}")
 
             if process_compliance and process_compliance.get("status") != "pass":
                 if process_compliance.get("status") == "fail":
@@ -784,7 +794,7 @@ class TighteningService:
                     target_preload=target_preload_N,
                     lubrication_type=lubrication_type,
                 )
-                target_torque_Nm = tq_res.required_torque_Nm
+                target_torque_Nm = tq_res.nominal_torque
             except Exception:
                 pass
 
@@ -872,7 +882,4 @@ class TighteningService:
         return self.compliance_service.list_bolt_grades()
 
     def list_thread_specs(self, coarse_only: bool = False) -> List[Dict[str, Any]]:
-        """
-        列出所有支持的螺纹规格
-        """
         return self.torque_model.list_thread_specs(coarse_only=coarse_only)

@@ -116,7 +116,7 @@ LUBRICANT_TEMPERATURE_LIMITS: Dict[LubricationType, Dict[str, Any]] = {
     LubricationType.ANTI_SEIZE: {
         "min_temp_c": -30, "max_temp_c": 650,
         "max_reuses": 5, "aging_factor_per_cycle": 0.06,
-        "recommended_recommended": "使用5次或超过6个月更换",
+        "recommended_replacement": "使用5次或超过6个月更换",
     },
     LubricationType.ZINC_FLAKE_COATED: {
         "min_temp_c": -50, "max_temp_c": 300,
@@ -149,6 +149,14 @@ class DesignLimitCheck:
     utilization_ratio: float
     issues: List[str]
     recommendations: List[str]
+
+    @property
+    def warnings(self) -> List[str]:
+        return self.issues
+
+    @property
+    def over_yield(self) -> bool:
+        return self.yield_ratio >= 1.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -190,6 +198,14 @@ class LubricantEvaluation:
     estimated_mu_range: Tuple[float, float]
     issues: List[str]
     recommendations: List[str]
+
+    @property
+    def warnings(self) -> List[str]:
+        return self.issues
+
+    @property
+    def need_replace(self) -> bool:
+        return self.status == ComplianceStatus.FAIL or self.remaining_useful_life_pct < 20.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {

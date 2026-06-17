@@ -333,6 +333,14 @@ DEFAULT_WASHER_OUTER_DIAMETERS = {
 }
 
 
+def _resolve_lubrication_type(lubrication_type) -> LubricationType:
+    if isinstance(lubrication_type, LubricationType):
+        return lubrication_type
+    if isinstance(lubrication_type, str):
+        return LubricationType(lubrication_type)
+    raise ValueError(f"无法解析润滑类型: {lubrication_type}")
+
+
 class BoltTorquePreloadModel:
     """
     螺栓扭矩-预紧力换算模型（VDI 2230 简化版）
@@ -359,14 +367,16 @@ class BoltTorquePreloadModel:
         logger.info("螺栓扭矩-预紧力换算模型初始化完成")
 
     def list_thread_specs(
-        self, standard: Optional[ThreadStandard] = None
-    ) -> List[ThreadSpec]:
+        self, standard: Optional[ThreadStandard] = None, coarse_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if coarse_only:
+            standard = ThreadStandard.METRIC_COARSE
         if standard == ThreadStandard.METRIC_FINE:
-            return list(METRIC_FINE_THREADS.values())
+            return [s.to_dict() for s in METRIC_FINE_THREADS.values()]
         elif standard == ThreadStandard.METRIC_COARSE:
-            return list(METRIC_COARSE_THREADS.values())
+            return [s.to_dict() for s in METRIC_COARSE_THREADS.values()]
         else:
-            return list(METRIC_COARSE_THREADS.values()) + list(METRIC_FINE_THREADS.values())
+            return [s.to_dict() for s in METRIC_COARSE_THREADS.values()] + [s.to_dict() for s in METRIC_FINE_THREADS.values()]
 
     def get_thread_spec(self, designation: str) -> Optional[ThreadSpec]:
         key = designation.upper().replace(" ", "")
@@ -445,7 +455,7 @@ class BoltTorquePreloadModel:
         self,
         bolt_size: str,
         target_preload: float,
-        lubrication_type: LubricationType = LubricationType.MACHINE_OIL,
+        lubrication_type=None,
         custom_mu_G: Optional[float] = None,
         custom_mu_K: Optional[float] = None,
         washer_outer_diameter: Optional[float] = None,
@@ -453,6 +463,9 @@ class BoltTorquePreloadModel:
         tightening_factor: Optional[float] = None,
         torque_tolerance_pct: Optional[float] = None,
     ) -> TorqueCalculationResult:
+        if lubrication_type is None:
+            lubrication_type = LubricationType.MACHINE_OIL
+        lubrication_type = _resolve_lubrication_type(lubrication_type)
         bolt_spec = self.get_thread_spec(bolt_size)
         if bolt_spec is None:
             raise ValueError(f"未知螺纹规格: {bolt_size}")
@@ -503,12 +516,15 @@ class BoltTorquePreloadModel:
         self,
         bolt_size: str,
         measured_torque: float,
-        lubrication_type: LubricationType = LubricationType.MACHINE_OIL,
+        lubrication_type=None,
         custom_mu_G: Optional[float] = None,
         custom_mu_K: Optional[float] = None,
         washer_outer_diameter: Optional[float] = None,
         nut_type: str = "hex_nut",
     ) -> PreloadCalculationResult:
+        if lubrication_type is None:
+            lubrication_type = LubricationType.MACHINE_OIL
+        lubrication_type = _resolve_lubrication_type(lubrication_type)
         bolt_spec = self.get_thread_spec(bolt_size)
         if bolt_spec is None:
             raise ValueError(f"未知螺纹规格: {bolt_size}")
@@ -561,7 +577,7 @@ class BoltTorquePreloadModel:
         target_preload: float,
         current_preload: Optional[float] = None,
         measured_torque: Optional[float] = None,
-        lubrication_type: LubricationType = LubricationType.MACHINE_OIL,
+        lubrication_type=None,
         custom_mu_G: Optional[float] = None,
         custom_mu_K: Optional[float] = None,
         washer_outer_diameter: Optional[float] = None,
@@ -569,6 +585,9 @@ class BoltTorquePreloadModel:
         retorque_factor_low: Optional[float] = None,
         retorque_factor_high: Optional[float] = None,
     ) -> Dict[str, Any]:
+        if lubrication_type is None:
+            lubrication_type = LubricationType.MACHINE_OIL
+        lubrication_type = _resolve_lubrication_type(lubrication_type)
         if current_preload is None and measured_torque is not None:
             preload_result = self.calculate_preload_from_torque(
                 bolt_size=bolt_size,
