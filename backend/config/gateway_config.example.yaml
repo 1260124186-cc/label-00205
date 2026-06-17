@@ -1,0 +1,299 @@
+# ============================================================
+# 工业协议采集网关 - 配置示例
+# ============================================================
+
+gateway:
+  # 网关基本信息
+  gateway_id: "gateway-001"
+  name: "车间A采集网关"
+
+  # 数据写入目标: sc_bolt_data / stream_ingest / both
+  data_target: "sc_bolt_data"
+
+  # 流式数据接入接口地址（当 data_target 为 stream_ingest 或 both 时使用）
+  stream_ingest_url: "http://localhost:8000/stream/ingest"
+
+  # 断线缓存配置
+  cache_enabled: true
+  cache_max_size: 100000        # 磁盘缓存最大条数
+  cache_dir: "./data/gateway_cache"
+
+  # 健康检查间隔（秒）
+  health_check_interval: 30
+
+  # 配置热加载检查间隔（秒）
+  config_reload_interval: 60
+
+  # ============================================================
+  # 设备配置列表
+  # ============================================================
+  devices:
+    # ---------- Modbus TCP 设备示例：西门子 S7-1200 ----------
+    - device_id: "plc-siemens-001"
+      name: "西门子S7-1200 PLC"
+      protocol: "modbus_tcp"         # opcua / modbus_tcp / modbus_rtu
+      host: "192.168.1.100"
+      port: 502
+      slave_id: 1
+      timeout: 5.0
+      retry_count: 3
+      enabled: true
+      plc_brand: "siemens"          # siemens / schneider / mitsubishi / omron / allen_bradley / general
+
+      # 连接配置（OPC UA 安全认证等）
+      connection_config:
+        security_mode: "None"        # None / Sign / SignAndEncrypt
+        security_policy: "None"      # None / Basic256 / Basic256Sha256 / Aes128_Sha256_RsaOaep
+        # certificate_path: "./certs/client.crt"
+        # private_key_path: "./certs/client.key"
+        # username: "admin"
+        # password: "password"
+
+      # 点位配置
+      points:
+        - point_id: "motor_speed"
+          sensor_id: "1001"          # 对应 sc_bolt_data 的 sensor_id
+          name: "电机转速"
+          address: "holding_register:100"
+          data_type: "float32"       # bool / int16 / int32 / int64 / uint16 / uint32 / uint64 / float32 / float64 / string
+          unit: "rpm"
+          scale_factor: 1.0          # 工程值 = 原始值 * scale_factor + offset
+          offset: 0.0
+          sampling_period: 1.0       # 采样周期（秒）
+          enabled: true
+          description: "主电机转速"
+          tags:
+            location: "车间A"
+            device: "电机1"
+
+        - point_id: "motor_current"
+          sensor_id: "1002"
+          name: "电机电流"
+          address: "holding_register:102"
+          data_type: "float32"
+          unit: "A"
+          scale_factor: 0.1
+          offset: 0.0
+          sampling_period: 1.0
+          enabled: true
+
+        - point_id: "motor_temp"
+          sensor_id: "1003"
+          name: "电机温度"
+          address: "holding_register:104"
+          data_type: "float32"
+          unit: "°C"
+          scale_factor: 0.1
+          offset: 0.0
+          sampling_period: 5.0
+          enabled: true
+
+        - point_id: "supply_voltage"
+          sensor_id: "1004"
+          name: "供电电压"
+          address: "holding_register:106"
+          data_type: "float32"
+          unit: "V"
+          scale_factor: 1.0
+          offset: 0.0
+          sampling_period: 2.0
+          enabled: true
+
+        - point_id: "run_status"
+          sensor_id: "1005"
+          name: "运行状态"
+          address: "coil:0"
+          data_type: "bool"
+          unit: ""
+          scale_factor: 1.0
+          offset: 0.0
+          sampling_period: 0.5
+          enabled: true
+
+        - point_id: "fault_code"
+          sensor_id: "1006"
+          name: "故障代码"
+          address: "holding_register:112"
+          data_type: "uint16"
+          unit: ""
+          scale_factor: 1.0
+          offset: 0.0
+          sampling_period: 1.0
+          enabled: true
+
+    # ---------- Modbus TCP 设备示例：施耐德 M340 ----------
+    - device_id: "plc-schneider-001"
+      name: "施耐德M340 PLC"
+      protocol: "modbus_tcp"
+      host: "192.168.1.101"
+      port: 502
+      slave_id: 2
+      timeout: 5.0
+      retry_count: 3
+      enabled: false                 # 设为 false 可禁用此设备
+      plc_brand: "schneider"
+
+      points:
+        - point_id: "pressure_1"
+          sensor_id: "2001"
+          name: "压力1"
+          address: "holding_register:100"
+          data_type: "float32"
+          unit: "MPa"
+          scale_factor: 0.001
+          offset: 0.0
+          sampling_period: 1.0
+          enabled: true
+
+        - point_id: "flow_rate"
+          sensor_id: "2002"
+          name: "流量"
+          address: "holding_register:102"
+          data_type: "float32"
+          unit: "m3/h"
+          scale_factor: 0.01
+          offset: 0.0
+          sampling_period: 1.0
+          enabled: true
+
+        - point_id: "temperature_1"
+          sensor_id: "2003"
+          name: "温度1"
+          address: "input_register:0"
+          data_type: "uint16"
+          unit: "°C"
+          scale_factor: 0.1
+          offset: 0.0
+          sampling_period: 2.0
+          enabled: true
+
+        - point_id: "valve_position"
+          sensor_id: "2004"
+          name: "阀门开度"
+          address: "holding_register:108"
+          data_type: "int16"
+          unit: "%"
+          scale_factor: 0.1
+          offset: 0.0
+          sampling_period: 1.0
+          enabled: true
+
+        - point_id: "di_status"
+          sensor_id: "2005"
+          name: "数字输入状态"
+          address: "discrete_input:0"
+          data_type: "uint16"
+          unit: ""
+          scale_factor: 1.0
+          offset: 0.0
+          sampling_period: 0.5
+          enabled: true
+
+    # ---------- OPC UA 设备示例 ----------
+    - device_id: "opcua-server-001"
+      name: "OPC UA 服务器"
+      protocol: "opcua"
+      host: "192.168.1.200"
+      port: 4840
+      timeout: 5.0
+      retry_count: 3
+      enabled: false
+      plc_brand: "general"
+
+      connection_config:
+        security_mode: "None"
+        security_policy: "None"
+        # username: "user"
+        # password: "password"
+        # certificate_path: "./certs/opcua_client.crt"
+        # private_key_path: "./certs/opcua_client.key"
+
+      points:
+        - point_id: "temperature_sensor_1"
+          sensor_id: "3001"
+          name: "温度传感器1"
+          address: "ns=2;s=Temperature.Sensor1"
+          data_type: "float32"
+          unit: "°C"
+          scale_factor: 1.0
+          offset: 0.0
+          sampling_period: 1.0
+          enabled: true
+
+        - point_id: "pressure_sensor_1"
+          sensor_id: "3002"
+          name: "压力传感器1"
+          address: "ns=2;s=Pressure.Sensor1"
+          data_type: "float32"
+          unit: "bar"
+          scale_factor: 1.0
+          offset: 0.0
+          sampling_period: 1.0
+          enabled: true
+
+        - point_id: "flow_sensor_1"
+          sensor_id: "3003"
+          name: "流量传感器1"
+          address: "ns=2;s=Flow.Sensor1"
+          data_type: "float32"
+          unit: "L/min"
+          scale_factor: 1.0
+          offset: 0.0
+          sampling_period: 2.0
+          enabled: true
+
+    # ---------- Modbus RTU 设备示例（串口） ----------
+    - device_id: "rtu-device-001"
+      name: "Modbus RTU 设备"
+      protocol: "modbus_rtu"
+      host: "serial"
+      port: 0
+      slave_id: 1
+      timeout: 2.0
+      retry_count: 3
+      enabled: false
+      plc_brand: "general"
+
+      connection_config:
+        serial_port: "/dev/ttyUSB0"     # Windows: COM1
+        baudrate: 9600
+        parity: "N"                     # N / E / O
+        stopbits: 1
+        bytesize: 8
+
+      points:
+        - point_id: "rtu_temp_1"
+          sensor_id: "4001"
+          name: "RTU温度1"
+          address: "holding_register:0"
+          data_type: "int16"
+          unit: "°C"
+          scale_factor: 0.1
+          offset: 0.0
+          sampling_period: 2.0
+          enabled: true
+
+# ============================================================
+# 寄存器地址格式说明
+# ============================================================
+#
+# Modbus 地址格式：
+#   - 线圈:            coil:0 或 00001
+#   - 离散输入:        discrete_input:0 或 10001
+#   - 保持寄存器:      holding_register:100 或 40101
+#   - 输入寄存器:      input_register:10 或 30011
+#
+# OPC UA 地址格式：
+#   - ns=2;s=NodeId    (命名空间 + 节点ID字符串)
+#   - ns=2;i=100       (命名空间 + 节点ID数字)
+#
+# 数据类型：
+#   - bool, int16, int32, int64
+#   - uint16, uint32, uint64
+#   - float32, float64
+#   - string
+#
+# 量程换算：
+#   工程值 = 原始值 * scale_factor + offset
+#
+# ============================================================
