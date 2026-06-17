@@ -39,6 +39,9 @@ from app.utils.database import db_manager
 from app.utils.device import get_all_device_info
 from app.middleware import RequestContextMiddleware, setup_structured_logging
 from app.core.prometheus import metrics
+from app.core.redis_broadcast import config_sync
+from app.core.event_bus import event_bus, EventType
+from app.core.config_manager import config_manager
 
 
 def setup_logging() -> None:
@@ -78,6 +81,73 @@ def setup_logging() -> None:
     logger.info(f"日志系统初始化完成，级别: {log_level}")
 
 
+def setup_log_level_hot_reload() -> None:
+    """
+    注册日志级别热更新订阅（LOG_LEVEL_CHANGED 事件）。
+
+    当收到 logging.level 变更时：
+    1. 记录原有 stderr handler 的配置
+    2. 移除所有 handlers
+    3. 重新按新级别添加 stderr + file handler
+    """
+    def _on_log_level_changed(event) -> None:
+        try:
+            new_level = config_manager.get('logging.level', 'INFO')
+            log_config = config_manager.get('logging', {})
+            log_file = log_config.get('file', './logs/app.log')
+            backup_count = log_config.get('backup_count', 5)
+            max_size = log_config.get('max_size', 10485760)
+
+            logger.remove()
+
+            log_format_stdout = (
+                "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
+                "{extra[request_id]} | "
+                "<level>{message}</level>"
+            )
+            logger.add(
+                sys.stderr,
+                format=log_format_stdout,
+                level=new_level,
+                colorize=True,
+            )
+
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_format_file = (
+                "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
+                "{level: <8} | "
+                "{name}:{function}:{line} | "
+                "request_id={extra[request_id]} | "
+                "bolt_id={extra[bolt_id]} | "
+                "{message}"
+            )
+            logger.add(
+                log_file,
+                format=log_format_file,
+                level=new_level,
+                rotation=max_size,
+                retention=backup_count,
+                encoding='utf-8'
+            )
+
+            logger.info(
+                f"日志级别热更新成功: {event.data.get('changed_paths', [])}, "
+                f"new_level={new_level}"
+            )
+        except Exception as e:
+            logger.exception(f"日志级别热更新失败: {e}")
+
+    event_bus.subscribe(
+        EventType.LOG_LEVEL_CHANGED,
+        _on_log_level_changed,
+        priority=100,
+    )
+    logger.debug("日志级别热更新订阅已注册")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -85,6 +155,15 @@ async def lifespan(app: FastAPI):
     """
     # 启动时
     logger.info(f"螺栓预紧力预测系统启动中... 版本: {__version__}")
+
+    setup_log_level_hot_reload()
+
+    # 启动Redis配置同步（多实例广播）
+    try:
+        config_sync.start()
+        logger.info("Redis配置同步模块已启动")
+    except Exception as e:
+        logger.warning(f"Redis配置同步启动失败: {e}")
 
     # 显示设备信息
     device_info = get_all_device_info()

@@ -41,6 +41,8 @@ from app.streaming.stream_adapters import (
 from app.services.prediction import PredictionOrchestrator
 from app.utils.config import config
 from app.core.prometheus import metrics
+from app.core.event_bus import event_bus, EventType, Event
+from app.core.config_manager import config_manager
 
 
 class StreamPredictionMode(str, Enum):
@@ -140,6 +142,12 @@ class StreamPredictionEngine:
 
         # 注册回调
         self._register_callbacks()
+
+        event_bus.subscribe(
+            EventType.STREAM_CONFIG_CHANGED,
+            self._on_config_changed,
+            priority=10,
+        )
 
         logger.info(
             f"流式预测引擎初始化完成，模式: {prediction_mode.value}"
@@ -438,7 +446,7 @@ class StreamPredictionEngine:
             # 记录数据摄入QPS指标
             data_count = len(message.values)
             self._record_ingest(node_type=message.node_type, count=data_count)
-            
+
             # 更新窗口填充度指标
             window = self.window_manager.get_window(message.node_id)
             if window:
@@ -448,7 +456,7 @@ class StreamPredictionEngine:
                     bolt_id=message.node_id,
                     ratio=fill_ratio
                 )
-            
+
             # 添加到滑动窗口
             if message.is_batch():
                 is_full = self.window_manager.add_batch(
@@ -609,38 +617,38 @@ class StreamPredictionEngine:
         with self._ingest_lock:
             for _ in range(count):
                 self._ingest_timestamps.append(now)
-        
+
         metrics.record_stream_ingest(
             component=self._component_name,
             node_type=node_type,
             success=True,
             count=count
         )
-        
+
         self._update_qps_metric(node_type)
-    
+
     def _update_qps_metric(self, node_type: str) -> None:
         """更新QPS指标 - 计算最近60秒的QPS"""
         now = time.time()
         cutoff = now - 60.0
-        
+
         with self._ingest_lock:
             recent_count = sum(1 for ts in self._ingest_timestamps if ts >= cutoff)
-        
+
         qps = recent_count / 60.0
         self._current_qps = qps
-        
+
         metrics.update_stream_qps(
             component=self._component_name,
             node_type=node_type,
             qps=qps
         )
-        
+
         metrics.update_stream_active_count(
             component=self._component_name,
             count=len(self._active_streams)
         )
-    
+
     def _cleanup_loop(self) -> None:
         """清理循环"""
         while self._is_running:
@@ -657,13 +665,13 @@ class StreamPredictionEngine:
                 for stream_id in streams_to_remove:
                     self.backpressure_manager.unregister_stream(stream_id)
                     self._active_streams.discard(stream_id)
-                
+
                 # 更新活跃流数指标
                 metrics.update_stream_active_count(
                     component=self._component_name,
                     count=len(self._active_streams)
                 )
-                
+
                 # 定期更新QPS指标（即使没有新数据）
                 if len(self._ingest_timestamps) > 0:
                     self._update_qps_metric("bolt")
@@ -823,6 +831,62 @@ class StreamPredictionEngine:
         except Exception as e:
             logger.error(f"设置最大并发流数失败: {e}")
             return False
+
+    def _on_config_changed(self, event: Event) -> None:
+        """流式配置变更事件回调"""
+        try:
+            changed_paths = event.data.get("changed_paths", [])
+            version = event.data.get("version")
+            logger.info(
+                f"收到流式配置变更事件: version={version}, "
+                f"changed_paths={changed_paths}"
+            )
+            self.reload_config(changed_paths=changed_paths)
+        except Exception as e:
+            logger.exception(f"处理流式配置变更事件失败: {e}")
+
+    def reload_config(
+        self,
+        changed_paths: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        重新加载流式相关配置（热更新）
+
+        更新内容:
+        - stream_prediction.backpressure.* → 调用 backpressure_manager.reload_config
+        - stream_prediction.window.size → set_window_size
+        - stream_prediction.window.ttl_seconds → 更新窗口TTL
+        """
+        result: Dict[str, Any] = {"backpressure": {}, "window": {}, "errors": {}}
+
+        try:
+            backpressure_result = self.backpressure_manager.reload_config(
+                changed_paths=changed_paths
+            )
+            result["backpressure"] = backpressure_result
+
+            try:
+                window_config = config_manager.get('stream_prediction.window', {})
+                window_size = window_config.get('size')
+                if isinstance(window_size, int) and window_size > 0:
+                    old_size = getattr(self.window_manager.window_size, None)
+                    if old_size != window_size:
+                        if self.set_window_size(window_size):
+                            result["window"]["size"] = f"{old_size} -> {window_size}"
+            except Exception as e:
+                logger.error(f"更新窗口配置失败: {e}")
+                result["errors"]["window"] = str(e)
+
+            logger.info(
+                f"流式引擎配置热更新完成: "
+                f"backpressure_changed={len(backpressure_result.get('changed', {}))}, "
+                f"window_changed={len(result['window'])}"
+            )
+        except Exception as e:
+            logger.exception(f"流式引擎配置热更新失败: {e}")
+            result["errors"]["__global__"] = str(e)
+
+        return result
 
 
 # 全局引擎实例

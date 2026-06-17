@@ -15,11 +15,13 @@
 import time
 import threading
 from collections import deque
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, List
 from dataclasses import dataclass
 from loguru import logger
 
 from app.utils.config import config
+from app.core.event_bus import event_bus, EventType, Event
+from app.core.config_manager import config_manager
 
 
 @dataclass
@@ -615,6 +617,72 @@ class StreamConcurrencyManager:
         """
         # 注意：这里简化处理，实际实现需要跟踪每个流的最后活跃时间
         return 0
+
+    def reload_config(
+        self,
+        changed_paths: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        重新加载背压/并发配置（热更新）
+
+        Args:
+            changed_paths: 变更的配置路径列表
+
+        Returns:
+            {"changed": {...old->new}, "errors": {...}}
+        """
+        result: Dict[str, Any] = {"changed": {}, "errors": {}}
+
+        try:
+            backpressure_config = config_manager.get(
+                'stream_prediction.backpressure', {}
+            )
+
+            max_concurrent = backpressure_config.get(
+                'max_concurrent_streams', self.backpressure.max_concurrent_streams
+            )
+            if isinstance(max_concurrent, int) and max_concurrent > 0:
+                old = self.backpressure.max_concurrent_streams
+                if old != max_concurrent:
+                    self.set_max_concurrent_streams(max_concurrent)
+                    result["changed"]["max_concurrent_streams"] = f"{old} -> {max_concurrent}"
+
+            rate_per_stream = backpressure_config.get(
+                'rate_per_stream', self._rate_per_stream
+            )
+            if isinstance(rate_per_stream, (int, float)) and rate_per_stream > 0:
+                old = self._rate_per_stream
+                if old != rate_per_stream:
+                    self.set_rate_per_stream(float(rate_per_stream))
+                    result["changed"]["rate_per_stream"] = f"{old} -> {rate_per_stream}"
+
+            max_queue = backpressure_config.get(
+                'max_queue_size', self.backpressure.max_queue_size
+            )
+            if isinstance(max_queue, int) and max_queue >= 0:
+                old = self.backpressure.max_queue_size
+                if old != max_queue:
+                    self.backpressure.set_max_queue_size(max_queue)
+                    result["changed"]["max_queue_size"] = f"{old} -> {max_queue}"
+
+            queue_timeout = backpressure_config.get(
+                'queue_timeout_seconds', self.backpressure.queue_timeout_seconds
+            )
+            if isinstance(queue_timeout, (int, float)) and queue_timeout > 0:
+                old = self.backpressure.queue_timeout_seconds
+                if old != queue_timeout:
+                    self.backpressure.queue_timeout_seconds = float(queue_timeout)
+                    result["changed"]["queue_timeout_seconds"] = f"{old} -> {queue_timeout}"
+
+            logger.info(
+                f"背压配置热更新完成: changed={len(result['changed'])}, "
+                f"errors={len(result['errors'])}"
+            )
+        except Exception as e:
+            logger.exception(f"背压配置热更新失败: {e}")
+            result["errors"]["__global__"] = str(e)
+
+        return result
 
 
 def create_backpressure_controller_from_config() -> StreamConcurrencyManager:

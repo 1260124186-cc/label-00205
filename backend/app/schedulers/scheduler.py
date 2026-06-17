@@ -27,7 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor
 from datetime import datetime
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from loguru import logger
 import threading
 
@@ -43,6 +43,8 @@ from app.schedulers.task_sharding import (
     get_sharded_task_executor,
     ShardedTaskExecutor,
 )
+from app.core.event_bus import event_bus, EventType, Event
+from app.core.config_manager import config_manager
 
 _task_lock = threading.Lock()
 _running_jobs = set()
@@ -103,6 +105,20 @@ class TaskScheduler:
         self.leader_jobs = config.get(
             'scheduler.leader_election.jobs',
             ['prediction_job', 'monthly_prediction_job']
+        )
+
+        self._job_ids = [
+            'training_job',
+            'prediction_job',
+            'monthly_prediction_job',
+            'alert_upgrade_job',
+            'audit_cleanup_job',
+        ]
+
+        event_bus.subscribe(
+            EventType.SCHEDULER_CONFIG_CHANGED,
+            self._on_config_changed,
+            priority=10,
         )
 
         logger.info("任务调度器初始化完成")
@@ -592,6 +608,176 @@ class TaskScheduler:
         job = self.scheduler.get_job(job_id)
         if job:
             return job.next_run_time is not None
+        return None
+
+    def _on_config_changed(self, event: Event) -> None:
+        """
+        调度配置变更事件回调（由事件总线触发）
+        """
+        try:
+            changed_paths = event.data.get("changed_paths", [])
+            version = event.data.get("version")
+            logger.info(
+                f"收到调度配置变更事件: version={version}, "
+                f"changed_paths={changed_paths}"
+            )
+            self.reload_config(changed_paths=changed_paths)
+        except Exception as e:
+            logger.exception(f"处理调度配置变更事件失败: {e}")
+
+    def reload_config(
+        self,
+        changed_paths: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        重新加载调度配置（热更新 cron 与 enabled 状态）
+
+        Args:
+            changed_paths: 变更的配置路径列表（可选，None则全量同步）
+
+        Returns:
+            {
+                "updated_jobs": [job_id, ...],
+                "failed_jobs": {job_id: reason},
+                "added_jobs": [job_id, ...],
+                "removed_jobs": [job_id, ...],
+            }
+        """
+        result: Dict[str, Any] = {
+            "updated_jobs": [],
+            "failed_jobs": {},
+            "added_jobs": [],
+            "removed_jobs": [],
+        }
+
+        with _task_lock:
+            self.config = config_manager.get('scheduler', {})
+
+            self.leader_required = config_manager.get(
+                'scheduler.leader_election.required', False
+            )
+            self.leader_jobs = config_manager.get(
+                'scheduler.leader_election.jobs',
+                ['prediction_job', 'monthly_prediction_job']
+            )
+
+            job_configs = {
+                'training_job': (
+                    self.config.get('training_job', {}),
+                    self._training_job,
+                ),
+                'prediction_job': (
+                    self.config.get('prediction_job', {}),
+                    self._prediction_job,
+                ),
+                'monthly_prediction_job': (
+                    self.config.get('monthly_prediction_job', {}),
+                    self._monthly_prediction_job,
+                ),
+                'alert_upgrade_job': (
+                    self.config.get('alert_upgrade_job', {}),
+                    self._alert_upgrade_job,
+                ),
+                'audit_cleanup_job': (
+                    self._get_audit_cleanup_config(),
+                    self._audit_cleanup_job,
+                ),
+            }
+
+            for job_id, (job_cfg, job_func) in job_configs.items():
+                try:
+                    action = self._sync_job(job_id, job_cfg, job_func)
+                    if action == 'updated':
+                        result["updated_jobs"].append(job_id)
+                    elif action == 'added':
+                        result["added_jobs"].append(job_id)
+                    elif action == 'removed':
+                        result["removed_jobs"].append(job_id)
+                except Exception as e:
+                    result["failed_jobs"][job_id] = str(e)
+                    logger.error(f"热更新任务 {job_id} 失败: {e}")
+
+            if self.is_running and not self.scheduler.running:
+                try:
+                    self.scheduler.start()
+                    logger.info("调度器已恢复运行")
+                except Exception as e:
+                    logger.warning(f"重启调度器失败（可能已在运行）: {e}")
+
+            logger.info(
+                f"调度配置热更新完成: updated={len(result['updated_jobs'])}, "
+                f"added={len(result['added_jobs'])}, removed={len(result['removed_jobs'])}, "
+                f"failed={len(result['failed_jobs'])}"
+            )
+            return result
+
+    def _get_audit_cleanup_config(self) -> Dict[str, Any]:
+        """获取审计清理任务的配置（兼容从 audit 根节读取）"""
+        audit_cfg = config_manager.get('audit', {})
+        cleanup_enabled = audit_cfg.get('auto_cleanup_enabled', True)
+        cleanup_hours = audit_cfg.get('cleanup_interval_hours', 24)
+        cron = f'0 4 */{max(1, cleanup_hours // 24)} * *'
+        return {
+            'enabled': cleanup_enabled,
+            'cron': cron,
+        }
+
+    def _sync_job(
+        self,
+        job_id: str,
+        job_cfg: Dict[str, Any],
+        job_func: Any,
+    ) -> Optional[str]:
+        """
+        同步单个任务的配置
+
+        Returns:
+            'updated' | 'added' | 'removed' | None（无变化）
+        """
+        from apscheduler.triggers.cron import CronTrigger
+
+        enabled = job_cfg.get('enabled', True)
+        cron = job_cfg.get('cron', '')
+        job = self.scheduler.get_job(job_id)
+
+        if not enabled:
+            if job is not None:
+                self.scheduler.remove_job(job_id)
+                logger.info(f"任务已禁用并移除: {job_id}")
+                return 'removed'
+            return None
+
+        if not cron:
+            return None
+
+        try:
+            trigger = CronTrigger.from_crontab(cron)
+        except Exception as e:
+            raise ValueError(f"无效的 cron 表达式 '{cron}': {e}")
+
+        if job is None:
+            self.scheduler.add_job(
+                job_func,
+                trigger,
+                id=job_id,
+                name=f"{job_id} (热更新添加)",
+                replace_existing=True,
+            )
+            logger.info(f"任务已添加: {job_id}, cron={cron}")
+            return 'added'
+
+        old_trigger_str = str(job.trigger)
+        new_trigger_str = str(trigger)
+        if old_trigger_str != new_trigger_str:
+            job.reschedule(trigger)
+            logger.info(f"任务 cron 已更新: {job_id}, {old_trigger_str} -> {new_trigger_str}")
+            return 'updated'
+
+        if job.next_run_time is None:
+            job.resume()
+            logger.info(f"任务已恢复: {job_id}")
+            return 'updated'
+
         return None
 
 

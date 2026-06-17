@@ -8017,13 +8017,23 @@ async def list_all_models():
 # ==================== 配置中心 ====================
 
 def _get_config_manager():
-    from app.core.config_manager import ConfigManager
-    return ConfigManager()
+    from app.core.config_manager import config_manager
+    return config_manager
 
 
 def _get_scheduler():
     from app.schedulers.scheduler import scheduler
     return scheduler
+
+
+def _get_operator(tenant_ctx: Optional[Dict[str, Any]] = None) -> str:
+    """从租户上下文中提取 operator 标识，缺失则回退为 'api' """
+    if tenant_ctx:
+        for key in ('operator', 'user', 'username', 'user_id', 'tenant_id', 'email'):
+            v = tenant_ctx.get(key)
+            if v is not None:
+                return str(v)
+    return "api"
 
 
 @router.get(
@@ -8032,7 +8042,9 @@ def _get_scheduler():
     tags=["配置中心"],
     summary="获取所有配置中心数据"
 )
-async def get_config_center():
+async def get_config_center(
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
     """获取预警策略、阈值、调度任务的所有配置"""
     try:
         cm = _get_config_manager()
@@ -8114,12 +8126,14 @@ async def get_config_center():
 
 @router.put(
     "/config/warning-strategy",
-    response_model=WarningStrategyConfigSchema,
     tags=["配置中心"],
     summary="更新预警策略配置"
 )
-async def update_warning_strategy(request: WarningStrategyConfigSchema):
-    """更新预警策略配置（策略类型、阈值等）"""
+async def update_warning_strategy(
+    request: WarningStrategyConfigSchema,
+    tenant_ctx: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """更新预警策略配置（策略类型、阈值等），自动触发热更新通知和审计"""
     try:
         cm = _get_config_manager()
 
@@ -8134,10 +8148,28 @@ async def update_warning_strategy(request: WarningStrategyConfigSchema):
             'warning_strategy.strategy_2.false_negative_threshold':
                 request.strategy_2_false_negative_threshold,
         }
-        cm.batch_update(updates)
-        cm.save()
+        result = cm.apply_hot_update(
+            updates,
+            operator=_get_operator(tenant_ctx),
+            description="更新预警策略配置",
+        )
 
-        return request
+        if not result.get("success", False):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "更新预警策略配置失败",
+                    "errors": result.get("errors", {}),
+                },
+            )
+
+        return {
+            **request.model_dump(),
+            "version": result.get("version"),
+            "hot_updated_paths": result.get("hot_updated_paths", []),
+            "require_restart_paths": result.get("require_restart_paths", []),
+            "errors": result.get("errors", {}),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -8147,12 +8179,14 @@ async def update_warning_strategy(request: WarningStrategyConfigSchema):
 
 @router.put(
     "/config/thresholds",
-    response_model=ThresholdConfigSchema,
     tags=["配置中心"],
     summary="更新阈值配置"
 )
-async def update_thresholds(request: ThresholdConfigSchema):
-    """更新风险阈值、预紧力阈值、偏差比例等"""
+async def update_thresholds(
+    request: ThresholdConfigSchema,
+    tenant_ctx: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """更新风险阈值、预紧力阈值、偏差比例等，自动触发热更新通知和审计"""
     try:
         cm = _get_config_manager()
 
@@ -8166,10 +8200,28 @@ async def update_thresholds(request: ThresholdConfigSchema):
             'alert.auto_create_work_order_level': request.auto_create_work_order_level,
             'alert.default_upgrade_minutes': request.default_upgrade_minutes,
         }
-        cm.batch_update(updates)
-        cm.save()
+        result = cm.apply_hot_update(
+            updates,
+            operator=_get_operator(tenant_ctx),
+            description="更新阈值配置（风险/预紧力/偏差）",
+        )
 
-        return request
+        if not result.get("success", False):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "更新阈值配置失败",
+                    "errors": result.get("errors", {}),
+                },
+            )
+
+        return {
+            **request.model_dump(),
+            "version": result.get("version"),
+            "hot_updated_paths": result.get("hot_updated_paths", []),
+            "require_restart_paths": result.get("require_restart_paths", []),
+            "errors": result.get("errors", {}),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -8229,12 +8281,15 @@ async def list_scheduler_jobs():
 
 @router.put(
     "/config/scheduler/jobs/{job_id}",
-    response_model=ScheduledJobSchema,
     tags=["配置中心"],
     summary="更新调度任务配置"
 )
-async def update_scheduler_job(job_id: str, request: SchedulerJobUpdateRequest):
-    """更新指定任务的 Cron 表达式或启用/禁用状态"""
+async def update_scheduler_job(
+    job_id: str,
+    request: SchedulerJobUpdateRequest,
+    tenant_ctx: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """更新指定任务的 Cron 表达式或启用/禁用状态（统一使用 ConfigManager.apply_hot_update）"""
     try:
         cm = _get_config_manager()
         sched = _get_scheduler()
@@ -8254,26 +8309,29 @@ async def update_scheduler_job(job_id: str, request: SchedulerJobUpdateRequest):
             'audit_cleanup_job': '审计过期记录清理任务',
         }
 
+        updates: Dict[str, Any] = {}
         if request.cron is not None:
-            cm.set(f'scheduler.{job_id}.cron', request.cron, validate=False)
-            try:
-                if sched.is_running:
-                    sched.update_job_cron(job_id, request.cron)
-            except Exception as cron_err:
-                logger.warning(f"更新运行中调度器失败: {cron_err}")
-
+            updates[f'scheduler.{job_id}.cron'] = request.cron
         if request.enabled is not None:
-            cm.set(f'scheduler.{job_id}.enabled', request.enabled, validate=False)
-            try:
-                if sched.is_running:
-                    if request.enabled:
-                        sched.enable_job(job_id)
-                    else:
-                        sched.disable_job(job_id)
-            except Exception as enable_err:
-                logger.warning(f"更新运行中调度器状态失败: {enable_err}")
+            updates[f'scheduler.{job_id}.enabled'] = request.enabled
 
-        cm.save()
+        if not updates:
+            raise HTTPException(status_code=400, detail="没有提供要更新的字段")
+
+        result = cm.apply_hot_update(
+            updates,
+            operator=_get_operator(tenant_ctx),
+            description=f"更新调度任务 {job_id} 的 Cron/启用状态",
+        )
+
+        if not result.get("success", False):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "更新调度任务失败",
+                    "errors": result.get("errors", {}),
+                },
+            )
 
         job_cron = cm.get(f'scheduler.{job_id}.cron', '')
         job_enabled = cm.get(f'scheduler.{job_id}.enabled', True)
@@ -8295,6 +8353,10 @@ async def update_scheduler_job(job_id: str, request: SchedulerJobUpdateRequest):
             'cron': job_cron,
             'next_run': next_run,
             'description': job_names[job_id],
+            'version': result.get("version"),
+            'hot_updated_paths': result.get("hot_updated_paths", []),
+            'require_restart_paths': result.get("require_restart_paths", []),
+            'errors': result.get("errors", {}),
         }
     except HTTPException:
         raise
@@ -8308,7 +8370,10 @@ async def update_scheduler_job(job_id: str, request: SchedulerJobUpdateRequest):
     tags=["配置中心"],
     summary="手动触发调度任务"
 )
-async def trigger_scheduler_job(job_id: str):
+async def trigger_scheduler_job(
+    job_id: str,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
     """立即执行指定的调度任务"""
     try:
         valid_jobs = [
@@ -8335,6 +8400,184 @@ async def trigger_scheduler_job(job_id: str):
         raise
     except Exception as e:
         logger.error(f"触发调度任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 配置中心新接口：统一apply、版本审计、回滚 ----------
+
+from pydantic import BaseModel, Field
+
+
+class ConfigApplyRequest(BaseModel):
+    updates: Dict[str, Any] = Field(..., description="要更新的配置，格式: {\"配置路径\": 新值}")
+    operator: Optional[str] = Field(None, description="操作者标识，可选，默认从租户上下文提取")
+    description: Optional[str] = Field("", description="变更说明")
+    require_restart_paths: Optional[List[str]] = Field(None, description="显式声明需重启的配置路径")
+    broadcast_redis: bool = Field(True, description="是否通过Redis广播到多实例")
+
+
+class ConfigRollbackRequest(BaseModel):
+    operator: Optional[str] = Field(None, description="操作者标识")
+    description: Optional[str] = Field("", description="回滚说明")
+
+
+@router.get(
+    "/config/hot-updatable",
+    tags=["配置中心"],
+    summary="查询配置热更新白/黑名单前缀"
+)
+async def list_hot_updatable_prefixes(
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """返回支持热更新与不支持热更新的配置前缀列表，供前端提示用户"""
+    try:
+        from app.core.config_manager import (
+            HOT_UPDATE_WHITELIST_PREFIXES,
+            NON_HOT_UPDATE_BLACKLIST_PREFIXES,
+        )
+        return {
+            "hot_update_whitelist": list(HOT_UPDATE_WHITELIST_PREFIXES),
+            "non_hot_update_blacklist": list(NON_HOT_UPDATE_BLACKLIST_PREFIXES),
+            "policy": "黑名单优先，其次白名单命中，默认不热更新（保守策略）",
+        }
+    except Exception as e:
+        logger.error(f"查询热更新前缀失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/config/apply",
+    tags=["配置中心"],
+    summary="统一配置热更新入口（推荐使用）"
+)
+async def apply_config_hot_update(
+    request: ConfigApplyRequest,
+    tenant_ctx: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """
+    批量更新任意配置，自动分类（热更新/需重启）、
+    触发事件通知 + Redis广播 + 版本审计 + 快照备份。
+
+    推荐前端统一使用此接口，替代分散的 warning-strategy / thresholds / jobs PUT。
+    """
+    try:
+        cm = _get_config_manager()
+        operator = request.operator or _get_operator(tenant_ctx)
+
+        result = cm.apply_hot_update(
+            updates=request.updates,
+            operator=operator,
+            description=request.description or "",
+            require_restart_paths=request.require_restart_paths,
+            broadcast_redis=request.broadcast_redis,
+        )
+
+        if not result.get("success", False):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "配置更新失败",
+                    "errors": result.get("errors", {}),
+                },
+            )
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"统一配置热更新失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/config/versions",
+    tags=["配置中心"],
+    summary="查询配置版本历史（审计）"
+)
+async def get_config_version_history(
+    limit: int = Query(50, ge=1, le=500, description="返回数量上限"),
+    operator: Optional[str] = Query(None, description="按操作者过滤"),
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """返回从新到旧的配置版本列表，包含变更摘要、快照文件、操作者"""
+    try:
+        cm = _get_config_manager()
+        records = cm.get_version_history(limit=limit, operator=operator)
+        return {
+            "current_version": cm.current_version,
+            "total": len(records),
+            "records": records,
+        }
+    except Exception as e:
+        logger.error(f"查询配置版本历史失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/config/versions/{version}",
+    tags=["配置中心"],
+    summary="查询指定版本的详细信息"
+)
+async def get_config_version_detail(
+    version: int,
+    _: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """返回指定版本的详细变更明细和快照文件路径"""
+    try:
+        cm = _get_config_manager()
+        detail = cm.get_version(version)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"版本 v{version} 不存在")
+        return detail
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询配置版本 v{version} 失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/config/versions/{version}/rollback",
+    tags=["配置中心"],
+    summary="回滚到指定配置版本"
+)
+async def rollback_config_version(
+    version: int,
+    request: Optional[ConfigRollbackRequest] = None,
+    tenant_ctx: Dict[str, Any] = Depends(get_tenant_context),
+):
+    """
+    回滚到指定版本。
+
+    流程：读取目标版本的快照文件 -> 对比当前配置 -> 生成 updates -> 再次调用 apply_hot_update()
+    因此回滚操作同样会产生新版本号，并触发事件/广播，可在版本历史中看到 rollback_target 标记。
+    """
+    try:
+        cm = _get_config_manager()
+        req = request or ConfigRollbackRequest()
+        operator = req.operator or _get_operator(tenant_ctx)
+
+        result = cm.rollback_to_version(
+            version=version,
+            operator=operator,
+            description=req.description or "",
+        )
+
+        if not result.get("success", False):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"回滚到 v{version} 失败",
+                    "error": result.get("error"),
+                    "available_versions": result.get("available_versions"),
+                },
+            )
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"回滚配置到 v{version} 失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
