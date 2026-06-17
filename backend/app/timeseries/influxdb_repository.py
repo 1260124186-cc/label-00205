@@ -461,45 +461,80 @@ class InfluxDBRepository(TimeSeriesRepository):
         if aggregated:
             window_seconds = query.aggregation_level.to_seconds()
 
+            # 多次聚合后 join 方式（注意：join 不能用 |> 链式，需直接调用）
             flux_query = f'''
-                from(bucket: "{self.bucket}")
+                mean_tbl = from(bucket: "{self.bucket}")
                     |> range(start: {start}, stop: {stop})
                     |> filter(fn: (r) => r["_measurement"] == "bolt_data")
                     |> filter(fn: (r) => r["_field"] == "value")
                     {sensor_filter}
-                    |> aggregateWindow(
-                        every: {window_seconds}s,
-                        fn: (tables=<-, column="_value") => tables
-                            |> reduce(
-                                identity: {{
-                                    min: 0.0,
-                                    max: 0.0,
-                                    mean: 0.0,
-                                    stddev: 0.0,
-                                    count: 0.0,
-                                    sum: 0.0,
-                                    first: 0.0,
-                                    last: 0.0
-                                }},
-                                fn: (r, accumulator) => {{
-                                    count: accumulator.count + 1.0,
-                                    sum: accumulator.sum + r._value,
-                                    min: if accumulator.count == 0.0 then r._value else math.min(x: accumulator.min, y: r._value),
-                                    max: if accumulator.count == 0.0 then r._value else math.max(x: accumulator.max, y: r._value),
-                                    mean: (accumulator.mean * accumulator.count + r._value) / (accumulator.count + 1.0),
-                                    stddev: 0.0,
-                                    first: if accumulator.count == 0.0 then r._value else accumulator.first,
-                                    last: r._value
-                                }}
-                            )
-                            |> map(fn: (r) => ({{
-                                r with
-                                    open: r.first,
-                                    close: r.last,
-                                    high: r.max,
-                                    low: r.min
-                            }}))
-                    )
+                    |> aggregateWindow(every: {window_seconds}s, fn: mean, createEmpty: false)
+                    |> keep(columns: ["_time", "sensor_id", "_value"])
+                    |> rename(columns: {{"_value": "mean"}})
+
+                min_tbl = from(bucket: "{self.bucket}")
+                    |> range(start: {start}, stop: {stop})
+                    |> filter(fn: (r) => r["_measurement"] == "bolt_data")
+                    |> filter(fn: (r) => r["_field"] == "value")
+                    {sensor_filter}
+                    |> aggregateWindow(every: {window_seconds}s, fn: min, createEmpty: false)
+                    |> keep(columns: ["_time", "sensor_id", "_value"])
+                    |> rename(columns: {{"_value": "min"}})
+
+                max_tbl = from(bucket: "{self.bucket}")
+                    |> range(start: {start}, stop: {stop})
+                    |> filter(fn: (r) => r["_measurement"] == "bolt_data")
+                    |> filter(fn: (r) => r["_field"] == "value")
+                    {sensor_filter}
+                    |> aggregateWindow(every: {window_seconds}s, fn: max, createEmpty: false)
+                    |> keep(columns: ["_time", "sensor_id", "_value"])
+                    |> rename(columns: {{"_value": "max"}})
+
+                count_tbl = from(bucket: "{self.bucket}")
+                    |> range(start: {start}, stop: {stop})
+                    |> filter(fn: (r) => r["_measurement"] == "bolt_data")
+                    |> filter(fn: (r) => r["_field"] == "value")
+                    {sensor_filter}
+                    |> aggregateWindow(every: {window_seconds}s, fn: count, createEmpty: false)
+                    |> keep(columns: ["_time", "sensor_id", "_value"])
+                    |> rename(columns: {{"_value": "count"}})
+
+                sum_tbl = from(bucket: "{self.bucket}")
+                    |> range(start: {start}, stop: {stop})
+                    |> filter(fn: (r) => r["_measurement"] == "bolt_data")
+                    |> filter(fn: (r) => r["_field"] == "value")
+                    {sensor_filter}
+                    |> aggregateWindow(every: {window_seconds}s, fn: sum, createEmpty: false)
+                    |> keep(columns: ["_time", "sensor_id", "_value"])
+                    |> rename(columns: {{"_value": "sum"}})
+
+                first_tbl = from(bucket: "{self.bucket}")
+                    |> range(start: {start}, stop: {stop})
+                    |> filter(fn: (r) => r["_measurement"] == "bolt_data")
+                    |> filter(fn: (r) => r["_field"] == "value")
+                    {sensor_filter}
+                    |> aggregateWindow(every: {window_seconds}s, fn: first, createEmpty: false)
+                    |> keep(columns: ["_time", "sensor_id", "_value"])
+                    |> rename(columns: {{"_value": "open"}})
+
+                last_tbl = from(bucket: "{self.bucket}")
+                    |> range(start: {start}, stop: {stop})
+                    |> filter(fn: (r) => r["_measurement"] == "bolt_data")
+                    |> filter(fn: (r) => r["_field"] == "value")
+                    {sensor_filter}
+                    |> aggregateWindow(every: {window_seconds}s, fn: last, createEmpty: false)
+                    |> keep(columns: ["_time", "sensor_id", "_value"])
+                    |> rename(columns: {{"_value": "close"}})
+
+                // 多次 join（不能用 |> 链式，必须直接传 tables）
+                step1 = join(tables: {{mean: mean_tbl, min: min_tbl}}, on: ["_time", "sensor_id"])
+                step2 = join(tables: {{step1: step1, max: max_tbl}}, on: ["_time", "sensor_id"])
+                step3 = join(tables: {{step2: step2, count: count_tbl}}, on: ["_time", "sensor_id"])
+                step4 = join(tables: {{step3: step3, sum: sum_tbl}}, on: ["_time", "sensor_id"])
+                step5 = join(tables: {{step4: step4, open: first_tbl}}, on: ["_time", "sensor_id"])
+                step6 = join(tables: {{step5: step5, close: last_tbl}}, on: ["_time", "sensor_id"])
+
+                step6
                     |> sort(columns: ["_time"], desc: {order_direction})
                     {limit_clause}
             '''

@@ -232,21 +232,20 @@ class DownsamplingEngine:
             logger.warning(f"源级别与目标级别相同，跳过: {target_level.value}")
             return 0
 
-        if end_time is None:
-            # 统一使用带本地时区的 aware datetime，避免 naive/aware 比较报错
-            end_time = datetime.now().astimezone()
+        local_tz = datetime.now().astimezone().tzinfo
 
+        # 第一步：确保 end_time 是 aware datetime
+        if end_time is None:
+            end_time = datetime.now().astimezone()
+        elif end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=local_tz)
+
+        # 第二步：确保 start_time 是 aware datetime
         if start_time is None:
             retention = timedelta(days=policy.retention_days)
             start_time = end_time - retention
-        else:
-            # 确保 start_time 也是 aware
-            if start_time.tzinfo is None:
-                start_time = start_time.replace(tzinfo=end_time.tzinfo)
-
-        # 确保 end_time 是 aware（若传入的是 naive，则用本地时区）
-        if end_time.tzinfo is None:
-            end_time = end_time.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        elif start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=local_tz)
 
         total_aggregated = 0
         batch_size = policy.batch_size
@@ -362,6 +361,8 @@ class DownsamplingEngine:
         """
         将时间戳对齐到指定时间间隔的起始点
 
+        支持 naive 和 aware datetime，输出与输入保持一致。
+
         Args:
             ts: 原始时间戳
             interval_seconds: 时间间隔（秒）
@@ -369,11 +370,26 @@ class DownsamplingEngine:
         Returns:
             对齐后的时间戳
         """
-        epoch = datetime(1970, 1, 1)
+        from datetime import timezone as dt_timezone
+
+        is_aware = ts.tzinfo is not None
+
+        if is_aware:
+            epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
+            tz = ts.tzinfo
+        else:
+            epoch = datetime(1970, 1, 1)
+            tz = None
+
         delta = ts - epoch
         total_seconds = int(delta.total_seconds())
         aligned_seconds = (total_seconds // interval_seconds) * interval_seconds
-        return epoch + timedelta(seconds=aligned_seconds)
+        result = epoch + timedelta(seconds=aligned_seconds)
+
+        if is_aware and tz != dt_timezone.utc:
+            result = result.astimezone(tz)
+
+        return result
 
     def _combine_std(self, points: List[AggregatedDataPoint]) -> float:
         """

@@ -448,6 +448,10 @@ class TimescaleDBRepository(TimeSeriesRepository):
             else AggregationLevel.RAW
         )
         source_table = self._get_agg_table(source_level)
+
+        # 源表的时间列名：原始表是 time，聚合表是 bucket
+        time_col = "time" if source_level == AggregationLevel.RAW else "bucket"
+        # interval 直接字面量拼接到 SQL（interval 类型不能作为绑定变量
         interval = self._get_interval_sql(level)
 
         if end_time is None:
@@ -474,19 +478,19 @@ class TimescaleDBRepository(TimeSeriesRepository):
             sql = self._text(f"""
                 INSERT INTO {target_table} (bucket, sensor_id, open, high, low, close, mean, stddev, count, sum)
                 SELECT
-                    time_bucket(:interval, time) AS bucket,
+                    time_bucket(INTERVAL '{interval}', {time_col}) AS bucket,
                     sensor_id,
-                    first(value, time) AS open,
+                    first(value, {time_col}) AS open,
                     max(value) AS high,
                     min(value) AS low,
-                    last(value, time) AS close,
+                    last(value, {time_col}) AS close,
                     avg(value) AS mean,
                     stddev(value) AS stddev,
                     count(*) AS count,
                     sum(value) AS sum
                 FROM {source_table}
-                WHERE time >= :start_time
-                  AND time < :end_time
+                WHERE {time_col} >= :start_time
+                  AND {time_col} < :end_time
                   {sensor_filter}
                 GROUP BY bucket, sensor_id
                 ON CONFLICT (bucket, sensor_id) DO UPDATE SET
@@ -500,7 +504,6 @@ class TimescaleDBRepository(TimeSeriesRepository):
                     sum = EXCLUDED.sum
                 RETURNING 1
             """)
-            params['interval'] = interval
 
             with self._Session() as session:
                 result = session.execute(sql, params)

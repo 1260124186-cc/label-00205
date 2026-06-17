@@ -33,6 +33,7 @@ from app.api.timeseries_schemas import (
 
 from app.timeseries.base import (
     TimeSeriesDataPoint,
+    TimeSeriesQuery,
     AggregationLevel,
 )
 from app.timeseries.factory import (
@@ -289,9 +290,11 @@ async def count_points(
     repo = _ensure_timeseries_enabled()
 
     count = repo.count_points(
-        sensor_id=sensor_id,
-        start_time=start_time,
-        end_time=end_time,
+        TimeSeriesQuery(
+            sensor_id=sensor_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
     )
 
     return {
