@@ -278,22 +278,53 @@ class TimeSeriesRepository(ABC):
     @abstractmethod
     def count_points(
         self,
-        sensor_id: Optional[str] = None,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        query: TimeSeriesQuery,
     ) -> int:
         """
         统计数据点数量
 
         Args:
-            sensor_id: 传感器ID（可选）
-            start_time: 起始时间（可选）
-            end_time: 结束时间（可选）
+            query: 查询参数（使用 sensor_id, start_time, end_time）
 
         Returns:
             数据点总数
         """
         pass
+
+    def get_statistics(
+        self,
+        query: TimeSeriesQuery,
+    ) -> Optional[Dict[str, float]]:
+        """
+        获取统计信息（均值/极值/标准差等）
+
+        此为默认实现（基于原始数据计算），后端可覆写以优化性能。
+
+        Args:
+            query: 查询参数
+
+        Returns:
+            统计字典 {'count', 'mean', 'std', 'min', 'max', 'sum', 'first', 'last'}
+            无数据时返回 None
+        """
+        import numpy as np
+
+        points = self.query_raw(query)
+        if not points:
+            return None
+
+        values = np.array([p.value for p in points])
+        return {
+            'count': int(len(values)),
+            'mean': float(np.mean(values)),
+            'std': float(np.std(values)) if len(values) > 1 else 0.0,
+            'min': float(np.min(values)),
+            'max': float(np.max(values)),
+            'sum': float(np.sum(values)),
+            'first': float(values[0]),
+            'last': float(values[-1]),
+            'range': float(np.max(values) - np.min(values)),
+        }
 
     @abstractmethod
     def list_sensors(self) -> List[str]:
@@ -328,6 +359,89 @@ class TimeSeriesRepository(ABC):
 
         Returns:
             生成的聚合数据点数
+        """
+        pass
+
+    def cleanup_expired(
+        self,
+        retention_days: Dict[AggregationLevel, int],
+    ) -> Dict[str, int]:
+        """
+        清理过期数据（根据保留策略）
+
+        Args:
+            retention_days: {聚合级别: 保留天数} 字典
+
+        Returns:
+            {级别: 删除条数} 统计字典
+        """
+        from datetime import timedelta
+
+        deleted = {}
+        now = datetime.now()
+
+        for level, days in retention_days.items():
+            cutoff = now - timedelta(days=days)
+            count = self._delete_before(level=level, cutoff_time=cutoff)
+            deleted[level.value] = count
+
+        return deleted
+
+    @abstractmethod
+    def _delete_before(
+        self,
+        level: AggregationLevel,
+        cutoff_time: datetime,
+    ) -> int:
+        """
+        删除指定级别 cutoff_time 之前的数据（内部实现）
+
+        Args:
+            level: 数据级别
+            cutoff_time: 截止时间（此之前的数据将被删除）
+
+        Returns:
+            删除条数
+        """
+        pass
+
+    def delete_by_sensor(
+        self,
+        sensor_id: str,
+    ) -> int:
+        """
+        删除某个传感器的所有数据（含所有级别）
+
+        Args:
+            sensor_id: 传感器ID
+
+        Returns:
+            删除的数据点总数
+        """
+        deleted = 0
+        for level in AggregationLevel:
+            try:
+                count = self._delete_sensor_at_level(sensor_id, level)
+                deleted += count
+            except Exception:
+                continue
+        return deleted
+
+    @abstractmethod
+    def _delete_sensor_at_level(
+        self,
+        sensor_id: str,
+        level: AggregationLevel,
+    ) -> int:
+        """
+        删除某个传感器指定级别的数据（内部实现）
+
+        Args:
+            sensor_id: 传感器ID
+            level: 数据级别
+
+        Returns:
+            删除条数
         """
         pass
 

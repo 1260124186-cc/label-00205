@@ -233,11 +233,20 @@ class DownsamplingEngine:
             return 0
 
         if end_time is None:
-            end_time = datetime.now()
+            # 统一使用带本地时区的 aware datetime，避免 naive/aware 比较报错
+            end_time = datetime.now().astimezone()
 
         if start_time is None:
             retention = timedelta(days=policy.retention_days)
             start_time = end_time - retention
+        else:
+            # 确保 start_time 也是 aware
+            if start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=end_time.tzinfo)
+
+        # 确保 end_time 是 aware（若传入的是 naive，则用本地时区）
+        if end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=datetime.now().astimezone().tzinfo)
 
         total_aggregated = 0
         batch_size = policy.batch_size

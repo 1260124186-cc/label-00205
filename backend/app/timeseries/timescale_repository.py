@@ -97,14 +97,20 @@ class TimescaleDBRepository(TimeSeriesRepository):
     def write_point(self, point: TimeSeriesDataPoint) -> bool:
         """写入单个数据点"""
         try:
+            import json
+
             with self._Session() as session:
-                fields_json = {k: v for k, v in point.fields.items()} if point.fields else {}
-                tags_json = {k: v for k, v in point.tags.items()} if point.tags else {}
+                fields_json = json.dumps(
+                    {k: v for k, v in point.fields.items()} if point.fields else {}
+                )
+                tags_json = json.dumps(
+                    {k: v for k, v in point.tags.items()} if point.tags else {}
+                )
 
                 sql = self._text(f"""
                     INSERT INTO {self.RAW_TABLE}
                     (time, sensor_id, value, fields, tags)
-                    VALUES (:time, :sensor_id, :value, :fields::jsonb, :tags::jsonb)
+                    VALUES (:time, :sensor_id, :value, CAST(:fields AS JSONB), CAST(:tags AS JSONB))
                 """)
 
                 session.execute(sql, {
@@ -126,11 +132,17 @@ class TimescaleDBRepository(TimeSeriesRepository):
             return 0
 
         try:
+            import json
+
             with self._Session() as session:
                 rows = []
                 for point in points:
-                    fields_json = {k: v for k, v in point.fields.items()} if point.fields else {}
-                    tags_json = {k: v for k, v in point.tags.items()} if point.tags else {}
+                    fields_json = json.dumps(
+                        {k: v for k, v in point.fields.items()} if point.fields else {}
+                    )
+                    tags_json = json.dumps(
+                        {k: v for k, v in point.tags.items()} if point.tags else {}
+                    )
                     rows.append({
                         'time': point.timestamp,
                         'sensor_id': point.sensor_id,
@@ -142,7 +154,7 @@ class TimescaleDBRepository(TimeSeriesRepository):
                 sql = self._text(f"""
                     INSERT INTO {self.RAW_TABLE}
                     (time, sensor_id, value, fields, tags)
-                    VALUES (:time, :sensor_id, :value, :fields::jsonb, :tags::jsonb)
+                    VALUES (:time, :sensor_id, :value, CAST(:fields AS JSONB), CAST(:tags AS JSONB))
                 """)
 
                 session.execute(sql, rows)
@@ -304,26 +316,24 @@ class TimescaleDBRepository(TimeSeriesRepository):
 
     def count_points(
         self,
-        sensor_id: Optional[str] = None,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        query: TimeSeriesQuery,
     ) -> int:
         """统计数据点数量"""
         try:
             where_parts = []
             params = {}
 
-            if sensor_id:
+            if query.sensor_id:
                 where_parts.append("sensor_id = :sensor_id")
-                params['sensor_id'] = sensor_id
+                params['sensor_id'] = query.sensor_id
 
-            if start_time:
+            if query.start_time:
                 where_parts.append("time >= :start_time")
-                params['start_time'] = start_time
+                params['start_time'] = query.start_time
 
-            if end_time:
+            if query.end_time:
                 where_parts.append("time <= :end_time")
-                params['end_time'] = end_time
+                params['end_time'] = query.end_time
 
             where_clause = ""
             if where_parts:
@@ -341,6 +351,65 @@ class TimescaleDBRepository(TimeSeriesRepository):
                 return int(row.cnt) if row else 0
         except Exception as e:
             logger.error(f"TimescaleDB 统计数据点失败: {e}")
+            return 0
+
+    def _delete_before(
+        self,
+        level: AggregationLevel,
+        cutoff_time: datetime,
+    ) -> int:
+        """删除指定级别 cutoff_time 之前的数据"""
+        try:
+            if level == AggregationLevel.RAW:
+                table = self.RAW_TABLE
+                time_col = "time"
+            else:
+                table = self._get_agg_table(level)
+                time_col = "bucket"
+
+            sql = self._text(f"""
+                DELETE FROM {table}
+                WHERE {time_col} < :cutoff
+            """)
+
+            with self._Session() as session:
+                result = session.execute(sql, {'cutoff': cutoff_time})
+                count = result.rowcount
+                session.commit()
+
+            logger.info(f"过期清理 [{level.value}] 删除 {count} 条（cutoff={cutoff_time}）")
+            return count
+        except Exception as e:
+            logger.error(f"TimescaleDB 过期清理失败 [{level.value}]: {e}")
+            return 0
+
+    def _delete_sensor_at_level(
+        self,
+        sensor_id: str,
+        level: AggregationLevel,
+    ) -> int:
+        """删除某个传感器指定级别的数据"""
+        try:
+            if level == AggregationLevel.RAW:
+                table = self.RAW_TABLE
+                time_col = "time"
+            else:
+                table = self._get_agg_table(level)
+                time_col = "bucket"
+
+            sql = self._text(f"""
+                DELETE FROM {table}
+                WHERE sensor_id = :sensor_id
+            """)
+
+            with self._Session() as session:
+                result = session.execute(sql, {'sensor_id': str(sensor_id)})
+                count = result.rowcount
+                session.commit()
+
+            return count
+        except Exception as e:
+            logger.error(f"TimescaleDB 删除传感器 {sensor_id} 数据失败 [{level.value}]: {e}")
             return 0
 
     def list_sensors(self) -> List[str]:

@@ -11900,3 +11900,267 @@ async def run_what_if_simulation(
     except Exception as e:
         logger.error(f"What-if仿真执行失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 时序数据历史分析（兼容层：切到时序分析服务）
+# ============================================================
+
+@router.get(
+    "/bolt/{sensor_id}/trend",
+    tags=["时序历史分析"],
+    summary="获取螺栓预紧力趋势（优先时序库）"
+)
+async def get_bolt_trend_compat(
+    sensor_id: str,
+    start_time: Optional[datetime] = Query(None, description="开始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    days: Optional[int] = Query(7, description="回溯天数（未指定start/end时使用）"),
+    aggregation: Optional[str] = Query("auto", description="聚合级别: auto/raw/minute/hour"),
+):
+    """
+    获取螺栓预紧力趋势（兼容旧接口，优先从时序库读取）
+
+    - 若启用了时序库：使用时序分析服务读取（自动按时间范围选择聚合级别）
+    - 否则：回退到 MySQL 读取原始数据
+
+    返回格式与旧接口一致，可直接替换原有前端调用。
+    """
+    try:
+        from app.timeseries.factory import is_timeseries_enabled, create_timeseries_repository
+        from app.services.timeseries_service import get_timeseries_analysis_service
+        from datetime import timedelta
+
+        if is_timeseries_enabled():
+            service = get_timeseries_analysis_service()
+            # 默认回溯天数
+            if start_time is None and end_time is None:
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=days or 7)
+
+            result = service.get_trend(
+                sensor_id=str(sensor_id),
+                start_time=start_time,
+                end_time=end_time,
+                aggregation_level=aggregation,
+            )
+
+            # 兼容旧格式输出
+            data_list = [
+                {
+                    'time': p['timestamp'],
+                    'value': p.get('mean', p.get('value')),
+                    'open': p.get('open'),
+                    'high': p.get('high'),
+                    'low': p.get('low'),
+                    'close': p.get('close'),
+                    'count': p.get('count'),
+                }
+                for p in result.get('points', [])
+            ]
+
+            return {
+                'sensor_id': sensor_id,
+                'datasource': 'timeseries',
+                'aggregation': result.get('aggregation_level', aggregation),
+                'total_points': len(data_list),
+                'start_time': result.get('start_time'),
+                'end_time': result.get('end_time'),
+                'data': data_list,
+                'statistics': result.get('statistics'),
+            }
+
+        # 回退：MySQL 读取原始数据
+        from app.utils.database import get_bolt_recent_data
+        limit = 5000
+        recent = get_bolt_recent_data(
+            sensor_id=int(sensor_id) if sensor_id.isdigit() else sensor_id,
+            limit=limit
+        )
+
+        data_list = []
+        for d in recent:
+            data_list.append({
+                'time': d.create_time.isoformat() if hasattr(d.create_time, 'isoformat') else str(d.create_time),
+                'value': float(d.ptf),
+            })
+
+        return {
+            'sensor_id': sensor_id,
+            'datasource': 'mysql',
+            'aggregation': 'raw',
+            'total_points': len(data_list),
+            'data': list(reversed(data_list)),  # 升序
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取螺栓趋势数据失败 [{sensor_id}]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/bolt/{sensor_id}/statistics",
+    tags=["时序历史分析"],
+    summary="获取螺栓统计分析（优先时序库）"
+)
+async def get_bolt_statistics_compat(
+    sensor_id: str,
+    start_time: Optional[datetime] = Query(None, description="开始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    days: Optional[int] = Query(30, description="回溯天数"),
+):
+    """
+    获取螺栓统计分析（均值、标准差、极值、趋势斜率等）
+
+    - 时序库启用时：使用时序分析服务完整计算
+    - 否则：使用 MySQL 数据计算基础统计
+    """
+    try:
+        from app.timeseries.factory import is_timeseries_enabled
+        from app.services.timeseries_service import get_timeseries_analysis_service
+        from datetime import timedelta
+
+        if is_timeseries_enabled():
+            service = get_timeseries_analysis_service()
+            if start_time is None and end_time is None:
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=days or 30)
+
+            result = service.get_statistics(
+                sensor_id=str(sensor_id),
+                start_time=start_time,
+                end_time=end_time,
+            )
+            result['datasource'] = 'timeseries'
+            return result
+
+        # 回退：MySQL 基础统计
+        from app.utils.database import get_bolt_recent_data
+        import numpy as np
+
+        recent = get_bolt_recent_data(
+            sensor_id=int(sensor_id) if sensor_id.isdigit() else sensor_id,
+            limit=5000
+        )
+        if not recent:
+            raise HTTPException(status_code=404, detail=f"无传感器 {sensor_id} 的数据")
+
+        values = np.array([float(d.ptf) for d in recent])
+        return {
+            'sensor_id': sensor_id,
+            'datasource': 'mysql',
+            'count': int(len(values)),
+            'mean': float(np.mean(values)),
+            'std': float(np.std(values)),
+            'min': float(np.min(values)),
+            'max': float(np.max(values)),
+            'range': float(np.max(values) - np.min(values)),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取螺栓统计分析失败 [{sensor_id}]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/bolt/{sensor_id}/compare-periods",
+    tags=["时序历史分析"],
+    summary="螺栓周期对比（同比/环比，优先时序库）"
+)
+async def get_bolt_period_compare_compat(
+    sensor_id: str,
+    request: dict,
+):
+    """
+    螺栓周期对比（同比/环比）
+
+    请求体:
+        compare_type: "yoy"（同比）/ "mom"（环比）/ "custom"（自定义）
+        start_time: 本期开始时间
+        end_time: 本期结束时间
+        baseline_start: 对比期开始时间（custom时必填）
+        baseline_end: 对比期结束时间（custom时必填）
+    """
+    try:
+        from app.timeseries.factory import is_timeseries_enabled
+        from app.services.timeseries_service import get_timeseries_analysis_service
+
+        if is_timeseries_enabled():
+            service = get_timeseries_analysis_service()
+            result = service.get_period_compare(
+                sensor_id=str(sensor_id),
+                compare_type=request.get('compare_type', 'mom'),
+                current_start=request.get('start_time'),
+                current_end=request.get('end_time'),
+                baseline_start=request.get('baseline_start'),
+                baseline_end=request.get('baseline_end'),
+            )
+            result['datasource'] = 'timeseries'
+            return result
+
+        raise HTTPException(
+            status_code=400,
+            detail="周期对比功能需要启用时序数据库"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"螺栓周期对比失败 [{sensor_id}]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/timeseries/sql-query",
+    tags=["时序历史分析"],
+    summary="时序库原生 SQL 查询（历史分析，仅 TimescaleDB 支持）"
+)
+async def timeseries_sql_query_compat(
+    sql: str = Query(..., description="SQL 查询语句"),
+    timeout_seconds: int = Query(30, description="超时秒数"),
+):
+    """
+    直接执行时序库 SQL 查询（用于复杂历史分析）
+
+    **仅在启用 TimescaleDB 后端时可用**。
+    可使用 time_bucket、continuous aggregate 等 Timescale 特性。
+    """
+    try:
+        from app.timeseries.factory import is_timeseries_enabled, create_timeseries_repository
+        from app.utils.config import config
+
+        if not is_timeseries_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail="时序数据库未启用，无法执行 SQL 查询"
+            )
+
+        backend = config.get('timeseries.backend', '')
+        if backend != 'timescaledb':
+            raise HTTPException(
+                status_code=400,
+                detail=f"当前后端为 {backend}，仅 TimescaleDB 支持 SQL 查询"
+            )
+
+        repo = create_timeseries_repository()
+        if repo is None:
+            raise HTTPException(status_code=503, detail="时序数据库不可用")
+
+        result = repo.execute_sql(sql, params={}, timeout_seconds=timeout_seconds)
+        return {
+            'success': True,
+            'datasource': 'timescaledb',
+            'row_count': len(result),
+            'columns': list(result[0].keys()) if result else [],
+            'rows': result,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"时序 SQL 查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

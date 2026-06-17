@@ -69,14 +69,9 @@ class InfluxDBRepository(TimeSeriesRepository):
             org=org,
             timeout=timeout * 1000,
         )
+        # 同步写入模式（保证 write() 返回后立即可查询）
         self._write_api = self._client.write_api(
-            write_options=WriteOptions(
-                batch_size=5000,
-                flush_interval=1000,
-                jitter_interval=200,
-                retry_interval=5000,
-                max_retries=3,
-            )
+            write_options=SYNCHRONOUS
         )
         self._query_api = self._client.query_api()
         self._delete_api = self._client.delete_api()
@@ -92,7 +87,8 @@ class InfluxDBRepository(TimeSeriesRepository):
         """写入单个数据点"""
         try:
             influx_point = self._Point("bolt_data")
-            influx_point.time(point.timestamp)
+            # InfluxDB 内部统一使用 UTC
+            influx_point.time(self._to_utc(point.timestamp))
             influx_point.tag("sensor_id", point.sensor_id)
             influx_point.field("value", point.value)
 
@@ -107,6 +103,9 @@ class InfluxDBRepository(TimeSeriesRepository):
                 org=self.org,
                 record=influx_point,
             )
+            # 等待 50ms 让 InfluxDB 索引更新，确保立即可查
+            import time
+            time.sleep(0.05)
             return True
         except Exception as e:
             logger.error(f"InfluxDB 写入失败: {e}")
@@ -121,7 +120,8 @@ class InfluxDBRepository(TimeSeriesRepository):
             influx_points = []
             for point in points:
                 p = self._Point("bolt_data")
-                p.time(point.timestamp)
+                # InfluxDB 内部统一使用 UTC
+                p.time(self._to_utc(point.timestamp))
                 p.tag("sensor_id", point.sensor_id)
                 p.field("value", point.value)
 
@@ -138,6 +138,9 @@ class InfluxDBRepository(TimeSeriesRepository):
                 org=self.org,
                 record=influx_points,
             )
+            # 批量写入后等待 100ms 让索引更新
+            import time
+            time.sleep(0.1)
             return len(points)
         except Exception as e:
             logger.error(f"InfluxDB 批量写入失败: {e}")
@@ -253,18 +256,17 @@ class InfluxDBRepository(TimeSeriesRepository):
 
     def count_points(
         self,
-        sensor_id: Optional[str] = None,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        query: TimeSeriesQuery,
     ) -> int:
         """统计数据点数量"""
         try:
-            start = start_time.isoformat() if start_time else "-30d"
-            end = end_time.isoformat() if end_time else "now()"
+            # InfluxDB 内部用 UTC，先转 UTC
+            start = self._to_utc(query.start_time).isoformat() if query.start_time else "-30d"
+            end = self._to_utc(query.end_time).isoformat() if query.end_time else "now()"
 
             sensor_filter = ""
-            if sensor_id:
-                sensor_filter = f'|> filter(fn: (r) => r["sensor_id"] == "{sensor_id}")'
+            if query.sensor_id:
+                sensor_filter = f'|> filter(fn: (r) => r["sensor_id"] == "{query.sensor_id}")'
 
             flux_query = f'''
                 from(bucket: "{self.bucket}")
@@ -284,6 +286,65 @@ class InfluxDBRepository(TimeSeriesRepository):
             return total
         except Exception as e:
             logger.error(f"InfluxDB 统计数据点失败: {e}")
+            return 0
+
+    def _delete_before(
+        self,
+        level: AggregationLevel,
+        cutoff_time: datetime,
+    ) -> int:
+        """删除指定级别 cutoff_time 之前的数据（InfluxDB 全级别处理）"""
+        try:
+            measurement_map = {
+                AggregationLevel.RAW: "bolt_data",
+                AggregationLevel.MINUTE: "bolt_data_minute",
+                AggregationLevel.HOUR: "bolt_data_hour",
+            }
+            measurement = measurement_map.get(level, "bolt_data")
+
+            delete_predicate = f'_measurement="{measurement}"'
+
+            self._client.delete_api.delete(
+                start="1970-01-01T00:00:00Z",
+                # cutoff 转为 UTC
+                stop=self._to_utc(cutoff_time).isoformat().replace("+00:00", "Z"),
+                predicate=delete_predicate,
+                bucket=self.bucket,
+                org=self.org,
+            )
+            logger.info(f"过期清理 [{level.value}] 完成（cutoff={cutoff_time}）")
+            return -1
+        except Exception as e:
+            logger.error(f"InfluxDB 过期清理失败 [{level.value}]: {e}")
+            return 0
+
+    def _delete_sensor_at_level(
+        self,
+        sensor_id: str,
+        level: AggregationLevel,
+    ) -> int:
+        """删除某个传感器指定级别的数据"""
+        try:
+            measurement_map = {
+                AggregationLevel.RAW: "bolt_data",
+                AggregationLevel.MINUTE: "bolt_data_minute",
+                AggregationLevel.HOUR: "bolt_data_hour",
+            }
+            measurement = measurement_map.get(level, "bolt_data")
+
+            delete_predicate = f'_measurement="{measurement}" AND sensor_id="{sensor_id}"'
+
+            self._client.delete_api.delete(
+                start="1970-01-01T00:00:00Z",
+                # stop 设为未来 1 小时 UTC，覆盖所有
+                stop=self._to_utc(datetime.now()).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                predicate=delete_predicate,
+                bucket=self.bucket,
+                org=self.org,
+            )
+            return -1
+        except Exception as e:
+            logger.error(f"InfluxDB 删除传感器 {sensor_id} 数据失败 [{level.value}]: {e}")
             return 0
 
     def list_sensors(self) -> List[str]:
@@ -365,10 +426,27 @@ class InfluxDBRepository(TimeSeriesRepository):
 
     # ---------- 内部方法 ----------
 
+    @staticmethod
+    def _to_utc(dt: datetime) -> datetime:
+        """
+        将任意 datetime 转换为 UTC 带时区时间（InfluxDB 内部统一用 UTC）
+
+        - 带时区的 → 转为 UTC
+        - 不带时区的 → 按系统本地时区解释后转 UTC
+        """
+        from datetime import timezone as dt_timezone
+
+        if dt.tzinfo is None:
+            # 当作本地时间处理
+            local_tz = datetime.now().astimezone().tzinfo
+            dt = dt.replace(tzinfo=local_tz)
+        return dt.astimezone(dt_timezone.utc)
+
     def _build_flux_query(self, query: TimeSeriesQuery, aggregated: bool = False) -> str:
         """构建 Flux 查询语句"""
-        start = query.start_time.isoformat()
-        stop = query.end_time.isoformat()
+        # InfluxDB 内部用 UTC，先转 UTC 再生成 ISO 字符串
+        start = self._to_utc(query.start_time).isoformat()
+        stop = self._to_utc(query.end_time).isoformat()
 
         sensor_filter = ""
         if query.sensor_id:

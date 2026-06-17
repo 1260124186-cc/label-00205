@@ -2809,15 +2809,32 @@ def get_db() -> Generator[Optional[Session], None, None]:
 
 def get_bolt_recent_data(sensor_id: int, limit: int = 100) -> List[BoltData]:
     """
-    获取螺栓最近的预紧力数据
+    获取螺栓最近的预紧力数据（双数据源策略）
+
+    - 若启用了时序库，优先时序库读取（包装成 BoltData 兼容对象）
+    - 否则从 MySQL 读取
 
     Args:
         sensor_id: 螺栓/传感器ID
         limit: 获取记录数量，默认100
 
     Returns:
-        List[BoltData]: 预紧力数据列表
+        List[BoltData]: 预紧力数据列表（兼容对象）
     """
+    if _is_timeseries_enabled_for_history():
+        try:
+            result = _get_bolt_recent_from_timeseries(sensor_id=sensor_id, limit=limit)
+            if result:
+                logger.debug(f"get_bolt_recent_data [{sensor_id}]: 时序库读取 {len(result)} 条")
+                return result
+        except Exception as e:
+            logger.warning(f"时序库读取螺栓 {sensor_id} 最近数据失败，回退 MySQL: {e}")
+
+    return _get_bolt_recent_from_mysql(sensor_id=sensor_id, limit=limit)
+
+
+def _get_bolt_recent_from_mysql(sensor_id: int, limit: int) -> List[BoltData]:
+    """从 MySQL 获取螺栓最近数据（原始实现）"""
     with get_db() as db:
         return db.query(BoltData).filter(
             BoltData.sensor_id == sensor_id
@@ -2826,9 +2843,39 @@ def get_bolt_recent_data(sensor_id: int, limit: int = 100) -> List[BoltData]:
         ).limit(limit).all()
 
 
+def _get_bolt_recent_from_timeseries(sensor_id: int, limit: int) -> List:
+    """从时序库获取螺栓最近数据（包装为 BoltData 兼容对象）"""
+    from app.timeseries.factory import create_timeseries_repository
+
+    repo = create_timeseries_repository()
+    if repo is None:
+        return []
+
+    window = repo.query_prediction_window(sensor_id=str(sensor_id), window_size=limit)
+    if window is None or len(window['data']) == 0:
+        return []
+
+    values = window['data']
+    timestamps = window['timestamps']
+
+    # 时序库返回升序，BoltData调用方通常习惯create_time DESC
+    result = []
+    for i in range(len(values) - 1, -1, -1):
+        obj = _BoltDataCompat(
+            sensor_id=int(sensor_id),
+            ptf=float(values[i]),
+            create_time=timestamps[i] if hasattr(timestamps[i], 'year') else datetime.fromisoformat(str(timestamps[i]))
+        )
+        result.append(obj)
+    return result
+
+
 def get_flange_recent_data(flange_id: str, limit_per_bolt: int = 200) -> List[BoltData]:
     """
-    获取法兰面所有螺栓最近的预紧力数据
+    获取法兰面所有螺栓最近的预紧力数据（双数据源策略）
+
+    - 若启用了时序库，优先时序库读取
+    - 否则从 MySQL 读取
 
     Args:
         flange_id: 法兰面ID (格式: collector_id-splitter_num-position)
@@ -2837,6 +2884,22 @@ def get_flange_recent_data(flange_id: str, limit_per_bolt: int = 200) -> List[Bo
     Returns:
         List[BoltData]: 预紧力数据列表
     """
+    if _is_timeseries_enabled_for_history():
+        try:
+            result = _get_flange_recent_from_timeseries(
+                flange_id=flange_id, limit_per_bolt=limit_per_bolt
+            )
+            if result:
+                logger.debug(f"get_flange_recent_data [{flange_id}]: 时序库读取 {len(result)} 条")
+                return result
+        except Exception as e:
+            logger.warning(f"时序库读取法兰面 {flange_id} 最近数据失败，回退 MySQL: {e}")
+
+    return _get_flange_recent_from_mysql(flange_id=flange_id, limit_per_bolt=limit_per_bolt)
+
+
+def _get_flange_recent_from_mysql(flange_id: str, limit_per_bolt: int) -> List:
+    """从 MySQL 获取法兰面最近数据（原始实现）"""
     parts = flange_id.split('-')
     if len(parts) < 3:
         raise ValueError(f"无效的法兰面ID格式: {flange_id}")
@@ -2846,7 +2909,6 @@ def get_flange_recent_data(flange_id: str, limit_per_bolt: int = 200) -> List[Bo
     position = '-'.join(parts[2:])
 
     with get_db() as db:
-        # 使用子查询获取每个螺栓的最近数据
         from sqlalchemy import text
 
         query = text("""
@@ -2877,3 +2939,96 @@ def get_flange_recent_data(flange_id: str, limit_per_bolt: int = 200) -> List[Bo
         })
 
         return result.fetchall()
+
+
+def _get_flange_recent_from_timeseries(flange_id: str, limit_per_bolt: int) -> List:
+    """从时序库获取法兰面数据（需先从MySQL查到螺栓ID列表）"""
+    from app.timeseries.factory import create_timeseries_repository
+
+    repo = create_timeseries_repository()
+    if repo is None:
+        return []
+
+    # 从 MySQL 查询该法兰面的 bolt sensor_id 列表
+    parts = flange_id.split('-')
+    if len(parts) < 3:
+        raise ValueError(f"无效的法兰面ID格式: {flange_id}")
+    collector_id = int(parts[0])
+    splitter_num = int(parts[1])
+    position = '-'.join(parts[2:])
+
+    with get_db() as db:
+        from sqlalchemy import text
+        q = text("""
+            SELECT DISTINCT sensor_id
+            FROM sc_bolt_data
+            WHERE collector_id = :c AND splitter_num = :s AND position = :p
+        """)
+        rows = db.execute(q, {'c': collector_id, 's': splitter_num, 'p': position}).fetchall()
+        sensor_ids = [str(r.sensor_id) for r in rows]
+
+    result = []
+    for sid in sensor_ids:
+        try:
+            window = repo.query_prediction_window(sensor_id=sid, window_size=limit_per_bolt)
+            if window is None:
+                continue
+            values = window['data']
+            timestamps = window['timestamps']
+            for i in range(len(values) - 1, -1, -1):
+                ts = timestamps[i] if hasattr(timestamps[i], 'year') else datetime.fromisoformat(str(timestamps[i]))
+                obj = _BoltDataCompat(
+                    sensor_id=int(sid),
+                    ptf=float(values[i]),
+                    create_time=ts,
+                    collector_id=collector_id,
+                    splitter_num=splitter_num,
+                    position=position,
+                )
+                result.append(obj)
+        except Exception as e:
+            logger.warning(f"时序库读取法兰面 {flange_id} 下螺栓 {sid} 失败: {e}")
+    return result
+
+
+# ============================================================
+# 时序库启用判断 & 兼容对象（内部实现）
+# ============================================================
+
+def _is_timeseries_enabled_for_history() -> bool:
+    """检查是否启用了时序库用于历史查询"""
+    return bool(config.get('timeseries.enabled', False))
+
+
+class _BoltDataCompat:
+    """
+    BoltData 兼容对象（Duck Typing）
+
+    包装时序库返回的数据点，使其具备与 SQLAlchemy BoltData ORM 对象
+    相同的属性访问接口（.sensor_id / .ptf / .create_time 等），
+    从而让历史调用方无需任何改动即可使用时序库数据。
+    """
+
+    __slots__ = ('sensor_id', 'ptf', 'create_time', 'id',
+                 'collector_id', 'splitter_num', 'position',
+                 'temperature', 'humidity', 'vibration',
+                 'torque', 'pressure', 'data_quality')
+
+    def __init__(self, **kwargs):
+        self.sensor_id = kwargs.get('sensor_id')
+        self.ptf = kwargs.get('ptf')
+        self.create_time = kwargs.get('create_time')
+        self.id = kwargs.get('id')
+        self.collector_id = kwargs.get('collector_id')
+        self.splitter_num = kwargs.get('splitter_num')
+        self.position = kwargs.get('position')
+        self.temperature = kwargs.get('temperature')
+        self.humidity = kwargs.get('humidity')
+        self.vibration = kwargs.get('vibration')
+        self.torque = kwargs.get('torque')
+        self.pressure = kwargs.get('pressure')
+        self.data_quality = kwargs.get('data_quality', 'full')
+
+    def __repr__(self):
+        return (f"<_BoltDataCompat sensor_id={self.sensor_id} "
+                f"ptf={self.ptf} create_time={self.create_time}>")
