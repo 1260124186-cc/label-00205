@@ -516,6 +516,17 @@ class PredictionOrchestrator:
         prediction_source = 'rule'
         ensemble_result: Optional[EnsemblePrediction] = None
 
+        # Step 0: 原始数据热写入时序库（可选）
+        if save_to_db and not is_shadow:
+            try:
+                self.repository.write_bolt_data(
+                    bolt_id=bolt_id,
+                    values=data.tolist(),
+                    timestamps=timestamps,
+                )
+            except Exception as e:
+                logger.warning(f"螺栓 {bolt_id} 时序库热写失败，不影响预测: {e}")
+
         # Step 1: 数据预处理
         processed = self.preprocessor.process(
             data,
@@ -1794,6 +1805,21 @@ class PredictionOrchestrator:
 
         model_type = 'rule'
         attention = None
+
+        # Step 0: 原始数据热写入时序库（可选）
+        if save_to_db and not is_shadow:
+            try:
+                bolts_data = {}
+                for i, bolt_id in enumerate(bolt_ids):
+                    if i < len(multi_bolt_data):
+                        bolts_data[bolt_id] = multi_bolt_data[i].tolist()
+                self.repository.write_flange_data(
+                    flange_id=flange_id,
+                    bolts_data=bolts_data,
+                    timestamps=timestamps,
+                )
+            except Exception as e:
+                logger.warning(f"法兰面 {flange_id} 时序库热写失败，不影响预测: {e}")
 
         # Step 1: 预处理每个螺栓
         processed_bolts = []

@@ -180,9 +180,108 @@ class PredictionRepository:
         Returns:
             {'data': 平均预紧力数组, 'timestamps': 时间戳数组}，无数据时返回 None
         """
-        # 时序库无法直接按 flange_id 查询（需先解出 bolt_id 再聚合）
-        # 为简单起见，法兰面历史暂时走 MySQL；可后续扩展
+        if _is_timeseries_for_prediction():
+            try:
+                result = self._get_flange_history_timeseries(flange_id=flange_id, days=days)
+                if result is not None:
+                    return result
+                logger.warning(f"时序库无法兰面 {flange_id} 历史数据，回退到 MySQL")
+            except Exception as e:
+                logger.warning(f"时序库读取法兰面 {flange_id} 历史数据失败，回退 MySQL: {e}")
+
         return self._get_flange_history_mysql(flange_id=flange_id, days=days)
+
+    def _get_flange_history_timeseries(
+        self,
+        flange_id: str,
+        days: int
+    ) -> Optional[Dict[str, np.ndarray]]:
+        """从时序库获取法兰面历史数据（按时间取平均）"""
+        repo = _get_timeseries_repo()
+        if repo is None:
+            return None
+
+        from datetime import timedelta
+        from app.timeseries.base import AggregationLevel, TimeSeriesQuery
+
+        parts = flange_id.split('-')
+        if len(parts) < 3:
+            raise ValueError(f"无效的法兰面ID格式: {flange_id}")
+        collector_id = int(parts[0])
+        splitter_num = int(parts[1])
+        position = '-'.join(parts[2:])
+
+        with get_db() as db:
+            from sqlalchemy import text
+            q = text("""
+                SELECT DISTINCT sensor_id
+                FROM sc_bolt_data
+                WHERE collector_id = :c AND splitter_num = :s AND position = :p
+            """)
+            rows = db.execute(q, {'c': collector_id, 's': splitter_num, 'p': position}).fetchall()
+            sensor_ids = [str(r.sensor_id) for r in rows]
+
+        if not sensor_ids:
+            return None
+
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=days)
+
+        if days <= 1:
+            level = AggregationLevel.RAW
+        elif days <= 7:
+            level = AggregationLevel.MINUTE
+        else:
+            level = AggregationLevel.HOUR
+
+        all_values_by_ts = {}
+        for sensor_id in sensor_ids:
+            try:
+                query = TimeSeriesQuery(
+                    sensor_id=sensor_id,
+                    start_time=start_time,
+                    end_time=end_time,
+                    aggregation_level=level,
+                    order="asc",
+                )
+                points = repo.query_aggregated(query)
+                if not points:
+                    points = repo.query_raw(query)
+                if not points:
+                    continue
+
+                for p in points:
+                    ts = p.timestamp
+                    if hasattr(ts, 'replace'):
+                        ts_key = ts.replace(second=0, microsecond=0)
+                    else:
+                        ts_key = ts
+                    val = p.mean if hasattr(p, 'mean') else p.value
+                    if ts_key not in all_values_by_ts:
+                        all_values_by_ts[ts_key] = []
+                    all_values_by_ts[ts_key].append(float(val))
+            except Exception as e:
+                logger.warning(f"时序库读取法兰面 {flange_id} 下螺栓 {sensor_id} 历史数据失败: {e}")
+
+        if not all_values_by_ts:
+            return None
+
+        sorted_ts = sorted(all_values_by_ts.keys())
+        values = []
+        timestamps = []
+        for ts in sorted_ts:
+            vals = all_values_by_ts[ts]
+            if vals:
+                values.append(sum(vals) / len(vals))
+                timestamps.append(ts)
+
+        if not values:
+            return None
+
+        return {
+            'data': np.array(values),
+            'timestamps': np.array(timestamps)
+        }
 
     def _get_flange_history_mysql(
         self,
@@ -525,3 +624,92 @@ class PredictionRepository:
                 db.commit()
         except Exception as e:
             logger.error(f"保存月度预测失败 [{node_type}:{node_id}]: {e}")
+
+    # ---------- 时序库热写 ----------
+
+    def write_bolt_data(
+        self,
+        bolt_id: str,
+        values: List[float],
+        timestamps: Optional[List] = None,
+        fields: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        将螺栓原始数据写入时序库（热写）
+
+        写入失败不影响主流程，仅记录日志。
+
+        Args:
+            bolt_id: 螺栓ID
+            values: 预紧力值列表
+            timestamps: 时间戳列表（可选，默认当前时间）
+            fields: 扩展字段（可选）
+
+        Returns:
+            bool: 是否写入成功
+        """
+        if not _is_timeseries_for_prediction():
+            return False
+
+        try:
+            repo = _get_timeseries_repo()
+            if repo is None:
+                return False
+
+            from app.timeseries.base import TimeSeriesDataPoint
+            from datetime import datetime as dt
+
+            points = []
+            for i in range(len(values)):
+                if timestamps and i < len(timestamps):
+                    ts = timestamps[i]
+                    if isinstance(ts, str):
+                        ts = dt.fromisoformat(ts.replace('Z', '+00:00'))
+                    elif not isinstance(ts, dt):
+                        ts = dt.fromisoformat(str(ts))
+                else:
+                    ts = dt.now()
+
+                point = TimeSeriesDataPoint(
+                    sensor_id=str(bolt_id),
+                    timestamp=ts,
+                    value=float(values[i]),
+                    fields=fields or {},
+                )
+                points.append(point)
+
+            if points:
+                repo.write_batch(points)
+                logger.debug(f"时序库写入成功: bolt={bolt_id}, count={len(points)}")
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"时序库写入螺栓 {bolt_id} 数据失败: {e}")
+            return False
+
+    def write_flange_data(
+        self,
+        flange_id: str,
+        bolts_data: Dict[str, List[float]],
+        timestamps: Optional[List] = None,
+    ) -> bool:
+        """
+        将法兰面下所有螺栓的原始数据写入时序库（热写）
+
+        Args:
+            flange_id: 法兰面ID
+            bolts_data: 螺栓数据字典 {bolt_id: [values]}
+            timestamps: 时间戳列表（可选，适用于所有螺栓）
+
+        Returns:
+            bool: 是否至少有一个螺栓写入成功
+        """
+        if not _is_timeseries_for_prediction():
+            return False
+
+        success_count = 0
+        for bolt_id, values in bolts_data.items():
+            if self.write_bolt_data(bolt_id=bolt_id, values=values, timestamps=timestamps):
+                success_count += 1
+
+        return success_count > 0
