@@ -1841,6 +1841,9 @@ class PredictionOrchestrator:
 
         original_status = STATUS_LABELS.get(original_status_code, '未知')
 
+        # 拼接所有螺栓数据（工况识别和风险评估共用）
+        all_data = np.concatenate(multi_bolt_data)
+
         # Step 2.5: 工况识别与自适应调整
         flange_condition_info = {}
         flange_condition_prediction = None
@@ -1899,7 +1902,6 @@ class PredictionOrchestrator:
         flange_condition = flange_condition_prediction.condition if flange_condition_prediction else None
 
         # Step 3: 风险评估（使用所有螺栓数据拼接）
-        all_data = np.concatenate(multi_bolt_data)
         risk_assessment = self._assess_risk_with_condition(
             all_data,
             lstm_class=original_status_code,
