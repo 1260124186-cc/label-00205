@@ -21,6 +21,8 @@ from sqlalchemy import and_
 
 from app.utils.config import config
 from app.utils.database import get_db, ModelVersionORM
+from app.middleware import get_effective_tenant_id
+from app.middleware.tenant_isolation import get_tenant_model_path, resolve_model_filename
 
 
 class ModelVersionService:
@@ -49,7 +51,11 @@ class ModelVersionService:
     def _get_version_file_path(
         self, model_type: str, node_id: str, version: str
     ) -> Path:
-        """获取版本化模型文件的路径"""
+        """获取版本化模型文件的路径（租户隔离）"""
+        tenant_id = get_effective_tenant_id()
+        base = str(self._versioned_models_dir)
+        if tenant_id is not None:
+            return Path(get_tenant_model_path(base, tenant_id, f"{model_type}/{node_id}/{version}.pt"))
         return (
             self._versioned_models_dir
             / model_type
@@ -58,13 +64,10 @@ class ModelVersionService:
         )
 
     def _get_active_file_path(self, model_type: str, node_id: str) -> Path:
-        """获取活动版本模型文件的路径（主路径）"""
-        if model_type == 'bolt':
-            return self.save_path / f"bolt_lstm_{node_id}.pt"
-        elif model_type == 'flange':
-            return self.save_path / f"flange_attention_{node_id}.pt"
-        else:
-            return self.save_path / f"{model_type}_{node_id}.pt"
+        """获取活动版本模型文件的路径（租户隔离）"""
+        tenant_id = get_effective_tenant_id()
+        filename = resolve_model_filename(model_type, node_id)
+        return Path(get_tenant_model_path(str(self.save_path), tenant_id, filename))
 
     def register_version(
         self,

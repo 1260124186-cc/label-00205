@@ -37,7 +37,7 @@ from app.schedulers.scheduler import scheduler
 from app.utils.config import config
 from app.utils.database import db_manager
 from app.utils.device import get_all_device_info
-from app.middleware import RequestContextMiddleware, setup_structured_logging
+from app.middleware import RequestContextMiddleware, TenantContextMiddleware, setup_structured_logging
 from app.core.prometheus import metrics
 from app.core.redis_broadcast import config_sync
 from app.core.event_bus import event_bus, EventType
@@ -256,6 +256,9 @@ def create_app() -> FastAPI:
 
     # 请求上下文中间件（必须放在最前面）
     app.add_middleware(RequestContextMiddleware)
+
+    # 租户上下文中间件
+    app.add_middleware(TenantContextMiddleware)
 
     # CORS中间件
     app.add_middleware(

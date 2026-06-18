@@ -422,7 +422,22 @@ class QuotaService:
             "storage": quota.current_storage_mb < quota.max_storage_mb,
             "user": quota.current_user_count < quota.max_users,
             "org_node": quota.current_org_node_count < quota.max_org_nodes,
+            "training": True,
         }
+        if resource == "training":
+            try:
+                from app.utils.database import get_db, TrainingLog
+                with get_db() as db:
+                    if db is None:
+                        return True
+                    running_count = db.query(TrainingLog).filter(
+                        TrainingLog.tenant_id == tenant_id,
+                        TrainingLog.status.in_(['pending', 'running']),
+                    ).count()
+                    max_concurrent = getattr(quota, 'max_training_concurrent', 2)
+                    return running_count < max_concurrent
+            except Exception:
+                return True
         return checks.get(resource, False)
 
     def increment_api_calls(self, tenant_id: int) -> Optional[TenantQuota]:

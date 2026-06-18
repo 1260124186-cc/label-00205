@@ -34,6 +34,8 @@ from app.services.feature_engineering import FeatureEngineer
 from app.services.label_import import label_import_service
 from app.api.validators import get_validator, ValidationMode, format_validation_errors
 from app.utils.config import config
+from app.middleware import get_effective_tenant_id
+from app.middleware.tenant_isolation import get_tenant_model_path, resolve_model_filename, quota_enforcer
 from app.utils.database import (
     get_db,
     BoltData,
@@ -98,6 +100,8 @@ class TrainingService:
         base_model_version: Optional[str] = None,
         freeze_layers: Optional[List[str]] = None
     ) -> str:
+        quota_enforcer.check_all_for_training()
+
         session_id = self._generate_session_id()
         merged_config = dict(self.training_config_template)
         if training_config:
@@ -123,6 +127,7 @@ class TrainingService:
                         base_model_version=base_model_version,
                         freeze_layers=json.dumps(freeze_layers or []) if freeze_layers else None,
                         start_time=datetime.now(),
+                        tenant_id=get_effective_tenant_id(),
                         create_time=datetime.now()
                     )
                     db.add(log)
@@ -417,7 +422,10 @@ class TrainingService:
     def _train_single_bolt_enhanced(
         self, session_id, bolt_id, force_retrain, training_config, is_incremental
     ):
-        model_path = self.model_save_path / f"bolt_lstm_{bolt_id}.pt"
+        tenant_id = get_effective_tenant_id()
+        model_path = Path(get_tenant_model_path(
+            str(self.model_save_path), tenant_id, f"bolt_lstm_{bolt_id}.pt"
+        ))
         if model_path.exists() and not force_retrain and not is_incremental:
             logger.info(f"螺栓模型已存在，跳过: {bolt_id}")
             return {'status': 'skipped', 'bolt_id': bolt_id, 'message': '模型已存在'}
@@ -735,7 +743,10 @@ class TrainingService:
     def _train_single_flange_enhanced(
         self, session_id, flange_id, force_retrain, training_config, is_incremental
     ):
-        model_path = self.model_save_path / f"flange_attention_{flange_id}.pt"
+        tenant_id = get_effective_tenant_id()
+        model_path = Path(get_tenant_model_path(
+            str(self.model_save_path), tenant_id, f"flange_attention_{flange_id}.pt"
+        ))
         if model_path.exists() and not force_retrain and not is_incremental:
             return {'status': 'skipped', 'flange_id': flange_id, 'message': '模型已存在'}
 
@@ -1835,8 +1846,30 @@ class TrainingService:
                     f"v{version_info['version']}, F1={node_r.get('f1_score')}"
                 )
 
+            self._update_storage_quota()
+
         except Exception as e:
             logger.warning(f"保存模型版本失败: {e}")
+
+    def _update_storage_quota(self):
+        """更新租户存储配额"""
+        tenant_id = get_effective_tenant_id()
+        if tenant_id is None:
+            return
+        try:
+            from app.services.tenant import QuotaService
+            tenant_model_dir = Path(get_tenant_model_path(
+                str(self.model_save_path), tenant_id, ""
+            ))
+            total_size_mb = 0.0
+            if tenant_model_dir.exists():
+                for f in tenant_model_dir.rglob("*.pt"):
+                    if f.is_file():
+                        total_size_mb += f.stat().st_size / (1024 * 1024)
+            qs = QuotaService()
+            qs.update_quota(tenant_id, current_storage_mb=round(total_size_mb, 2))
+        except Exception as e:
+            logger.warning(f"更新存储配额失败: {e}")
 
     def _get_next_version(self, db, model_id, model_type):
         try:
@@ -1880,10 +1913,11 @@ class TrainingService:
         }
 
     def get_model_info(self, model_type, node_id):
-        if model_type == 'bolt':
-            model_path = self.model_save_path / f"bolt_lstm_{node_id}.pt"
-        else:
-            model_path = self.model_save_path / f"flange_attention_{node_id}.pt"
+        tenant_id = get_effective_tenant_id()
+        filename = resolve_model_filename(model_type, node_id)
+        model_path = Path(get_tenant_model_path(
+            str(self.model_save_path), tenant_id, filename
+        ))
         info = {
             'is_trained': model_path.exists(),
             'model_file_path': str(model_path) if model_path.exists() else None

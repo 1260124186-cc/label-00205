@@ -59,6 +59,7 @@ class BoltData(Base):
     __tablename__ = 'sc_bolt_data'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     sensor_id = Column(BigInteger, nullable=False, comment='通道ID/螺栓ID')
     collector_id = Column(BigInteger, comment='采集器ID')
     splitter_num = Column(BigInteger, comment='分线器ID')
@@ -75,8 +76,10 @@ class BoltData(Base):
 
     # 索引
     __table_args__ = (
+        Index('idx_tenant_sensor_time', 'tenant_id', 'sensor_id', 'create_time'),
         Index('idx_sensor_time', 'sensor_id', 'create_time'),
         Index('idx_data_quality', 'data_quality'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
     @property
@@ -138,6 +141,7 @@ class AbnormalPrediction(Base):
 
     Attributes:
         id: 主键，自增长
+        tenant_id: 租户ID
         bolt_id: 螺栓编码
         flm_id: 法兰面组编码
         node_type: 节点类型（螺栓/法兰面）
@@ -153,6 +157,7 @@ class AbnormalPrediction(Base):
     __tablename__ = 'sci_abnormal_prediction'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     bolt_id = Column(BigInteger, comment='螺栓编码')
     flm_id = Column(String(100), comment='法兰面组编码')
     node_type = Column(String(6), comment='节点类型')
@@ -170,9 +175,13 @@ class AbnormalPrediction(Base):
 
     # 索引
     __table_args__ = (
+        Index('idx_tenant_node_type', 'tenant_id', 'node_type'),
+        Index('idx_tenant_bolt_id', 'tenant_id', 'bolt_id'),
+        Index('idx_tenant_flm_id', 'tenant_id', 'flm_id'),
         Index('idx_node_type', 'node_type'),
         Index('idx_bolt_id', 'bolt_id'),
         Index('idx_flm_id', 'flm_id'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -189,6 +198,7 @@ class MonthPrediction(Base):
     __tablename__ = 'ci_month_prediction_details'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     bolt_id = Column(BigInteger, comment='螺栓编码')
     flm_id = Column(String(100), comment='法兰面组编码')
     node_type = Column(String(6), comment='节点类型')
@@ -202,6 +212,12 @@ class MonthPrediction(Base):
     fault_confidence = Column(Float, comment='故障分类置信度')
     fault_evidence = Column(Text, comment='故障证据JSON')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_tenant_bolt', 'tenant_id', 'bolt_id'),
+        Index('idx_tenant_flm', 'tenant_id', 'flm_id'),
+        Index('idx_tenant', 'tenant_id'),
+    )
 
 
 # ============================================================
@@ -217,6 +233,7 @@ class AlertRule(Base):
 
     Attributes:
         id: 主键
+        tenant_id: 租户ID
         rule_name: 规则名称
         alert_level: 告警级别 (1=关注, 2=检查, 3=紧急, 4=故障)
         node_type: 节点类型 (bolt/flange/all)
@@ -234,6 +251,7 @@ class AlertRule(Base):
     __tablename__ = 'sc_alert_rules'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     rule_name = Column(String(200), nullable=False, comment='规则名称')
     alert_level = Column(Integer, nullable=False, comment='告警级别 1-4')
     node_type = Column(String(20), default='all', comment='节点类型 bolt/flange/all')
@@ -249,8 +267,11 @@ class AlertRule(Base):
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
 
     __table_args__ = (
+        Index('idx_tenant_level', 'tenant_id', 'alert_level'),
+        Index('idx_tenant_enabled', 'tenant_id', 'enabled'),
         Index('idx_alert_level', 'alert_level'),
         Index('idx_enabled', 'enabled'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -263,6 +284,7 @@ class AlertEvent(Base):
 
     Attributes:
         id: 主键
+        tenant_id: 租户ID
         alert_no: 告警编号
         rule_id: 关联规则ID
         alert_level: 当前告警级别
@@ -291,6 +313,7 @@ class AlertEvent(Base):
     __tablename__ = 'sc_alert_events'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     alert_no = Column(String(50), unique=True, comment='告警编号')
     rule_id = Column(BigInteger, comment='关联规则ID')
     alert_level = Column(Integer, nullable=False, comment='当前告警级别')
@@ -317,10 +340,14 @@ class AlertEvent(Base):
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
 
     __table_args__ = (
+        Index('idx_tenant_status', 'tenant_id', 'status'),
+        Index('idx_tenant_level', 'tenant_id', 'alert_level'),
+        Index('idx_tenant_node', 'tenant_id', 'node_type', 'node_id'),
         Index('idx_status', 'status'),
         Index('idx_level', 'alert_level'),
         Index('idx_node', 'node_type', 'node_id'),
         Index('idx_create_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -349,6 +376,7 @@ class AlertSubscription(Base):
     __tablename__ = 'sc_alert_subscriptions'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     subscriber_type = Column(String(20), nullable=False, comment='订阅者类型 role/user/device')
     subscriber_id = Column(String(100), nullable=False, comment='订阅者ID')
     subscriber_name = Column(String(200), comment='订阅者名称')
@@ -363,8 +391,11 @@ class AlertSubscription(Base):
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
 
     __table_args__ = (
+        Index('idx_tenant_subscriber', 'tenant_id', 'subscriber_type', 'subscriber_id'),
+        Index('idx_tenant_enabled', 'tenant_id', 'enabled'),
         Index('idx_subscriber', 'subscriber_type', 'subscriber_id'),
         Index('idx_enabled', 'enabled'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -377,6 +408,7 @@ class NotificationChannel(Base):
 
     Attributes:
         id: 主键
+        tenant_id: 租户ID
         channel_type: 渠道类型 (email/sms/webhook/dingtalk/wechat)
         channel_name: 渠道名称
         config: 渠道配置 JSON
@@ -388,6 +420,7 @@ class NotificationChannel(Base):
     __tablename__ = 'sc_notification_channels'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     channel_type = Column(String(50), nullable=False, comment='渠道类型')
     channel_name = Column(String(200), comment='渠道名称')
     config = Column(Text, comment='渠道配置 JSON')
@@ -397,7 +430,10 @@ class NotificationChannel(Base):
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
 
     __table_args__ = (
+        Index('idx_tenant_channel_type', 'tenant_id', 'channel_type'),
+        Index('idx_tenant_default', 'tenant_id', 'is_default'),
         Index('idx_channel_type', 'channel_type'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -410,6 +446,7 @@ class NotificationLog(Base):
 
     Attributes:
         id: 主键
+        tenant_id: 租户ID
         alert_id: 关联告警ID
         channel_type: 通知渠道
         subscriber_id: 接收者ID
@@ -425,6 +462,7 @@ class NotificationLog(Base):
     __tablename__ = 'sc_notification_logs'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     alert_id = Column(BigInteger, comment='关联告警ID')
     channel_type = Column(String(50), comment='通知渠道')
     subscriber_id = Column(String(100), comment='接收者ID')
@@ -438,8 +476,11 @@ class NotificationLog(Base):
     send_time = Column(DateTime, default=datetime.now, comment='发送时间')
 
     __table_args__ = (
+        Index('idx_tenant_alert', 'tenant_id', 'alert_id'),
+        Index('idx_tenant_status', 'tenant_id', 'status'),
         Index('idx_alert_id', 'alert_id'),
         Index('idx_status', 'status'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -452,6 +493,7 @@ class WorkOrder(Base):
 
     Attributes:
         id: 主键
+        tenant_id: 租户ID
         order_no: 工单编号
         alert_id: 关联告警ID
         title: 工单标题
@@ -477,6 +519,7 @@ class WorkOrder(Base):
     __tablename__ = 'sc_work_orders'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     order_no = Column(String(50), unique=True, comment='工单编号')
     alert_id = Column(BigInteger, comment='关联告警ID')
     title = Column(String(200), nullable=False, comment='工单标题')
@@ -500,6 +543,11 @@ class WorkOrder(Base):
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
 
     __table_args__ = (
+        Index('idx_tenant_status', 'tenant_id', 'status'),
+        Index('idx_tenant_priority', 'tenant_id', 'priority'),
+        Index('idx_tenant_alert', 'tenant_id', 'alert_id'),
+        Index('idx_tenant_assignee', 'tenant_id', 'assignee_id'),
+        Index('idx_tenant_node', 'tenant_id', 'node_type', 'node_id'),
         Index('idx_status', 'status'),
         Index('idx_priority', 'priority'),
         Index('idx_alert_id', 'alert_id'),
@@ -507,6 +555,7 @@ class WorkOrder(Base):
         Index('idx_create_time', 'create_time'),
         Index('idx_node', 'node_type', 'node_id'),
         Index('idx_due_time', 'due_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -536,6 +585,7 @@ class WorkOrderDisposalRecord(Base):
     __tablename__ = 'sc_work_order_disposals'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     work_order_id = Column(BigInteger, nullable=False, comment='关联工单ID')
     disposal_type = Column(String(50), comment='处置类型')
     disposal_content = Column(Text, comment='处置内容描述')
@@ -551,9 +601,12 @@ class WorkOrderDisposalRecord(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_wo', 'tenant_id', 'work_order_id'),
+        Index('idx_tenant_time', 'tenant_id', 'disposal_time'),
         Index('idx_disposal_wo', 'work_order_id'),
         Index('idx_disposal_time', 'disposal_time'),
         Index('idx_disposal_operator', 'operator_id'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -585,6 +638,7 @@ class WorkOrderRetestRecord(Base):
     __tablename__ = 'sc_work_order_retests'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     work_order_id = Column(BigInteger, nullable=False, comment='关联工单ID')
     retest_time = Column(DateTime, comment='复测时间')
     retester_id = Column(String(50), comment='复测人ID')
@@ -602,9 +656,12 @@ class WorkOrderRetestRecord(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_wo', 'tenant_id', 'work_order_id'),
+        Index('idx_tenant_time', 'tenant_id', 'retest_time'),
         Index('idx_retest_wo', 'work_order_id'),
         Index('idx_retest_time', 'retest_time'),
         Index('idx_retest_result', 'retest_result'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -638,6 +695,7 @@ class WorkOrderPredictionCompare(Base):
     __tablename__ = 'sc_work_order_pred_compares'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     work_order_id = Column(BigInteger, nullable=False, comment='关联工单ID')
     retest_id = Column(BigInteger, comment='关联复测记录ID')
     original_prediction_id = Column(BigInteger, comment='原始预测记录ID')
@@ -657,11 +715,14 @@ class WorkOrderPredictionCompare(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_wo', 'tenant_id', 'work_order_id'),
+        Index('idx_tenant_retest', 'tenant_id', 'retest_id'),
         Index('idx_compare_wo', 'work_order_id'),
         Index('idx_compare_retest', 'retest_id'),
         Index('idx_compare_false_positive', 'is_false_positive'),
         Index('idx_compare_recurring', 'is_recurring'),
         Index('idx_compare_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -697,6 +758,7 @@ class CmmsIntegrationConfig(Base):
     __tablename__ = 'sc_cmms_configs'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     system_name = Column(String(200), nullable=False, comment='系统名称')
     system_type = Column(String(50), comment='系统类型')
     base_url = Column(String(500), comment='系统基础URL')
@@ -712,15 +774,15 @@ class CmmsIntegrationConfig(Base):
     sync_direction = Column(String(20), default='push', comment='同步方向')
     last_sync_time = Column(DateTime, comment='最后同步时间')
     sync_interval = Column(Integer, default=60, comment='同步间隔分钟')
-    tenant_id = Column(BigInteger, comment='租户ID')
     extra_info = Column(Text, comment='扩展信息 JSON')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
 
     __table_args__ = (
-        Index('idx_cmms_enabled', 'enabled'),
         Index('idx_cmms_tenant', 'tenant_id'),
+        Index('idx_cmms_enabled', 'enabled'),
         Index('idx_cmms_type', 'system_type'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -749,6 +811,7 @@ class CmmsSyncLog(Base):
     __tablename__ = 'sc_cmms_sync_logs'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     config_id = Column(BigInteger, comment='关联配置ID')
     sync_type = Column(String(50), comment='同步类型')
     sync_direction = Column(String(20), comment='同步方向 push/pull')
@@ -763,11 +826,15 @@ class CmmsSyncLog(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_config', 'tenant_id', 'config_id'),
+        Index('idx_tenant_status', 'tenant_id', 'status'),
+        Index('idx_tenant_time', 'tenant_id', 'sync_time'),
         Index('idx_cmms_log_config', 'config_id'),
         Index('idx_cmms_log_wo', 'work_order_id'),
         Index('idx_cmms_log_status', 'status'),
         Index('idx_cmms_log_time', 'sync_time'),
         Index('idx_cmms_log_external', 'external_id'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -782,6 +849,7 @@ class PredictionAudit(Base):
     __tablename__ = 'sc_prediction_audit'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     prediction_id = Column(String(64), nullable=False, comment='预测唯一ID (UUID)')
     node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
     node_id = Column(String(100), nullable=False, comment='节点ID')
@@ -799,10 +867,13 @@ class PredictionAudit(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_node', 'tenant_id', 'node_type', 'node_id'),
+        Index('idx_tenant_time', 'tenant_id', 'create_time'),
         Index('idx_audit_node', 'node_type', 'node_id'),
         Index('idx_audit_time', 'create_time'),
         Index('idx_audit_expire', 'expire_time'),
         Index('idx_audit_model_version', 'model_version'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -816,6 +887,7 @@ class DataQualityCheck(Base):
     __tablename__ = 'sc_data_quality_checks'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     sensor_id = Column(String(50), nullable=False, comment='传感器/螺栓ID')
     total_points = Column(Integer, comment='总数据点数')
     valid_points = Column(Integer, comment='有效数据点数')
@@ -833,10 +905,13 @@ class DataQualityCheck(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_sensor', 'tenant_id', 'sensor_id'),
+        Index('idx_tenant_time', 'tenant_id', 'check_time'),
         Index('idx_dqc_sensor', 'sensor_id'),
         Index('idx_dqc_time', 'check_time'),
         Index('idx_dqc_score', 'overall_score'),
         Index('idx_dqc_level', 'quality_level'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -850,6 +925,7 @@ class QualityReport(Base):
     __tablename__ = 'sc_quality_reports'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     report_date = Column(DateTime, nullable=False, comment='报告日期')
     total_sensors = Column(Integer, comment='总传感器数')
     average_score = Column(Float, comment='平均质量评分')
@@ -862,8 +938,10 @@ class QualityReport(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_date', 'tenant_id', 'report_date', unique=True),
         Index('idx_qr_date', 'report_date', unique=True),
         Index('idx_qr_create', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -922,6 +1000,7 @@ class TenantQuota(Base):
     max_storage_mb = Column(Integer, default=5120, comment='存储上限 MB')
     max_users = Column(Integer, default=50, comment='最大用户数')
     max_org_nodes = Column(Integer, default=500, comment='最大组织节点数')
+    max_training_concurrent = Column(Integer, default=2, comment='最大训练并发数')
     current_model_count = Column(Integer, default=0, comment='当前模型数')
     current_api_calls_today = Column(Integer, default=0, comment='今日API调用次数')
     current_storage_mb = Column(Float, default=0.0, comment='当前存储用量 MB')
@@ -1088,6 +1167,7 @@ class KnowledgeCaseVersion(Base):
     __tablename__ = 'sc_knowledge_case_versions'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     case_id = Column(BigInteger, nullable=False, comment='关联案例ID')
     version = Column(Integer, nullable=False, comment='版本号')
     case_title = Column(String(500), comment='案例标题')
@@ -1103,8 +1183,10 @@ class KnowledgeCaseVersion(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_case_version', 'tenant_id', 'case_id', 'version'),
         Index('idx_version_case', 'case_id', 'version'),
         Index('idx_version_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1129,6 +1211,7 @@ class KnowledgeCaseReview(Base):
     __tablename__ = 'sc_knowledge_case_reviews'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     case_id = Column(BigInteger, nullable=False, comment='关联案例ID')
     version = Column(Integer, comment='对应版本号')
     review_level = Column(Integer, default=1, comment='审核级别 1-3')
@@ -1139,9 +1222,11 @@ class KnowledgeCaseReview(Base):
     create_time = Column(DateTime, default=datetime.now, comment='审核时间')
 
     __table_args__ = (
+        Index('idx_tenant_case', 'tenant_id', 'case_id'),
         Index('idx_review_case', 'case_id'),
         Index('idx_review_result', 'review_result'),
         Index('idx_review_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1149,6 +1234,7 @@ class APIAuditLog(Base):
     __tablename__ = 'sc_api_audit_logs'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     key_id = Column(String(50), comment='API密钥ID')
     key_name = Column(String(200), comment='密钥名称')
     method = Column(String(10), comment='HTTP方法 GET/POST/PUT/DELETE')
@@ -1160,11 +1246,15 @@ class APIAuditLog(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_key', 'tenant_id', 'key_id'),
+        Index('idx_tenant_path', 'tenant_id', 'path'),
+        Index('idx_tenant_time', 'tenant_id', 'create_time'),
         Index('idx_api_audit_key', 'key_id'),
         Index('idx_api_audit_path', 'path'),
         Index('idx_api_audit_status', 'status_code'),
         Index('idx_api_audit_time', 'create_time'),
         Index('idx_api_audit_method', 'method'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1204,6 +1294,7 @@ class WorkingConditionAudit(Base):
         Index('idx_wc_audit_expire', 'expire_time'),
         Index('idx_wc_audit_condition', 'from_condition', 'to_condition'),
         Index('idx_wc_audit_event_id', 'event_id'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1241,6 +1332,7 @@ class WorkingConditionBaseline(Base):
         Index('idx_wc_baseline_node', 'node_type', 'node_id'),
         Index('idx_wc_baseline_condition', 'condition'),
         Index('idx_wc_baseline_active', 'is_active'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1308,6 +1400,7 @@ class BoltHealthHistory(Base):
         Index('idx_bolt_health_time', 'create_time'),
         Index('idx_bolt_health_score', 'hi_score'),
         Index('idx_bolt_health_level', 'hi_level'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1342,6 +1435,7 @@ class FlangeHealthHistory(Base):
         Index('idx_flange_health_flange', 'flange_id'),
         Index('idx_flange_health_time', 'create_time'),
         Index('idx_flange_health_score', 'hi_score'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1378,6 +1472,7 @@ class RULPrediction(Base):
         Index('idx_rul_node', 'node_type', 'node_id'),
         Index('idx_rul_time', 'prediction_date'),
         Index('idx_rul_rul', 'rul_days'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1447,6 +1542,7 @@ class DegradationCurve(Base):
     __table_args__ = (
         Index('idx_degradation_node', 'node_type', 'node_id'),
         Index('idx_degradation_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1470,6 +1566,7 @@ class HealthConfig(Base):
 
     __table_args__ = (
         Index('idx_health_config_key', 'config_key'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1670,6 +1767,7 @@ class AnomalyData(Base):
         Index('idx_anomaly_confirmed', 'is_confirmed'),
         Index('idx_anomaly_false_positive', 'is_false_positive'),
         Index('idx_anomaly_create_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
