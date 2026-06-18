@@ -198,6 +198,11 @@ scheduler:
     enabled: true
     cron: "0 1 * * *"         # 每天凌晨1点执行
 
+  # 设备健康离线检查任务
+  device_health_check_job:
+    enabled: true
+    cron: "*/5 * * * *"       # 每5分钟检查一次离线设备
+
 # 日志配置
 logging:
   level: "INFO"
@@ -871,3 +876,47 @@ risk_propagation:
     record_propagation_history: true
     # 传播历史保留天数
     history_retention_days: 180
+
+# ============================================================
+# 设备健康监控配置
+# ============================================================
+device_health:
+  # 是否启用设备健康监控
+  enabled: true
+
+  # 离线判定阈值倍数（超过 阈值×采样间隔 无数据则判定离线）
+  offline_threshold_multiplier: 3
+
+  # 卡死判定：连续 N 次数值完全不变
+  stuck_consecutive_threshold: 5
+
+  # 跳变判定：相对跳变阈值（比例）
+  jump_threshold_ratio: 0.3
+
+  # 跳变判定：绝对跳变阈值（最小跳变绝对值）
+  jump_min_absolute: 10.0
+
+  # 默认采样间隔（秒），未单独配置时使用
+  default_sampling_interval: 60.0
+
+  # 告警静默期（分钟），同设备同类型故障在此期间不重复告警
+  silence_minutes: 30
+
+  # 是否自动恢复（数据恢复正常后自动清除故障状态）
+  auto_resolve: true
+
+  # 置信度惩罚系数（按故障类型）
+  confidence_penalty:
+    offline: 0.3      # 离线：置信度乘以 0.3
+    stuck: 0.5        # 卡死：置信度乘以 0.5
+    jump: 0.6         # 跳变：置信度乘以 0.6
+
+  # 多故障额外惩罚（同时存在多种故障时额外乘以该系数）
+  multi_fault_penalty: 0.2
+
+  # 网关集成配置
+  gateway_integration:
+    # 网关采集数据时是否自动上报心跳
+    auto_report_heartbeat: true
+    # 心跳上报批量大小
+    heartbeat_batch_size: 100

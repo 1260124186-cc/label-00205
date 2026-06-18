@@ -255,8 +255,11 @@ class DeviceHealthService:
         collector_id: Optional[str] = None,
         sensor_id: Optional[str] = None,
         health_status: Optional[str] = None,
+        excluded_from_training: Optional[bool] = None,
         tenant_id: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
         """
         查询设备健康状态
 
@@ -264,14 +267,17 @@ class DeviceHealthService:
             collector_id: 采集器ID过滤
             sensor_id: 传感器ID过滤
             health_status: 健康状态过滤
+            excluded_from_training: 是否排除出训练过滤
             tenant_id: 租户ID过滤
+            page: 页码
+            page_size: 每页数量
 
         Returns:
-            设备健康状态列表
+            包含总数和列表的字典 {total, items}
         """
         with get_db() as db:
             if db is None:
-                return []
+                return {'total': 0, 'items': []}
 
             query = db.query(CollectorHeartbeat)
 
@@ -281,12 +287,24 @@ class DeviceHealthService:
                 query = query.filter(CollectorHeartbeat.sensor_id == sensor_id)
             if health_status:
                 query = query.filter(CollectorHeartbeat.health_status == health_status)
+            if excluded_from_training is not None:
+                query = query.filter(
+                    CollectorHeartbeat.excluded_from_training == excluded_from_training
+                )
             if tenant_id is not None:
                 query = query.filter(CollectorHeartbeat.tenant_id == tenant_id)
 
-            results = query.order_by(CollectorHeartbeat.update_time.desc()).all()
+            total = query.count()
 
-            return [self._heartbeat_to_dict(hb) for hb in results]
+            offset = (page - 1) * page_size
+            results = query.order_by(
+                CollectorHeartbeat.update_time.desc()
+            ).offset(offset).limit(page_size).all()
+
+            return {
+                'total': total,
+                'items': [self._heartbeat_to_dict(hb) for hb in results],
+            }
 
     def get_faulty_sensor_ids(
         self,
@@ -365,7 +383,7 @@ class DeviceHealthService:
 
         Args:
             alert_id: 告警ID
-            action: 处理动作 acknowledged/resolved/ignored
+            action: 处理动作 acknowledged/resolved/ignored 或 acknowledge/resolve/ignore
             handler_id: 处理人ID
             handler_name: 处理人姓名
             handle_note: 处理备注
@@ -373,7 +391,16 @@ class DeviceHealthService:
         Returns:
             更新后的告警信息
         """
-        if action not in ('acknowledged', 'resolved', 'ignored'):
+        action_map = {
+            'acknowledge': 'acknowledged',
+            'acknowledged': 'acknowledged',
+            'resolve': 'resolved',
+            'resolved': 'resolved',
+            'ignore': 'ignored',
+            'ignored': 'ignored',
+        }
+        normalized_action = action_map.get(action.lower())
+        if not normalized_action:
             raise ValueError(f"无效的处理动作: {action}")
 
         with get_db() as db:
@@ -386,15 +413,15 @@ class DeviceHealthService:
             if not alert:
                 return None
 
-            alert.status = action
+            alert.status = normalized_action
             alert.handler_id = handler_id
             alert.handler_name = handler_name
             alert.handle_note = handle_note
 
-            if action == 'resolved':
+            if normalized_action == 'resolved':
                 alert.handle_time = datetime.now()
 
-            if action in ('resolved', 'ignored'):
+            if normalized_action in ('resolved', 'ignored'):
                 heartbeat = db.query(CollectorHeartbeat).filter(
                     CollectorHeartbeat.collector_id == alert.collector_id,
                     CollectorHeartbeat.sensor_id == alert.sensor_id,
@@ -431,9 +458,9 @@ class DeviceHealthService:
         status: Optional[str] = None,
         collector_id: Optional[str] = None,
         sensor_id: Optional[str] = None,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
         """
         查询设备故障告警列表
 
@@ -442,15 +469,15 @@ class DeviceHealthService:
             status: 状态过滤
             collector_id: 采集器ID过滤
             sensor_id: 传感器ID过滤
-            limit: 返回数量限制
-            offset: 偏移量
+            page: 页码
+            page_size: 每页数量
 
         Returns:
-            告警列表
+            包含总数和列表的字典 {total, items}
         """
         with get_db() as db:
             if db is None:
-                return []
+                return {'total': 0, 'items': []}
 
             query = db.query(DeviceFaultAlert)
 
@@ -463,11 +490,17 @@ class DeviceHealthService:
             if sensor_id:
                 query = query.filter(DeviceFaultAlert.sensor_id == sensor_id)
 
+            total = query.count()
+
+            offset = (page - 1) * page_size
             alerts = query.order_by(
                 DeviceFaultAlert.create_time.desc()
-            ).offset(offset).limit(limit).all()
+            ).offset(offset).limit(page_size).all()
 
-            return [self._fault_alert_to_dict(a) for a in alerts]
+            return {
+                'total': total,
+                'items': [self._fault_alert_to_dict(a) for a in alerts],
+            }
 
     def register_device(
         self,
@@ -790,6 +823,7 @@ class DeviceHealthService:
             'content': alert.content,
             'evidence': alert.evidence,
             'last_value': alert.last_value,
+            'expected_value_range': alert.expected_value_range,
             'offline_duration_seconds': alert.offline_duration_seconds,
             'consecutive_missing': alert.consecutive_missing,
             'stuck_count': alert.stuck_count,
@@ -799,9 +833,11 @@ class DeviceHealthService:
             'handler_name': alert.handler_name,
             'handle_time': alert.handle_time.isoformat() if alert.handle_time else None,
             'handle_note': alert.handle_note,
+            'silence_until': alert.silence_until.isoformat() if alert.silence_until else None,
             'is_auto_resolved': alert.is_auto_resolved,
             'tenant_id': alert.tenant_id,
             'create_time': alert.create_time.isoformat() if alert.create_time else None,
+            'update_time': alert.update_time.isoformat() if alert.update_time else None,
         }
 
 

@@ -115,6 +115,11 @@ class IndustrialGatewayService:
         # 监控线程
         self._monitor_thread: Optional[threading.Thread] = None
 
+        # 设备健康心跳上报
+        self._heartbeat_buffer: Dict[str, Dict[str, Any]] = {}
+        self._heartbeat_lock = threading.Lock()
+        self._last_heartbeat_flush: float = 0.0
+
         # 注册配置变更回调
         self._config_manager.register_change_callback(self._on_config_change)
 
@@ -229,6 +234,14 @@ class IndustrialGatewayService:
             self._data_writer.stop()
         except Exception as e:
             logger.error(f"停止数据写入器失败: {e}")
+
+        # 刷新剩余心跳数据
+        try:
+            with self._heartbeat_lock:
+                if self._heartbeat_buffer:
+                    self._flush_heartbeats()
+        except Exception as e:
+            logger.error(f"停止时刷新心跳失败: {e}")
 
         # 停止健康监控
         try:
@@ -440,6 +453,10 @@ class IndustrialGatewayService:
                 self._health_monitor, "_total_written_batches", 0
             ) + 1
 
+        # 更新设备健康心跳（仅实时采集且启用时）
+        if success_points and not is_replay:
+            self._update_device_heartbeats(success_points)
+
         # 失败的数据回退缓存（实时采集与续传都需要）
         if failed_points:
             if is_replay:
@@ -457,6 +474,103 @@ class IndustrialGatewayService:
 
         # 更新缓存大小统计
         self._health_monitor.update_cache_size(self._offline_cache.size)
+
+    def _update_device_heartbeats(self, points: List[DataPoint]) -> None:
+        """
+        更新设备健康心跳（缓冲批量上报）
+
+        Args:
+            points: 成功写入的数据点列表
+        """
+        config = self._config_manager.get_config()
+        if not getattr(config, 'device_health_enabled', True):
+            return
+
+        try:
+            gateway_id = config.gateway_id
+
+            with self._heartbeat_lock:
+                for point in points:
+                    sensor_id = str(point.sensor_id)
+                    key = f"{gateway_id}:{sensor_id}"
+
+                    buffered = self._heartbeat_buffer.get(key)
+                    if buffered is None:
+                        self._heartbeat_buffer[key] = {
+                            'gateway_id': gateway_id,
+                            'device_id': point.device_id,
+                            'sensor_id': sensor_id,
+                            'value': point.value,
+                            'timestamp': point.timestamp,
+                            'sampling_period': self._get_sampling_period(point),
+                            'point_name': point.point_id if hasattr(point, 'point_id') else '',
+                        }
+                    else:
+                        if point.timestamp > buffered['timestamp']:
+                            buffered['value'] = point.value
+                            buffered['timestamp'] = point.timestamp
+
+                batch_size = getattr(config, 'device_heartbeat_batch_size', 100)
+                now = time.time()
+                if len(self._heartbeat_buffer) >= batch_size or (
+                    now - self._last_heartbeat_flush >= 5.0
+                    and self._heartbeat_buffer
+                ):
+                    self._flush_heartbeats()
+                    self._last_heartbeat_flush = now
+
+        except Exception as e:
+            logger.error(f"更新设备心跳失败: {e}")
+
+    def _get_sampling_period(self, point: DataPoint) -> float:
+        """获取点位的采样周期（秒）"""
+        try:
+            from app.gateway.models import PointConfig
+            config = self._config_manager.get_config()
+            for device in config.devices:
+                for p in device.points:
+                    if p.point_id == getattr(point, 'point_id', None):
+                        return p.sampling_period
+        except Exception:
+            pass
+        return 60.0
+
+    def _flush_heartbeats(self) -> None:
+        """
+        刷新心跳缓冲区，批量上报到设备健康监控服务
+        """
+        if not self._heartbeat_buffer:
+            return
+
+        try:
+            from app.services.device_health_service import get_device_health_service
+
+            dh_service = get_device_health_service()
+            buffer_copy = list(self._heartbeat_buffer.values())
+            self._heartbeat_buffer.clear()
+
+            success_count = 0
+            for hb in buffer_copy:
+                try:
+                    dh_service.record_heartbeat(
+                        collector_id=hb['gateway_id'],
+                        sensor_id=hb['sensor_id'],
+                        value=hb['value'],
+                        timestamp=hb['timestamp'],
+                        sampling_interval=hb.get('sampling_period'),
+                        device_name=hb.get('point_name', ''),
+                    )
+                    success_count += 1
+                except Exception as e:
+                    logger.warning(
+                        f"上报心跳失败 {hb['gateway_id']}/{hb['sensor_id']}: {e}"
+                    )
+
+            if success_count > 0:
+                logger.debug(f"心跳批量上报完成: {success_count}/{len(buffer_copy)}")
+
+        except Exception as e:
+            logger.error(f"批量刷新心跳失败: {e}")
 
     def _fallback_to_cache(self, points: List[DataPoint]) -> None:
         """

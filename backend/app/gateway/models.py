@@ -176,6 +176,8 @@ class GatewayConfig:
         cache_dir: 缓存目录
         health_check_interval: 健康检查间隔（秒）
         config_reload_interval: 配置热加载间隔（秒）
+        device_health_enabled: 是否启用设备健康监控心跳上报
+        device_heartbeat_batch_size: 心跳上报批量大小
         devices: 设备配置列表
     """
     gateway_id: str = "gateway-001"
@@ -187,6 +189,8 @@ class GatewayConfig:
     cache_dir: str = "./data/gateway_cache"
     health_check_interval: int = 30
     config_reload_interval: int = 60
+    device_health_enabled: bool = True
+    device_heartbeat_batch_size: int = 100
     devices: List[DeviceConfig] = field(default_factory=list)
 
     def get_enabled_devices(self) -> List[DeviceConfig]:

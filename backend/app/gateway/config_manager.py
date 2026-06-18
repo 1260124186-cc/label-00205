@@ -123,6 +123,8 @@ class GatewayConfigManager:
             cache_dir=gateway_raw.get('cache_dir', './data/gateway_cache'),
             health_check_interval=int(gateway_raw.get('health_check_interval', 30)),
             config_reload_interval=int(gateway_raw.get('config_reload_interval', 60)),
+            device_health_enabled=gateway_raw.get('device_health_enabled', True),
+            device_heartbeat_batch_size=int(gateway_raw.get('device_heartbeat_batch_size', 100)),
         )
 
         # 解析设备配置

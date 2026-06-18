@@ -5767,6 +5767,9 @@ class DeviceHeartbeatSchema(BaseModel):
     recovery_time: Optional[str]
     confidence_penalty: float
     excluded_from_training: bool
+    tenant_id: Optional[int]
+    create_time: Optional[str]
+    update_time: Optional[str]
 
 
 class DeviceHealthListResponse(BaseModel):
@@ -5776,7 +5779,7 @@ class DeviceHealthListResponse(BaseModel):
 
 class DeviceFaultAlertHandleRequest(BaseModel):
     alert_id: int = Field(..., description="告警ID")
-    action: str = Field(..., description="处理动作 acknowledge/resolve/ignore")
+    action: str = Field(..., description="处理动作 acknowledged/resolved/ignored")
     handler_name: Optional[str] = Field(None, description="处理人姓名")
     handle_note: Optional[str] = Field(None, description="处理备注")
 
@@ -5801,6 +5804,7 @@ class DeviceFaultAlertSchema(BaseModel):
     content: Optional[str]
     evidence: Optional[str]
     last_value: Optional[float]
+    expected_value_range: Optional[str]
     offline_duration_seconds: Optional[float]
     consecutive_missing: Optional[int]
     stuck_count: Optional[int]
@@ -5812,7 +5816,9 @@ class DeviceFaultAlertSchema(BaseModel):
     handle_note: Optional[str]
     silence_until: Optional[str]
     is_auto_resolved: bool
-    created_at: Optional[str]
+    tenant_id: Optional[int]
+    create_time: Optional[str]
+    update_time: Optional[str]
 
 
 class DeviceFaultAlertListResponse(BaseModel):

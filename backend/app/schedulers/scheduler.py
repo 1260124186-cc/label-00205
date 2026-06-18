@@ -100,6 +100,7 @@ class TaskScheduler:
             'alert_upgrade_job': 'alert',
             'audit_cleanup_job': 'maintenance',
             'association_graph_update_job': 'association_graph',
+            'device_health_check_job': 'device_health',
         }
 
         self.leader_required = config.get('scheduler.leader_election.required', False)
@@ -115,6 +116,7 @@ class TaskScheduler:
             'alert_upgrade_job',
             'audit_cleanup_job',
             'association_graph_update_job',
+            'device_health_check_job',
         ]
 
         event_bus.subscribe(
@@ -232,6 +234,18 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"关联图更新任务已添加: {cron}")
+
+        device_health_config = self.config.get('device_health_check_job', {})
+        if device_health_config.get('enabled', True):
+            cron = device_health_config.get('cron', '*/5 * * * *')
+            self.scheduler.add_job(
+                self._device_health_check_job,
+                CronTrigger.from_crontab(cron),
+                id='device_health_check_job',
+                name='设备健康离线检查任务',
+                replace_existing=True
+            )
+            logger.info(f"设备健康检查任务已添加: {cron}")
 
     def _acquire_leadership_if_needed(self, job_name: str) -> bool:
         """
@@ -642,6 +656,38 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"装置关联图更新任务失败: {e}")
 
+    def _device_health_check_job(self) -> None:
+        """
+        设备健康检查任务（离线检测）
+        """
+        job_name = 'device_health_check_job'
+        logger.info("开始执行设备健康检查任务")
+
+        try:
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.device_health_service import get_device_health_service
+
+                dh_service = get_device_health_service()
+                offline_devices = dh_service.check_offline_devices()
+
+                ctx.success_count = len(offline_devices)
+                ctx.total_nodes = len(offline_devices)
+
+                if offline_devices:
+                    logger.info(
+                        f"设备健康检查任务完成，检测到 {len(offline_devices)} 个离线设备"
+                    )
+                else:
+                    logger.info("设备健康检查任务完成，无离线设备")
+
+        except Exception as e:
+            logger.error(f"设备健康检查任务失败: {e}")
+
     def _parse_json_field(self, value: Any, default: Any) -> Any:
         """解析JSON字段"""
         if not value:
@@ -865,6 +911,10 @@ class TaskScheduler:
                 'audit_cleanup_job': (
                     self._get_audit_cleanup_config(),
                     self._audit_cleanup_job,
+                ),
+                'device_health_check_job': (
+                    self.config.get('device_health_check_job', {}),
+                    self._device_health_check_job,
                 ),
             }
 
