@@ -5364,3 +5364,361 @@ class WhatIfSimulationResponse(BaseModel):
         None,
         description="数据质量备注（如历史数据不足时的警告信息）"
     )
+
+
+# ============================================================
+# 智能复检周期排程模块
+# ============================================================
+
+# ---------- 设备主数据 ----------
+
+class DeviceMasterDataSchema(BaseModel):
+    """设备主数据（含法定检验周期）"""
+    node_id: str = Field(..., description="节点ID（螺栓/法兰ID）")
+    node_type: str = Field(..., description="节点类型: bolt/flange")
+    device_name: Optional[str] = Field("", description="设备名称")
+    location: Optional[str] = Field("", description="安装位置")
+    legal_inspection_cycle_days: int = Field(365, description="法定检验周期（天）", ge=1, le=3650)
+    last_legal_inspection_date: Optional[datetime] = Field(None, description="上次法定检验日期")
+    manufacturer: Optional[str] = Field("", description="制造商")
+    model: Optional[str] = Field("", description="型号")
+    installation_date: Optional[datetime] = Field(None, description="安装日期")
+    team_id: Optional[str] = Field(None, description="负责班组ID")
+    team_name: Optional[str] = Field(None, description="负责班组名称")
+    extra_info: Optional[Dict[str, Any]] = Field(default_factory=dict, description="扩展信息")
+
+
+# ---------- 排程输入因子 ----------
+
+class InspectionFactorsSchema(BaseModel):
+    """排程计算输入因子"""
+    hi_score: float = Field(..., description="健康度指数HI (0-100)", ge=0, le=100)
+    hi_level: str = Field(..., description="健康等级: excellent/good/fair/poor/critical")
+    rul_days: Optional[float] = Field(None, description="剩余使用寿命RUL（天）", ge=0)
+    rul_confidence: Optional[float] = Field(None, description="RUL预测置信度 (0-1)", ge=0, le=1)
+    recent_alert_count: int = Field(0, description="最近30天预警次数", ge=0)
+    recent_alert_levels: Optional[List[int]] = Field(
+        default_factory=list, description="最近预警级别列表 (1-5, 5最严重)"
+    )
+    device_data: DeviceMasterDataSchema = Field(..., description="设备主数据")
+    last_inspection_date: Optional[datetime] = Field(None, description="上次检验日期")
+    historical_inspection_count: Optional[int] = Field(0, description="历史检验次数", ge=0)
+
+
+# ---------- 排程计算结果 ----------
+
+class ScheduleCalculationResultSchema(BaseModel):
+    """排程计算结果"""
+    node_id: str = Field(..., description="节点ID")
+    node_type: str = Field(..., description="节点类型")
+    next_inspection_date: datetime = Field(..., description="计算出的下次检验日期")
+    priority: str = Field(..., description="优先级: routine/attention/urgent/immediate")
+    priority_score: float = Field(..., description="优先级分数 (0-100, 越高越紧急)")
+    confidence: float = Field(..., description="计算置信度 (0-1)")
+    base_cycle_days: float = Field(..., description="基础检验周期（法定周期，天）")
+    hi_adjustment_days: float = Field(..., description="HI健康度调整天数")
+    rul_adjustment_days: float = Field(..., description="RUL剩余寿命调整天数")
+    alert_adjustment_days: float = Field(..., description="预警频率调整天数")
+    legal_constraint_applied: bool = Field(..., description="是否触发法定截止日期强制约束")
+    reasoning: str = Field(..., description="排程决策推理说明（中文）")
+    factor_breakdown: Dict[str, Any] = Field(
+        default_factory=dict, description="各因素影响详情分解"
+    )
+
+
+# ---------- 班组产能 ----------
+
+class TeamCapacitySchema(BaseModel):
+    """班组产能配置"""
+    team_id: str = Field(..., description="班组ID")
+    team_name: str = Field(..., description="班组名称")
+    daily_max_tasks: int = Field(5, description="每日最大任务数", ge=1, le=50)
+    daily_max_hours: float = Field(40.0, description="每日最大工时（小时）", ge=1, le=200)
+    weekly_max_tasks: int = Field(25, description="每周最大任务数", ge=1, le=250)
+    member_count: int = Field(5, description="班组人数", ge=1, le=100)
+    working_days: List[int] = Field(
+        default_factory=lambda: [0, 1, 2, 3, 4],
+        description="工作日 (0=周一, 6=周日)"
+    )
+    holidays: Optional[List[str]] = Field(
+        default_factory=list, description="节假日列表 (YYYY-MM-DD格式)"
+    )
+    special_schedules: Optional[Dict[str, Any]] = Field(
+        default_factory=dict, description="特殊排班配置"
+    )
+
+
+# ---------- 冲突信息 ----------
+
+class ConflictInfoSchema(BaseModel):
+    """冲突信息"""
+    conflict_type: str = Field(
+        ..., description="冲突类型: non_working_day/holiday/daily_task_overflow/daily_hours_overflow/weekly_task_overflow"
+    )
+    severity: str = Field(..., description="严重程度: warning/error/critical")
+    team_id: str = Field(..., description="班组ID")
+    team_name: str = Field(..., description="班组名称")
+    date: datetime = Field(..., description="冲突日期")
+    current_tasks: int = Field(..., description="当前已有任务数")
+    max_tasks: int = Field(..., description="最大任务数限制")
+    current_hours: float = Field(..., description="当前已用工时")
+    max_hours: float = Field(..., description="最大工时限制")
+    description: str = Field(..., description="冲突描述")
+    suggestions: List[str] = Field(default_factory=list, description="解决建议")
+
+
+# ---------- 检验排程任务 ----------
+
+class InspectionScheduleTaskSchema(BaseModel):
+    """检验排程任务"""
+    schedule_id: str = Field(..., description="排程任务ID")
+    node_id: str = Field(..., description="节点ID")
+    node_type: str = Field(..., description="节点类型")
+    device_name: str = Field(..., description="设备名称")
+    scheduled_date: datetime = Field(..., description="计划开始日期")
+    end_date: datetime = Field(..., description="计划结束日期")
+    priority: str = Field(..., description="优先级: routine/attention/urgent/immediate")
+    priority_score: float = Field(..., description="优先级分数")
+    status: str = Field(..., description="状态: planned/confirmed/in_progress/completed/cancelled/conflict")
+    team_id: Optional[str] = Field(None, description="负责班组ID")
+    team_name: Optional[str] = Field(None, description="负责班组名称")
+    assignee_id: Optional[str] = Field(None, description="负责人ID")
+    assignee_name: Optional[str] = Field(None, description="负责人姓名")
+    inspection_type: str = Field(..., description="检验类型: routine/legal/emergency/targeted")
+    title: str = Field(..., description="任务标题")
+    description: str = Field(..., description="任务描述")
+    estimated_hours: float = Field(..., description="预估工时（小时）", ge=0)
+    standard_codes: List[str] = Field(default_factory=list, description="检验标准代号列表")
+    prerequisites: List[str] = Field(default_factory=list, description="前置条件")
+    conflict_detected: bool = Field(..., description="是否检测到冲突")
+    conflict_details: List[str] = Field(default_factory=list, description="冲突详情列表")
+    calculation_result: Optional[Dict[str, Any]] = Field(None, description="排程计算原始结果")
+    work_order_id: Optional[int] = Field(None, description="关联工单ID")
+    cmms_external_id: Optional[str] = Field(None, description="CMMS系统外部ID")
+    extra_info: Optional[Dict[str, Any]] = Field(default_factory=dict, description="扩展信息")
+    create_time: datetime = Field(..., description="创建时间")
+    update_time: datetime = Field(..., description="更新时间")
+
+
+# ---------- 请求/响应模型 ----------
+
+class ScheduleCalculateRequest(BaseModel):
+    """单设备排程计算请求"""
+    factors: InspectionFactorsSchema = Field(..., description="排程输入因子")
+    auto_create_work_order: Optional[bool] = Field(
+        False, description="是否自动创建工单"
+    )
+    enable_conflict_detection: Optional[bool] = Field(
+        True, description="是否启用冲突检测"
+    )
+    enable_auto_resolve: Optional[bool] = Field(
+        True, description="冲突时是否自动顺延"
+    )
+    team_capacity: Optional[TeamCapacitySchema] = Field(
+        None, description="班组产能配置（不传则使用默认配置）"
+    )
+
+
+class ScheduleCalculateResponse(BaseModel):
+    """单设备排程计算响应"""
+    success: bool = Field(..., description="是否成功")
+    schedule_task: Optional[InspectionScheduleTaskSchema] = Field(
+        None, description="生成的排程任务"
+    )
+    calculation_result: Optional[ScheduleCalculationResultSchema] = Field(
+        None, description="排程计算详情"
+    )
+    conflicts: List[ConflictInfoSchema] = Field(
+        default_factory=list, description="检测到的冲突列表"
+    )
+    auto_resolved: bool = Field(
+        False, description="是否自动解决了冲突"
+    )
+    message: Optional[str] = Field(None, description="提示信息")
+
+
+class BatchScheduleCalculateRequest(BaseModel):
+    """批量排程计算请求"""
+    devices: List[InspectionFactorsSchema] = Field(
+        ..., description="设备排程因子列表", min_length=1
+    )
+    auto_create_work_order: Optional[bool] = Field(
+        False, description="是否自动创建工单"
+    )
+    enable_conflict_detection: Optional[bool] = Field(
+        True, description="是否启用冲突检测"
+    )
+    enable_auto_resolve: Optional[bool] = Field(
+        True, description="冲突时是否自动顺延"
+    )
+    team_capacities: Optional[Dict[str, TeamCapacitySchema]] = Field(
+        None, description="各班组产能配置映射 {team_id: TeamCapacity}"
+    )
+
+
+class BatchScheduleCalculateResponse(BaseModel):
+    """批量排程计算响应"""
+    success: bool = Field(..., description="是否成功")
+    total_count: int = Field(..., description="请求总数")
+    success_count: int = Field(..., description="成功数")
+    conflict_count: int = Field(..., description="发生冲突数")
+    auto_resolved_count: int = Field(..., description="自动解决冲突数")
+    failed_count: int = Field(..., description="失败数")
+    schedule_tasks: List[InspectionScheduleTaskSchema] = Field(
+        default_factory=list, description="成功生成的排程任务列表"
+    )
+    failed_devices: List[Dict[str, Any]] = Field(
+        default_factory=list, description="失败的设备及原因"
+    )
+
+
+class ScheduleConflictDetectRequest(BaseModel):
+    """冲突检测请求"""
+    team_id: str = Field(..., description="班组ID")
+    team_name: Optional[str] = Field(None, description="班组名称")
+    proposed_date: datetime = Field(..., description="拟排程日期")
+    proposed_hours: Optional[float] = Field(4.0, description="拟排程任务工时（小时）", ge=0)
+    team_capacity: Optional[TeamCapacitySchema] = Field(
+        None, description="班组产能配置（不传则使用默认配置）"
+    )
+
+
+class ScheduleConflictDetectResponse(BaseModel):
+    """冲突检测响应"""
+    has_conflict: bool = Field(..., description="是否存在冲突")
+    conflicts: List[ConflictInfoSchema] = Field(
+        default_factory=list, description="检测到的冲突列表"
+    )
+    team_capacity_used: Dict[str, Any] = Field(
+        default_factory=dict, description="班组产能使用情况"
+    )
+
+
+# ---------- ICS导出 ----------
+
+class ICSExportRequest(BaseModel):
+    """ICS日历导出请求"""
+    schedule_ids: Optional[List[str]] = Field(
+        None, description="要导出的排程ID列表（不传则导出全部）"
+    )
+    date_range_start: Optional[datetime] = Field(None, description="日期范围开始")
+    date_range_end: Optional[datetime] = Field(None, description="日期范围结束")
+    team_id: Optional[str] = Field(None, description="按班组过滤")
+    include_alarms: Optional[bool] = Field(True, description="是否包含提醒")
+    alarm_minutes_before: Optional[int] = Field(
+        1440, description="提前多少分钟提醒（默认24小时）", ge=0
+    )
+
+
+class ICSExportResponse(BaseModel):
+    """ICS日历导出响应"""
+    success: bool = Field(..., description="是否成功")
+    ics_content: Optional[str] = Field(None, description="ICS文件内容（VCALENDAR格式）")
+    event_count: int = Field(..., description="导出的事件数量")
+    download_url: Optional[str] = Field(None, description="下载链接")
+    calendar_subscription_url: Optional[str] = Field(
+        None, description="WebCal日历订阅URL"
+    )
+
+
+# ---------- CMMS推送 ----------
+
+class CMMSSyncRequest(BaseModel):
+    """CMMS系统推送请求"""
+    schedule_ids: Optional[List[str]] = Field(
+        None, description="要推送的排程ID列表（不传则推送所有未推送的）"
+    )
+    cmms_config_id: Optional[str] = Field(
+        None, description="CMMS配置ID（不传则使用默认配置）"
+    )
+    force_update: Optional[bool] = Field(
+        False, description="是否强制更新（即使已推送过）"
+    )
+
+
+class CMMSSyncResponse(BaseModel):
+    """CMMS系统推送响应"""
+    success: bool = Field(..., description="整体是否成功")
+    total_count: int = Field(..., description="请求总数")
+    pushed_count: int = Field(..., description="成功推送数")
+    failed_count: int = Field(..., description="失败数")
+    results: List[Dict[str, Any]] = Field(
+        default_factory=list, description="每条推送的详细结果 [{schedule_id, success, cmms_id, error}]"
+    )
+
+
+# ---------- 排程任务CRUD ----------
+
+class ScheduleListRequest(BaseModel):
+    """排程任务列表查询请求"""
+    page: int = Field(1, description="页码", ge=1)
+    page_size: int = Field(20, description="每页数量", ge=1, le=200)
+    team_id: Optional[str] = Field(None, description="班组ID过滤")
+    status: Optional[str] = Field(None, description="状态过滤")
+    priority: Optional[str] = Field(None, description="优先级过滤")
+    date_range_start: Optional[datetime] = Field(None, description="计划日期开始")
+    date_range_end: Optional[datetime] = Field(None, description="计划日期结束")
+    keyword: Optional[str] = Field(None, description="关键词搜索")
+
+
+class ScheduleListResponse(BaseModel):
+    """排程任务列表响应"""
+    total: int = Field(..., description="总数")
+    page: int = Field(..., description="当前页码")
+    page_size: int = Field(..., description="每页数量")
+    items: List[InspectionScheduleTaskSchema] = Field(
+        default_factory=list, description="排程任务列表"
+    )
+
+
+class ScheduleUpdateRequest(BaseModel):
+    """排程任务更新请求"""
+    scheduled_date: Optional[datetime] = Field(None, description="新计划日期")
+    end_date: Optional[datetime] = Field(None, description="新计划结束日期")
+    team_id: Optional[str] = Field(None, description="新班组ID")
+    team_name: Optional[str] = Field(None, description="新班组名称")
+    assignee_id: Optional[str] = Field(None, description="新负责人ID")
+    assignee_name: Optional[str] = Field(None, description="新负责人姓名")
+    status: Optional[str] = Field(None, description="新状态")
+    priority: Optional[str] = Field(None, description="新优先级")
+    estimated_hours: Optional[float] = Field(None, description="新预估工时", ge=0)
+    description: Optional[str] = Field(None, description="新描述")
+    extra_info: Optional[Dict[str, Any]] = Field(None, description="扩展信息")
+
+
+# ---------- 班组日历查询 ----------
+
+class TeamCalendarRequest(BaseModel):
+    """班组日历视图请求"""
+    team_id: str = Field(..., description="班组ID")
+    month: str = Field(..., description="月份 (YYYY-MM格式)")
+    include_capacity: Optional[bool] = Field(True, description="是否包含产能信息")
+
+
+class TeamCalendarDaySchema(BaseModel):
+    """班组日历单日数据"""
+    date: str = Field(..., description="日期 (YYYY-MM-DD)")
+    is_working_day: bool = Field(..., description="是否工作日")
+    task_count: int = Field(..., description="任务数")
+    total_hours: float = Field(..., description="总工时")
+    daily_max_tasks: int = Field(..., description="日任务上限")
+    daily_max_hours: float = Field(..., description="日工时上限")
+    utilization_rate: float = Field(..., description="工时利用率 (0-1)")
+    tasks: List[Dict[str, Any]] = Field(default_factory=list, description="当天任务详情")
+
+
+class TeamCalendarResponse(BaseModel):
+    """班组日历视图响应"""
+    team_id: str = Field(..., description="班组ID")
+    team_name: str = Field(..., description="班组名称")
+    month: str = Field(..., description="月份")
+    weekly_summary: Dict[str, Any] = Field(
+        default_factory=dict, description="每周汇总 {week_num: {task_count, total_hours, max_tasks}}"
+    )
+    days: List[TeamCalendarDaySchema] = Field(
+        default_factory=list, description="每日日历数据"
+    )
+    month_total_tasks: int = Field(..., description="本月总任务数")
+    month_total_hours: float = Field(..., description="本月总工时")
+    month_capacity_hours: float = Field(..., description="本月可用工时")
+    month_utilization_rate: float = Field(..., description="本月工时利用率")

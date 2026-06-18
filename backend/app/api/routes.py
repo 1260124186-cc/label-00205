@@ -211,6 +211,18 @@ from app.api.schemas import (
     RecommendedInterventionSchema, ScenarioSummarySchema,
     WhatIfScenarioResultSchema, ScenarioComparisonItemSchema,
     WhatIfScenarioComparisonSchema,
+    # 智能复检排程模块
+    DeviceMasterDataSchema, InspectionFactorsSchema,
+    ScheduleCalculationResultSchema, TeamCapacitySchema,
+    ConflictInfoSchema, InspectionScheduleTaskSchema,
+    ScheduleCalculateRequest, ScheduleCalculateResponse,
+    BatchScheduleCalculateRequest, BatchScheduleCalculateResponse,
+    ScheduleConflictDetectRequest, ScheduleConflictDetectResponse,
+    ICSExportRequest, ICSExportResponse,
+    CMMSSyncRequest, CMMSSyncResponse,
+    ScheduleListRequest, ScheduleListResponse,
+    ScheduleUpdateRequest,
+    TeamCalendarRequest, TeamCalendarResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -281,6 +293,15 @@ def get_risk_visualization_service() -> RiskVisualizationService:
     if risk_visualization_service is None:
         risk_visualization_service = RiskVisualizationService()
     return risk_visualization_service
+
+
+def get_inspection_schedule_service():
+    """获取智能复检排程服务实例"""
+    from app.services.inspection_scheduler import InspectionScheduleService
+    global inspection_schedule_service
+    if 'inspection_schedule_service' not in globals() or inspection_schedule_service is None:
+        inspection_schedule_service = InspectionScheduleService()
+    return inspection_schedule_service
 
 
 def get_federated_server():
@@ -12422,4 +12443,767 @@ async def timeseries_sql_query_compat(
         raise
     except Exception as e:
         logger.error(f"时序 SQL 查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 智能复检周期排程 API
+# ============================================================
+
+def _task_to_dict(task) -> Dict[str, Any]:
+    """将排程任务dataclass转为dict"""
+    if task is None:
+        return None
+    return {
+        'schedule_id': task.schedule_id,
+        'node_id': task.node_id,
+        'node_type': task.node_type,
+        'device_name': task.device_name,
+        'scheduled_date': task.scheduled_date,
+        'end_date': task.end_date,
+        'priority': task.priority,
+        'priority_score': task.priority_score,
+        'status': task.status,
+        'team_id': task.team_id,
+        'team_name': task.team_name,
+        'assignee_id': task.assignee_id,
+        'assignee_name': task.assignee_name,
+        'inspection_type': task.inspection_type,
+        'title': task.title,
+        'description': task.description,
+        'estimated_hours': task.estimated_hours,
+        'standard_codes': task.standard_codes or [],
+        'prerequisites': task.prerequisites or [],
+        'conflict_detected': task.conflict_detected,
+        'conflict_details': task.conflict_details or [],
+        'calculation_result': task.calculation_result,
+        'work_order_id': task.work_order_id,
+        'cmms_external_id': task.cmms_external_id,
+        'extra_info': task.extra_info or {},
+        'create_time': task.create_time,
+        'update_time': task.update_time,
+    }
+
+
+def _conflict_to_dict(conflict) -> Dict[str, Any]:
+    """将冲突信息dataclass转为dict"""
+    return {
+        'conflict_type': conflict.conflict_type,
+        'severity': conflict.severity,
+        'team_id': conflict.team_id,
+        'team_name': conflict.team_name,
+        'date': conflict.date,
+        'current_tasks': conflict.current_tasks,
+        'max_tasks': conflict.max_tasks,
+        'current_hours': conflict.current_hours,
+        'max_hours': conflict.max_hours,
+        'description': conflict.description,
+        'suggestions': conflict.suggestions or [],
+    }
+
+
+def _calc_result_to_dict(result) -> Dict[str, Any]:
+    """将排程计算结果dataclass转为dict"""
+    if result is None:
+        return None
+    return {
+        'node_id': result.node_id,
+        'node_type': result.node_type,
+        'next_inspection_date': result.next_inspection_date,
+        'priority': result.priority.value if hasattr(result.priority, 'value') else result.priority,
+        'priority_score': result.priority_score,
+        'confidence': result.confidence,
+        'base_cycle_days': result.base_cycle_days,
+        'hi_adjustment_days': result.hi_adjustment_days,
+        'rul_adjustment_days': result.rul_adjustment_days,
+        'alert_adjustment_days': result.alert_adjustment_days,
+        'legal_constraint_applied': result.legal_constraint_applied,
+        'reasoning': result.reasoning,
+        'factor_breakdown': result.factor_breakdown or {},
+    }
+
+
+def _device_schema_to_dataclass(d: DeviceMasterDataSchema):
+    """将schema转为dataclass"""
+    from app.services.inspection_scheduler import DeviceMasterData
+    return DeviceMasterData(
+        node_id=d.node_id,
+        node_type=d.node_type,
+        device_name=d.device_name or "",
+        location=d.location or "",
+        legal_inspection_cycle_days=d.legal_inspection_cycle_days,
+        last_legal_inspection_date=d.last_legal_inspection_date,
+        manufacturer=d.manufacturer or "",
+        model=d.model or "",
+        installation_date=d.installation_date,
+        team_id=d.team_id,
+        team_name=d.team_name,
+        extra_info=d.extra_info or {},
+    )
+
+
+def _team_capacity_schema_to_dataclass(t: TeamCapacitySchema):
+    """将班组产能schema转为dataclass"""
+    from app.services.inspection_scheduler import TeamCapacity
+    return TeamCapacity(
+        team_id=t.team_id,
+        team_name=t.team_name,
+        daily_max_tasks=t.daily_max_tasks,
+        daily_max_hours=t.daily_max_hours,
+        weekly_max_tasks=t.weekly_max_tasks,
+        member_count=t.member_count,
+        working_days=t.working_days,
+        holidays=t.holidays or [],
+        special_schedules=t.special_schedules or {},
+    )
+
+
+@router.post(
+    "/inspection/schedule/calculate",
+    response_model=ScheduleCalculateResponse,
+    tags=["智能复检排程"],
+    summary="单设备排程计算"
+)
+async def calculate_single_schedule(request: ScheduleCalculateRequest):
+    """
+    为单个设备计算智能排程
+
+    综合HI、RUL、预警频率、法定周期，计算next_inspection_date。
+    支持冲突检测与自动顺延。
+    """
+    try:
+        from app.services.inspection_scheduler import (
+            InspectionScheduleService, ScheduleStatus
+        )
+        service = get_inspection_schedule_service()
+
+        f = request.factors
+        device_data = _device_schema_to_dataclass(f.device_data)
+
+        if request.team_capacity:
+            tc = _team_capacity_schema_to_dataclass(request.team_capacity)
+            service.conflict_detector._capacity_cache[tc.team_id] = tc
+
+        task = service.generate_schedule_for_device(
+            device_data=device_data,
+            hi_score=f.hi_score,
+            hi_level=f.hi_level,
+            rul_days=f.rul_days,
+            rul_confidence=f.rul_confidence,
+            last_inspection_date=f.last_inspection_date,
+            check_conflict=request.enable_conflict_detection,
+            create_work_order=request.auto_create_work_order,
+        )
+
+        auto_resolved = False
+        conflicts_list = []
+        if task.conflict_detected and request.enable_auto_resolve:
+            resolved = service.auto_reschedule_after_conflict(task)
+            if resolved:
+                task = resolved
+                auto_resolved = True
+            else:
+                if task.team_id:
+                    has_conf, confs = service.conflict_detector.detect_conflicts(
+                        team_id=task.team_id,
+                        proposed_date=task.scheduled_date,
+                        proposed_hours=task.estimated_hours,
+                    )
+                    conflicts_list = [_conflict_to_dict(c) for c in confs]
+
+        service._save_schedule_task(task)
+
+        calc_result = task.calculation_result
+        priority_val = calc_result.get('priority', task.priority) if calc_result else task.priority
+
+        response = {
+            'success': True,
+            'schedule_task': _task_to_dict(task),
+            'calculation_result': {
+                'node_id': task.node_id,
+                'node_type': task.node_type,
+                'next_inspection_date': task.scheduled_date,
+                'priority': priority_val,
+                'priority_score': task.priority_score,
+                'confidence': calc_result.get('confidence', 0.85) if calc_result else 0.85,
+                'base_cycle_days': calc_result.get('base_cycle_days', 0) if calc_result else 0,
+                'hi_adjustment_days': calc_result.get('hi_adjustment_days', 0) if calc_result else 0,
+                'rul_adjustment_days': calc_result.get('rul_adjustment_days', 0) if calc_result else 0,
+                'alert_adjustment_days': calc_result.get('alert_adjustment_days', 0) if calc_result else 0,
+                'legal_constraint_applied': calc_result.get('legal_constraint_applied', False) if calc_result else False,
+                'reasoning': calc_result.get('reasoning', task.description) if calc_result else task.description,
+                'factor_breakdown': calc_result.get('factor_breakdown', {}) if calc_result else {},
+            } if calc_result else None,
+            'conflicts': conflicts_list,
+            'auto_resolved': auto_resolved,
+            'message': '排程成功' if not task.conflict_detected else '存在冲突，请手动调整',
+        }
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"单设备排程计算失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/inspection/schedule/batch",
+    response_model=BatchScheduleCalculateResponse,
+    tags=["智能复检排程"],
+    summary="批量设备排程计算"
+)
+async def calculate_batch_schedules(request: BatchScheduleCalculateRequest):
+    """批量为多个设备生成智能排程"""
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+
+        if request.team_capacities:
+            for tid, tc_schema in request.team_capacities.items():
+                tc = _team_capacity_schema_to_dataclass(tc_schema)
+                service.conflict_detector._capacity_cache[tid] = tc
+
+        device_list = []
+        for f in request.devices:
+            item = f.model_dump()
+            item['device_data'] = f.device_data.model_dump()
+            device_list.append(item)
+
+        tasks = service.batch_generate_schedules(
+            device_list=device_list,
+            check_conflict=request.enable_conflict_detection,
+            resolve_conflicts=request.enable_auto_resolve,
+        )
+
+        if request.auto_create_work_order:
+            for task in tasks:
+                try:
+                    from app.services.alert.work_order_service import WorkOrderService
+                    wo_service = WorkOrderService()
+                    priority_map = {
+                        'immediate': 'critical', 'urgent': 'high',
+                        'attention': 'medium', 'routine': 'low'
+                    }
+                    wo = wo_service.create_work_order(
+                        title=task.title,
+                        description=task.description,
+                        node_type=task.node_type,
+                        node_id=task.node_id,
+                        priority=priority_map.get(task.priority, 'medium'),
+                        due_date=task.scheduled_date,
+                        assignee_id=task.assignee_id,
+                        team_id=task.team_id,
+                    )
+                    if wo and hasattr(wo, 'id'):
+                        task.work_order_id = wo.id
+                        service._save_schedule_task(task)
+                except Exception as e:
+                    logger.warning(f"批量排程-自动建单失败 [{task.schedule_id}]: {e}")
+
+        success_count = sum(1 for t in tasks if t.status != 'conflict')
+        conflict_count = sum(1 for t in tasks if t.conflict_detected)
+        auto_resolved_count = sum(
+            1 for t in tasks
+            if not t.conflict_detected and t.calculation_result and t.calculation_result.get('_auto_resolved')
+        )
+
+        return {
+            'success': True,
+            'total_count': len(request.devices),
+            'success_count': success_count,
+            'conflict_count': conflict_count,
+            'auto_resolved_count': auto_resolved_count,
+            'failed_count': len(request.devices) - len(tasks),
+            'schedule_tasks': [_task_to_dict(t) for t in tasks],
+            'failed_devices': [],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量排程计算失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/inspection/schedule/conflict-detect",
+    response_model=ScheduleConflictDetectResponse,
+    tags=["智能复检排程"],
+    summary="冲突检测（指定日期班组产能）"
+)
+async def detect_schedule_conflicts(request: ScheduleConflictDetectRequest):
+    """检测指定班组在指定日期是否存在产能冲突"""
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+
+        if request.team_capacity:
+            tc = _team_capacity_schema_to_dataclass(request.team_capacity)
+            service.conflict_detector._capacity_cache[tc.team_id] = tc
+
+        team_name = request.team_name or f"班组_{request.team_id}"
+        has_conflict, conflicts = service.conflict_detector.detect_conflicts(
+            team_id=request.team_id,
+            proposed_date=request.proposed_date,
+            proposed_hours=request.proposed_hours,
+        )
+
+        capacity = service.conflict_detector.get_team_capacity(request.team_id)
+        used = service.conflict_detector._count_day_tasks(
+            team_id=request.team_id,
+            check_date=request.proposed_date,
+        )
+
+        return {
+            'has_conflict': has_conflict,
+            'conflicts': [_conflict_to_dict(c) for c in conflicts],
+            'team_capacity_used': {
+                'team_id': request.team_id,
+                'team_name': team_name,
+                'date': request.proposed_date.strftime('%Y-%m-%d'),
+                'day_of_week': request.proposed_date.weekday(),
+                'is_working_day': request.proposed_date.weekday() in capacity.working_days,
+                'current_tasks': used[0],
+                'current_hours': used[1],
+                'proposed_hours': request.proposed_hours,
+                'daily_max_tasks': capacity.daily_max_tasks,
+                'daily_max_hours': capacity.daily_max_hours,
+                'weekly_max_tasks': capacity.weekly_max_tasks,
+                'task_utilization': round(used[0] / capacity.daily_max_tasks, 3) if capacity.daily_max_tasks > 0 else 0,
+                'hours_utilization': round(used[1] / capacity.daily_max_hours, 3) if capacity.daily_max_hours > 0 else 0,
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"冲突检测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/inspection/schedules/list",
+    response_model=ScheduleListResponse,
+    tags=["智能复检排程"],
+    summary="查询排程任务列表"
+)
+async def list_schedules(request: ScheduleListRequest):
+    """分页查询排程任务列表"""
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+
+        offset = (request.page - 1) * request.page_size
+        tasks, total = service.list_schedules(
+            team_id=request.team_id,
+            status=request.status,
+            priority=request.priority,
+            start_date=request.date_range_start,
+            end_date=request.date_range_end,
+            limit=request.page_size,
+            offset=offset,
+        )
+
+        return {
+            'total': total,
+            'page': request.page,
+            'page_size': request.page_size,
+            'items': [_task_to_dict(t) for t in tasks],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询排程列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/inspection/schedules/{schedule_id}",
+    tags=["智能复检排程"],
+    summary="获取单个排程任务详情"
+)
+async def get_schedule_detail(schedule_id: str):
+    """根据schedule_id获取排程任务详情"""
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+        task = service.get_schedule(schedule_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="排程任务不存在")
+        return {
+            'success': True,
+            'schedule': _task_to_dict(task),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取排程详情失败 [{schedule_id}]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/inspection/schedules/{schedule_id}",
+    tags=["智能复检排程"],
+    summary="更新排程任务"
+)
+async def update_schedule(schedule_id: str, request: ScheduleUpdateRequest):
+    """手动更新排程任务（日期、班组、负责人、状态等）"""
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService, ScheduleStatus
+        service = get_inspection_schedule_service()
+
+        task = service.get_schedule(schedule_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="排程任务不存在")
+
+        data = request.model_dump(exclude_unset=True)
+        for key, val in data.items():
+            if hasattr(task, key) and val is not None:
+                setattr(task, key, val)
+
+        task.update_time = datetime.now()
+        service._save_schedule_task(task)
+
+        return {
+            'success': True,
+            'message': '更新成功',
+            'schedule': _task_to_dict(task),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新排程失败 [{schedule_id}]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/inspection/schedules/{schedule_id}",
+    tags=["智能复检排程"],
+    summary="删除排程任务"
+)
+async def delete_schedule(schedule_id: str):
+    """删除指定排程任务"""
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        from app.utils.database import get_db, Base
+        service = get_inspection_schedule_service()
+
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=500, detail="数据库不可用")
+            service._ensure_schedule_table(db)
+            table = Base.classes.get('sc_inspection_schedules')
+            if table is None:
+                raise HTTPException(status_code=500, detail="排程表不存在")
+            row = db.query(table).filter(table.schedule_id == schedule_id).first()
+            if not row:
+                raise HTTPException(status_code=404, detail="排程任务不存在")
+            db.delete(row)
+            db.commit()
+
+        return {
+            'success': True,
+            'message': f'排程任务 {schedule_id} 已删除',
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除排程失败 [{schedule_id}]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/inspection/schedules/export/ics",
+    response_model=ICSExportResponse,
+    tags=["智能复检排程"],
+    summary="导出为ICS日历文件"
+)
+async def export_schedules_to_ics(request: ICSExportRequest):
+    """
+    将排程任务导出为ICS格式，支持日历订阅
+
+    返回ICS文件内容、下载链接和WebCal订阅URL
+    """
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+
+        tasks = []
+        if request.schedule_ids:
+            for sid in request.schedule_ids:
+                t = service.get_schedule(sid)
+                if t:
+                    tasks.append(t)
+        else:
+            tasks, _ = service.list_schedules(
+                team_id=request.team_id,
+                start_date=request.date_range_start,
+                end_date=request.date_range_end,
+                limit=1000,
+            )
+
+        ics_content = service.ics_exporter.export_batch(
+            tasks=tasks,
+            calendar_name=f"检验排程_{request.team_id or '全部班组'}",
+            include_alarms=request.include_alarms,
+            alarm_minutes_before=request.alarm_minutes_before,
+            include_confidential_info=False,
+        )
+
+        team_id_hash = hashlib.md5((request.team_id or 'all').encode()).hexdigest()[:8]
+        base_url = config.get('server.base_url', 'http://localhost:8000')
+        subscription_token = f"sub_{team_id_hash}_{datetime.now().strftime('%Y%m%d')}"
+        calendar_subscription_url = service.ics_exporter.generate_calendar_subscription_url(
+            team_id=request.team_id or 'all',
+            base_url=base_url.replace('http://', 'webcal://').replace('https://', 'webcal://'),
+            token=subscription_token,
+        )
+
+        return {
+            'success': True,
+            'ics_content': ics_content,
+            'event_count': len(tasks),
+            'download_url': None,
+            'calendar_subscription_url': calendar_subscription_url,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"导出ICS失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/inspection/schedules/calendar-subscription/{team_id}",
+    tags=["智能复检排程"],
+    summary="获取班组日历订阅URL"
+)
+async def get_calendar_subscription_url(team_id: str):
+    """
+    生成指定班组的WebCal日历订阅URL
+
+    将该URL复制到Outlook/Google Calendar/Apple Calendar中即可自动同步检验排程。
+    """
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+
+        base_url = config.get('server.base_url', 'http://localhost:8000')
+        team_id_hash = hashlib.md5(team_id.encode()).hexdigest()[:8]
+        token = f"cal_{team_id_hash}_{datetime.now().strftime('%Y%m%d%H%M')}"
+
+        webcal_url = service.ics_exporter.generate_calendar_subscription_url(
+            team_id=team_id,
+            base_url=base_url.replace('http://', 'webcal://').replace('https://', 'webcal://'),
+            token=token,
+        )
+
+        return {
+            'success': True,
+            'team_id': team_id,
+            'calendar_subscription_url': webcal_url,
+            'token': token,
+            'instructions': [
+                '将上述URL复制到日历软件中',
+                'Apple Calendar: 文件 -> 新建日历订阅 -> 粘贴URL',
+                'Google Calendar: 其他日历 -> 通过URL添加 -> 粘贴URL',
+                'Outlook: 日历 -> 添加日历 -> 从Internet订阅 -> 粘贴URL',
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取日历订阅URL失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/inspection/schedules/push/cmms",
+    response_model=CMMSSyncResponse,
+    tags=["智能复检排程"],
+    summary="推送排程至CMMS系统"
+)
+async def push_schedules_to_cmms(request: CMMSSyncRequest):
+    """
+    将检验排程作为工单推送至CMMS/EAM系统
+
+    复用CmmsService的同步能力。若未传schedule_ids则推送所有未推送的任务。
+    """
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+
+        target_ids = request.schedule_ids
+        if not target_ids:
+            tasks, _ = service.list_schedules(limit=500)
+            target_ids = [
+                t.schedule_id for t in tasks
+                if not t.cmms_external_id or request.force_update
+            ]
+
+        results = []
+        pushed_count = 0
+        failed_count = 0
+
+        for sid in target_ids:
+            try:
+                config_id = None
+                if request.cmms_config_id and request.cmms_config_id.isdigit():
+                    config_id = int(request.cmms_config_id)
+                success, external_id, error = service.push_to_cmms(sid, config_id)
+                if success:
+                    pushed_count += 1
+                else:
+                    failed_count += 1
+                results.append({
+                    'schedule_id': sid,
+                    'success': success,
+                    'cmms_id': external_id,
+                    'error': error,
+                })
+            except Exception as e:
+                failed_count += 1
+                results.append({
+                    'schedule_id': sid,
+                    'success': False,
+                    'cmms_id': None,
+                    'error': str(e),
+                })
+
+        return {
+            'success': failed_count == 0,
+            'total_count': len(target_ids),
+            'pushed_count': pushed_count,
+            'failed_count': failed_count,
+            'results': results,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"推送CMMS失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/inspection/team/calendar",
+    response_model=TeamCalendarResponse,
+    tags=["智能复检排程"],
+    summary="班组日历视图（含产能利用率）"
+)
+async def get_team_calendar_view(request: TeamCalendarRequest):
+    """
+    获取指定班组某月的日历视图，包含：
+    - 每日任务数、工时、产能利用率
+    - 工作日/非工作日标识
+    - 每周汇总和月度汇总
+    """
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+
+        capacity = service.conflict_detector.get_team_capacity(request.team_id)
+
+        try:
+            year, month = map(int, request.month.split('-'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="月份格式错误，应为YYYY-MM")
+
+        import calendar
+        _, days_in_month = calendar.monthrange(year, month)
+        month_start = datetime(year, month, 1)
+        month_end = datetime(year, month, days_in_month, 23, 59, 59)
+
+        tasks, _ = service.list_schedules(
+            team_id=request.team_id,
+            start_date=month_start,
+            end_date=month_end,
+            limit=2000,
+        )
+
+        tasks_by_day: Dict[str, List[Any]] = {}
+        for t in tasks:
+            day_key = t.scheduled_date.strftime('%Y-%m-%d')
+            if day_key not in tasks_by_day:
+                tasks_by_day[day_key] = []
+            tasks_by_day[day_key].append(t)
+
+        days_list = []
+        weekly_summary: Dict[str, Any] = {}
+        month_total_tasks = 0
+        month_total_hours = 0.0
+        month_capacity_hours = 0.0
+
+        for day in range(1, days_in_month + 1):
+            dt = datetime(year, month, day)
+            day_key = dt.strftime('%Y-%m-%d')
+            dow = dt.weekday()
+            is_working = dow in capacity.working_days
+
+            day_tasks = tasks_by_day.get(day_key, [])
+            task_count = len(day_tasks)
+            total_hours = sum(t.estimated_hours for t in day_tasks)
+
+            if is_working:
+                day_capacity = capacity.daily_max_hours
+            else:
+                day_capacity = 0.0
+
+            utilization = round(total_hours / day_capacity, 3) if day_capacity > 0 else 0.0
+
+            week_num = dt.isocalendar()[1]
+            week_key = f"week_{week_num}"
+            if week_key not in weekly_summary:
+                weekly_summary[week_key] = {
+                    'week_num': week_num,
+                    'task_count': 0,
+                    'total_hours': 0.0,
+                    'max_tasks': capacity.weekly_max_tasks,
+                }
+            weekly_summary[week_key]['task_count'] += task_count
+            weekly_summary[week_key]['total_hours'] += total_hours
+
+            month_total_tasks += task_count
+            month_total_hours += total_hours
+            month_capacity_hours += day_capacity
+
+            day_data = {
+                'date': day_key,
+                'is_working_day': is_working,
+                'task_count': task_count,
+                'total_hours': round(total_hours, 2),
+                'daily_max_tasks': capacity.daily_max_tasks,
+                'daily_max_hours': capacity.daily_max_hours,
+                'utilization_rate': utilization,
+                'tasks': [
+                    {
+                        'schedule_id': t.schedule_id,
+                        'title': t.title,
+                        'priority': t.priority,
+                        'status': t.status,
+                        'estimated_hours': t.estimated_hours,
+                        'device_name': t.device_name,
+                    }
+                    for t in day_tasks
+                ] if request.include_capacity else [],
+            }
+            days_list.append(day_data)
+
+        month_utilization = (
+            round(month_total_hours / month_capacity_hours, 3)
+            if month_capacity_hours > 0 else 0.0
+        )
+
+        return {
+            'team_id': request.team_id,
+            'team_name': capacity.team_name,
+            'month': request.month,
+            'weekly_summary': weekly_summary,
+            'days': days_list,
+            'month_total_tasks': month_total_tasks,
+            'month_total_hours': round(month_total_hours, 2),
+            'month_capacity_hours': round(month_capacity_hours, 2),
+            'month_utilization_rate': month_utilization,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取班组日历视图失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
