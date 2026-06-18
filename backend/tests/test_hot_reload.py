@@ -873,5 +873,235 @@ class TestEndToEndHotUpdate:
                 event_bus.unsubscribe(sid)
 
 
+# ============================================================
+# 8. 跨实例 Redis 广播热更新闭环测试
+# ============================================================
+
+class TestCrossInstanceRedisSync:
+    """
+    模拟 A 实例写入磁盘 + 广播版本号 → B 实例收到广播后完整闭环：
+      reload_from_disk() → dispatch_events_from_paths() → 各细分事件 → 服务 reload
+    """
+
+    def test_reload_from_disk_reflects_external_change(self, isolated_cm, tmp_path):
+        """外部（其他实例）修改了 config.yaml，调用 reload_from_disk 后内存应同步"""
+        import yaml
+
+        config_path = tmp_path / "config" / "config.yaml"
+
+        # 模拟另一个实例直接修改磁盘文件
+        new_yaml = {
+            "logging": {"level": {"default": "DEBUG", "prediction": "TRACE"}},
+            "stream_prediction": {
+                "backpressure": {
+                    "max_concurrent_streams": 99,
+                    "rate_per_stream": 100.0,
+                },
+            },
+            "scheduler": {
+                "prediction_job": {"enabled": True, "cron": "*/10 * * * *"},
+            },
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(new_yaml, f, allow_unicode=True)
+
+        changed = isolated_cm.reload_from_disk(target_version=7)
+        assert changed is True
+        assert isolated_cm.get("logging.level.default") == "DEBUG"
+        assert isolated_cm.get("stream_prediction.backpressure.max_concurrent_streams") == 99
+        assert isolated_cm.get("scheduler.prediction_job.cron") == "*/10 * * * *"
+
+    def test_reload_from_disk_noop_when_unchanged(self, isolated_cm):
+        """磁盘内容和内存一致时，reload_from_disk 返回 False"""
+        changed = isolated_cm.reload_from_disk()
+        assert changed is False
+
+    def test_dispatch_events_from_paths_classification(self, isolated_cm):
+        """dispatch_events_from_paths 应按路径分类派发正确的细分事件"""
+        from app.core.event_bus import event_bus, EventType
+
+        received = {
+            EventType.LOG_LEVEL_CHANGED: [],
+            EventType.SCHEDULER_CONFIG_CHANGED: [],
+            EventType.STREAM_CONFIG_CHANGED: [],
+            EventType.STRATEGY_CONFIG_CHANGED: [],
+            EventType.CONFIG_CHANGED: [],
+            EventType.CONFIG_PRE_RELOAD: 0,
+            EventType.CONFIG_POST_RELOAD: 0,
+        }
+        lock = threading.Lock()
+
+        def make_collector(et):
+            def cb(e):
+                with lock:
+                    if isinstance(received[et], list):
+                        received[et].extend(e.data.get("changed_paths", []))
+                    else:
+                        received[et] += 1
+            return cb
+
+        sub_ids = [
+            event_bus.subscribe(et, make_collector(et)) for et in [
+                EventType.LOG_LEVEL_CHANGED,
+                EventType.SCHEDULER_CONFIG_CHANGED,
+                EventType.STREAM_CONFIG_CHANGED,
+                EventType.STRATEGY_CONFIG_CHANGED,
+                EventType.CONFIG_CHANGED,
+                EventType.CONFIG_PRE_RELOAD,
+                EventType.CONFIG_POST_RELOAD,
+            ]
+        ]
+        try:
+            mixed_paths = [
+                "logging.level.default",
+                "scheduler.training_job.cron",
+                "stream_prediction.backpressure.max_concurrent_streams",
+                "warning_strategy.preload.current_threshold",
+                "model.bolt_lstm.hidden_size",  # 黑名单 - require_restart
+            ]
+            isolated_cm.dispatch_events_from_paths(
+                changed_paths=mixed_paths,
+                version=42,
+                operator="tester",
+                source="redis:instance-b",
+            )
+            time.sleep(0.1)
+
+            with lock:
+                assert "logging.level.default" in received[EventType.LOG_LEVEL_CHANGED]
+                assert "scheduler.training_job.cron" in received[EventType.SCHEDULER_CONFIG_CHANGED]
+                assert (
+                    "stream_prediction.backpressure.max_concurrent_streams"
+                    in received[EventType.STREAM_CONFIG_CHANGED]
+                )
+                assert (
+                    "warning_strategy.preload.current_threshold"
+                    in received[EventType.STRATEGY_CONFIG_CHANGED]
+                )
+                # CONFIG_CHANGED 只包含 hot updatable 的路径
+                assert "model.bolt_lstm.hidden_size" not in received[EventType.CONFIG_CHANGED]
+                assert "logging.level.default" in received[EventType.CONFIG_CHANGED]
+                assert received[EventType.CONFIG_PRE_RELOAD] >= 1
+                assert received[EventType.CONFIG_POST_RELOAD] >= 1
+        finally:
+            for sid in sub_ids:
+                event_bus.unsubscribe(sid)
+
+    def test_dispatch_events_empty_paths_is_noop(self, isolated_cm):
+        """changed_paths 为空时不应派发任何事件"""
+        from app.core.event_bus import event_bus, EventType
+
+        count = {"n": 0}
+        lock = threading.Lock()
+
+        def cb(e):
+            with lock:
+                count["n"] += 1
+
+        sub_ids = [
+            event_bus.subscribe(et, cb) for et in [
+                EventType.LOG_LEVEL_CHANGED,
+                EventType.SCHEDULER_CONFIG_CHANGED,
+                EventType.STREAM_CONFIG_CHANGED,
+                EventType.STRATEGY_CONFIG_CHANGED,
+                EventType.CONFIG_CHANGED,
+            ]
+        ]
+        try:
+            isolated_cm.dispatch_events_from_paths(changed_paths=[], version=1)
+            time.sleep(0.05)
+            with lock:
+                assert count["n"] == 0
+        finally:
+            for sid in sub_ids:
+                event_bus.unsubscribe(sid)
+
+    def test_redis_trigger_reload_full_loop(self, isolated_cm, tmp_path, monkeypatch):
+        """完整闭环：RedisConfigSync._trigger_reload → 磁盘重载 + 细分事件全派发"""
+        from app.core.event_bus import event_bus, EventType
+        from app.core.redis_broadcast import RedisConfigSync
+        from app.core import redis_broadcast as rb_module
+        import yaml
+
+        # 让 RedisConfigSync 懒加载到我们的隔离 ConfigManager，而不是模块全局单例
+        monkeypatch.setattr(rb_module, "config_manager", isolated_cm, raising=False)
+        # 同时覆盖 config_manager 模块级变量（懒加载内部再 import 也会拿到）
+        from app.core import config_manager as cm_module
+        monkeypatch.setattr(cm_module, "config_manager", isolated_cm)
+
+        # Step 1: 模拟"另一个实例"直接把新配置写入 isolated_cm 绑定的磁盘文件
+        config_path = isolated_cm.config_path
+        new_yaml = {
+            "logging": {"level": {"default": "WARNING"}},
+            "scheduler": {
+                "prediction_job": {"enabled": True, "cron": "*/20 * * * *"},
+            },
+            "stream_prediction": {
+                "backpressure": {"max_concurrent_streams": 16},
+                "window": {"size": 100, "ttl_seconds": 3600, "storage_type": "memory"},
+            },
+            "warning_strategy": {
+                "preload": {"current_threshold": 0.88},
+            },
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(new_yaml, f, allow_unicode=True)
+
+        # Step 2: 准备事件接收器
+        flags = {
+            EventType.LOG_LEVEL_CHANGED: 0,
+            EventType.SCHEDULER_CONFIG_CHANGED: 0,
+            EventType.STREAM_CONFIG_CHANGED: 0,
+            EventType.STRATEGY_CONFIG_CHANGED: 0,
+            EventType.CONFIG_CHANGED: 0,
+            EventType.REDIS_CONFIG_SYNC: 0,
+        }
+        lock = threading.Lock()
+
+        def make_cb(et):
+            def cb(e):
+                with lock:
+                    flags[et] += 1
+            return cb
+
+        sub_ids = [event_bus.subscribe(et, make_cb(et)) for et in flags]
+
+        # Step 3: 手动实例化一个 RedisConfigSync（不真正连接 Redis），直接调用 _trigger_reload
+        sync = RedisConfigSync.__new__(RedisConfigSync)
+        sync._instance_id = "instance-b"
+        sync._current_version = 0
+        sync._callbacks = []
+
+        try:
+            sync._trigger_reload(
+                version=10,
+                changed_paths=[
+                    "logging.level.default",
+                    "scheduler.prediction_job.cron",
+                    "stream_prediction.backpressure.max_concurrent_streams",
+                    "warning_strategy.preload.current_threshold",
+                ],
+                source="redis:instance-a",
+            )
+            time.sleep(0.15)
+
+            # Step 4: 验证 ConfigManager 内存已更新（通过 reload_from_disk）
+            assert isolated_cm.get("logging.level.default") == "WARNING"
+            assert isolated_cm.get("scheduler.prediction_job.cron") == "*/20 * * * *"
+            assert isolated_cm.get("stream_prediction.backpressure.max_concurrent_streams") == 16
+            assert isolated_cm.get("warning_strategy.preload.current_threshold") == 0.88
+
+            # Step 5: 验证所有细分事件都被派发
+            with lock:
+                for et, n in flags.items():
+                    assert n >= 1, f"{et} 事件未被派发（n={n}）"
+
+            # Step 6: 验证版本号对齐
+            assert sync.current_version == 10
+        finally:
+            for sid in sub_ids:
+                event_bus.unsubscribe(sid)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s", "--tb=short"])

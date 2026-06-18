@@ -331,46 +331,78 @@ class RedisConfigSync:
         changed_paths: List[str],
         source: str = "redis",
     ) -> None:
-        """触发本地配置重载"""
+        """
+        触发本地配置重载（跨实例 Redis 广播同步闭环）。
+
+        完整执行链路:
+          1. 调用 ConfigManager.reload_from_disk() 从磁盘加载最新 config.yaml
+             （A 实例已经写入文件，B 实例通过共享存储/NFS 拿到新版本）
+          2. 调用 ConfigManager.dispatch_events_from_paths() 按路径分类派发
+             细分事件（LOG / SCHEDULER / STREAM / STRATEGY / CONFIG_CHANGED），
+             让已订阅这些事件的 scheduler / stream_engine / loguru 等服务
+             自动执行 reload_config() 完成热更新
+          3. 兼容旧回调接口：_callbacks 列表逐个调用
+          4. 额外派发 REDIS_CONFIG_SYNC 通用事件供其他模块监听
+        """
         self._current_version = version
 
-        event_bus.publish(
-            EventType.CONFIG_PRE_RELOAD,
-            data={
-                "version": version,
-                "changed_paths": changed_paths,
-                "source": source,
-            },
-            asynchronous=True,
-        )
+        # 懒加载避免循环依赖
+        try:
+            from app.core.config_manager import config_manager
+        except Exception as e:
+            logger.exception(f"导入 ConfigManager 失败，无法触发热更新闭环: {e}")
+            return
 
+        # Step 1: 从磁盘重新加载配置 + 版本元数据
+        try:
+            disk_changed = config_manager.reload_from_disk(target_version=version)
+            logger.info(
+                f"[redis-sync] 磁盘重载完成: version=v{version}, "
+                f"disk_changed={disk_changed}, paths={changed_paths}"
+            )
+        except Exception as e:
+            logger.exception(f"从磁盘重载配置失败: {e}")
+            # 即使 reload 失败也尝试派发事件，让服务按现有内存配置处理
+            disk_changed = False
+
+        # Step 2: 按 changed_paths 分类派发细分事件，触发各服务 reload_config()
+        # 注意：即使 disk_changed=False（共享存储延迟）也仍然派发事件，
+        # 因为服务的 reload_config() 本身是从 config_manager 读取最新值，
+        # 下次心跳重试时会再次触发。
+        try:
+            config_manager.dispatch_events_from_paths(
+                changed_paths=changed_paths,
+                version=version,
+                operator=f"redis-sync:{source}",
+                description=f"跨实例Redis配置同步 (source={source})",
+                source=source,
+            )
+        except Exception as e:
+            logger.exception(f"派发细分热更新事件失败: {e}")
+
+        # Step 3: 派发 REDIS_CONFIG_SYNC 通用事件，供需要区分来源的模块使用
         event_bus.publish(
             EventType.REDIS_CONFIG_SYNC,
             data={
                 "version": version,
                 "changed_paths": changed_paths,
                 "source": source,
+                "disk_changed": disk_changed,
             },
             asynchronous=True,
         )
 
+        # Step 4: 兼容旧回调接口
         for callback in self._callbacks:
             try:
                 callback(version, changed_paths)
             except Exception as e:
                 logger.exception(f"配置版本回调执行异常: {e}")
 
-        event_bus.publish(
-            EventType.CONFIG_POST_RELOAD,
-            data={
-                "version": version,
-                "changed_paths": changed_paths,
-                "source": source,
-            },
-            asynchronous=True,
+        logger.info(
+            f"跨实例配置热更新闭环完成: v{version}, "
+            f"paths={len(changed_paths)}, disk_changed={disk_changed}"
         )
-
-        logger.info(f"配置重载触发完成: v{version}")
 
     def broadcast_version(
         self,

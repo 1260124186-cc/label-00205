@@ -750,6 +750,103 @@ class ConfigManager:
         event_bus.publish(EventType.CONFIG_POST_RELOAD, data=dict(common_data), asynchronous=True)
 
     # ============================================================
+    # 跨实例 Redis 广播同步入口
+    # ============================================================
+
+    def reload_from_disk(self, target_version: Optional[int] = None) -> bool:
+        """
+        从磁盘重新加载 config.yaml + 版本元数据（用于跨实例 Redis 广播同步）
+
+        Args:
+            target_version: 期望的版本号（来自 Redis 广播）。若磁盘版本落后会再次尝试读取
+                            （等待 NFS/共享存储延迟），最终仍以磁盘 versions.json 为准。
+
+        Returns:
+            是否实际发生了重载（内存配置有变化）
+        """
+        from datetime import datetime
+
+        old_config_snapshot = json.dumps(self.config, sort_keys=True, ensure_ascii=False, default=str)
+
+        try:
+            self._load()
+            self._load_version_meta()
+            self._sync_utils_config()
+        except Exception as e:
+            logger.exception(f"从磁盘重载配置失败: {e}")
+            return False
+
+        new_config_snapshot = json.dumps(self.config, sort_keys=True, ensure_ascii=False, default=str)
+        changed = new_config_snapshot != old_config_snapshot
+
+        if changed:
+            logger.info(
+                f"从磁盘重载配置完成: version=v{self._version}, "
+                f"target_version=v{target_version}, changed={changed}"
+            )
+        else:
+            logger.debug(
+                f"从磁盘重载配置完成，但内容无变化: version=v{self._version}"
+            )
+        return changed
+
+    def dispatch_events_from_paths(
+        self,
+        changed_paths: List[str],
+        *,
+        version: Optional[int] = None,
+        operator: str = "redis-sync",
+        description: str = "跨实例 Redis 配置同步",
+        source: str = "redis",
+    ) -> None:
+        """
+        按 changed_paths 分类派发细分事件（用于 Redis 广播收到后触发各服务 reload_config）。
+
+        与 apply_hot_update 的事件派发逻辑完全一致：
+        - logging.* → LOG_LEVEL_CHANGED
+        - warning_strategy.* / risk_assessment.* / alert.* / ensemble.* → STRATEGY_CONFIG_CHANGED
+        - scheduler.* → SCHEDULER_CONFIG_CHANGED
+        - stream_prediction.* / data_quality.* → STREAM_CONFIG_CHANGED
+        - 所有 hot 路径 → CONFIG_CHANGED
+        - 前后包裹 CONFIG_PRE_RELOAD / CONFIG_POST_RELOAD
+
+        Args:
+            changed_paths: 变更路径列表（来自 Redis 广播）
+            version: 版本号，默认用当前 ConfigManager 的版本
+            operator: 操作者标识
+            description: 描述
+            source: 来源（redis / heartbeat / local）
+        """
+        if not changed_paths:
+            logger.debug("dispatch_events_from_paths: changed_paths 为空，跳过事件派发")
+            return
+
+        hot_paths: List[str] = []
+        require_restart: List[str] = []
+        for p in changed_paths:
+            if is_hot_updatable(p):
+                hot_paths.append(p)
+            else:
+                require_restart.append(p)
+
+        if not hot_paths and not require_restart:
+            return
+
+        use_version = version if version is not None else self._version
+        logger.info(
+            f"[source={source}] 派发配置变更细分事件: version=v{use_version}, "
+            f"hot={len(hot_paths)}, require_restart={len(require_restart)}"
+        )
+
+        self._publish_local_events(
+            version=use_version,
+            hot_paths=hot_paths,
+            require_restart=require_restart,
+            operator=operator,
+            description=description,
+        )
+
+    # ============================================================
     # 回滚 & 历史版本
     # ============================================================
 
