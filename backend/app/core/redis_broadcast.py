@@ -86,6 +86,7 @@ class RedisConfigSync:
         self._enabled: bool = False
         self._heartbeat_interval: int = 30
         self._heartbeat_thread: Optional[threading.Thread] = None
+        self._last_reload_ok_version: int = 0
 
         self._init_from_config()
 
@@ -334,30 +335,47 @@ class RedisConfigSync:
         """
         触发本地配置重载（跨实例 Redis 广播同步闭环）。
 
+        去重策略（兼顾幂等与共享存储延迟重试）：
+          - version < current_version → 拒绝：过时消息
+          - version == current_version 且上次同版本已成功加载 → 拒绝：真正重复
+          - version == current_version 且上次同版本加载失败 → 允许：NFS 延迟重试
+          - version >  current_version → 允许：新版本
+
         幂等 & 安全保证：
-          1. 版本号去重：若 version <= 当前已处理版本，直接跳过（双层防护）
-          2. 磁盘重载幂等：ConfigManager.reload_from_disk 内部先 clear 再加载，不重复 records
-          3. 事件派发幂等：各服务 reload_config() 自身为幂等操作，重复调用无副作用
+          1. 磁盘重载幂等：ConfigManager.reload_from_disk 内部先 clear 再加载，不重复 records
+          2. 事件派发幂等：各服务 reload_config() 自身为幂等操作，重复调用无副作用
+          3. 失败重试：共享存储延迟时磁盘内容可能未更新，允许同版本重试直到成功
 
         完整执行链路:
           1. 调用 ConfigManager.reload_from_disk() 从磁盘加载最新 config.yaml
-             （A 实例已经写入文件，B 实例通过共享存储/NFS 拿到新版本）
-          2. 调用 ConfigManager.dispatch_events_from_paths() 按路径分类派发
-             细分事件（LOG / SCHEDULER / STREAM / STRATEGY / CONFIG_CHANGED），
-             让已订阅这些事件的 scheduler / stream_engine / loguru 等服务
-             自动执行 reload_config() 完成热更新
+          2. 调用 ConfigManager.dispatch_events_from_paths() 按路径分类派发细分事件
           3. 兼容旧回调接口：_callbacks 列表逐个调用
           4. 额外派发 REDIS_CONFIG_SYNC 通用事件供其他模块监听
         """
-        # 版本号去重：双层防护（第一层在 _handle_message / _sync_initial_version，这里是兜底）
-        if version <= self._current_version:
+        # 去重决策
+        if version < self._current_version:
             logger.debug(
-                f"[redis-sync] 跳过旧版本/重复版本同步: "
+                f"[redis-sync] 跳过过时版本同步: "
                 f"requested=v{version}, current=v{self._current_version}, source={source}"
             )
             return
 
-        self._current_version = version
+        if version == self._current_version and version == self._last_reload_ok_version:
+            logger.debug(
+                f"[redis-sync] 跳过已成功加载的重复版本同步: "
+                f"version=v{version}, source={source}"
+            )
+            return
+
+        if version == self._current_version and version != self._last_reload_ok_version:
+            logger.info(
+                f"[redis-sync] 同版本重试（上次磁盘加载未成功）: "
+                f"version=v{version}, source={source}"
+            )
+
+        # 更新当前版本号（仅向上，不回退）
+        if version > self._current_version:
+            self._current_version = version
 
         # 懒加载避免循环依赖
         try:
@@ -375,13 +393,15 @@ class RedisConfigSync:
             )
         except Exception as e:
             logger.exception(f"从磁盘重载配置失败: {e}")
-            # 即使 reload 失败也尝试派发事件，让服务按现有内存配置处理
             disk_changed = False
 
+        # 标记同版本加载结果：成功 → 后续同版本去重；失败 → 允许重试
+        if disk_changed:
+            self._last_reload_ok_version = version
+        else:
+            self._last_reload_ok_version = min(self._last_reload_ok_version, version - 1)
+
         # Step 2: 按 changed_paths 分类派发细分事件，触发各服务 reload_config()
-        # 注意：即使 disk_changed=False（共享存储延迟）也仍然派发事件，
-        # 因为服务的 reload_config() 本身是从 config_manager 读取最新值，
-        # 下次心跳重试时会再次触发。
         try:
             config_manager.dispatch_events_from_paths(
                 changed_paths=changed_paths,

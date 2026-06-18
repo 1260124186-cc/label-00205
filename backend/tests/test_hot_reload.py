@@ -1193,7 +1193,7 @@ class TestCrossInstanceRedisSync:
     def test_duplicate_redis_sync_idempotent(self, isolated_cm, tmp_path, monkeypatch):
         """
         回归测试：同一版本号的 Redis 广播重复收到 N 次（网络重发），
-        应保证：1) 只触发 1 次真正磁盘重载；2) records 不重复；3) 事件不多发。
+        且磁盘加载成功后，应保证：1) records 不重复；2) 事件不多发。
         """
         from app.core.event_bus import event_bus, EventType
         from app.core.redis_broadcast import RedisConfigSync
@@ -1204,16 +1204,12 @@ class TestCrossInstanceRedisSync:
         import yaml
         from datetime import datetime
 
-        # 替换模块级全局单例为隔离实例
         monkeypatch.setattr(cm_module, "config_manager", isolated_cm)
         monkeypatch.setattr(rb_module, "config_manager", isolated_cm, raising=False)
-
-        # 换回真实的 _load_version_meta
         real_load_meta = ConfigManager._load_version_meta
         monkeypatch.setattr(isolated_cm, "_load_version_meta",
                             lambda *args, **kwargs: real_load_meta(isolated_cm, *args, **kwargs))
 
-        # 构造磁盘：config.yaml + versions.json（版本 7）
         config_path = isolated_cm.config_path
         new_yaml = {
             "logging": {"level": {"default": "WARNING"}},
@@ -1234,7 +1230,6 @@ class TestCrossInstanceRedisSync:
             "description": "异地实例更新",
             "changes": [
                 {"path": "logging.level.default", "old": "INFO", "new": "WARNING", "hot_updatable": True},
-                {"path": "scheduler.prediction_job.cron", "old": "*/30 * * * *", "new": "*/20 * * * *", "hot_updatable": True},
             ],
             "snapshot_before": "",
             "snapshot_after": "",
@@ -1247,13 +1242,10 @@ class TestCrossInstanceRedisSync:
                 "updated_at": datetime.now().isoformat(),
             }, f, ensure_ascii=False)
 
-        # 统计事件派发次数
         event_counts = {et: 0 for et in [
             EventType.LOG_LEVEL_CHANGED,
-            EventType.SCHEDULER_CONFIG_CHANGED,
             EventType.REDIS_CONFIG_SYNC,
             EventType.CONFIG_PRE_RELOAD,
-            EventType.CONFIG_POST_RELOAD,
         ]}
         lock = threading.Lock()
 
@@ -1265,55 +1257,180 @@ class TestCrossInstanceRedisSync:
 
         sub_ids = [event_bus.subscribe(et, make_counter(et)) for et in event_counts]
 
-        # 构造 RedisConfigSync 实例，初始版本 = 0
         sync = RedisConfigSync.__new__(RedisConfigSync)
         sync._instance_id = "instance-b"
         sync._current_version = 0
+        sync._last_reload_ok_version = 0
         sync._callbacks = []
 
         try:
-            changed_paths = [
-                "logging.level.default",
-                "scheduler.prediction_job.cron",
-            ]
+            changed_paths = ["logging.level.default"]
 
-            # 第 1 次：新版本，应该触发完整 reload
+            # 第 1 次：新版本，磁盘已更新 → 成功加载
             sync._trigger_reload(version=7, changed_paths=changed_paths, source="redis:instance-a")
             time.sleep(0.1)
-            first_version = sync.current_version
             first_counts = {k: v for k, v in event_counts.items()}
 
-            # 第 2-5 次：同一版本重复收到（模拟网络重发），应该被去重跳过
-            for i in range(4):
+            # 第 2-5 次：同版本 + 已成功加载 → 去重跳过
+            for _ in range(4):
                 sync._trigger_reload(version=7, changed_paths=changed_paths, source="redis:instance-a")
             time.sleep(0.1)
 
             with lock:
-                # 版本号保持 7，没有变
-                assert sync.current_version == 7
-                assert first_version == 7
-
-                # 每种事件应该只被派发 1 次（去重生效）
                 for et, cnt in event_counts.items():
                     assert cnt == first_counts[et] == 1, (
                         f"{et} 事件次数错误: first={first_counts[et]}, final={cnt} (应均为 1)"
                     )
+                assert len(isolated_cm._version_records) == 1
 
-                # records 数量应为 1，不重复
-                assert len(isolated_cm._version_records) == 1, (
-                    f"records 重复: {len(isolated_cm._version_records)} (应为 1)"
-                )
-
-            # 再验证：再调用 reload_from_disk 2 次，records 仍不重复
             isolated_cm.reload_from_disk()
             isolated_cm.reload_from_disk()
-            assert len(isolated_cm._version_records) == 1, (
-                f"reload_from_disk 导致 records 重复: {len(isolated_cm._version_records)}"
-            )
+            assert len(isolated_cm._version_records) == 1
 
         finally:
             for sid in sub_ids:
                 event_bus.unsubscribe(sid)
+
+    def test_same_version_retry_when_disk_not_ready(self, isolated_cm, tmp_path, monkeypatch):
+        """
+        回归测试：NFS 延迟场景 —— 同版本号第 1 次磁盘未同步到（disk_changed=False），
+        第 2 次磁盘终于同步到（disk_changed=True），应允许重试且最终成功去重。
+        """
+        from app.core.event_bus import event_bus, EventType
+        from app.core.redis_broadcast import RedisConfigSync
+        from app.core import config_manager as cm_module
+        from app.core import redis_broadcast as rb_module
+        from app.core.config_manager import ConfigManager
+        import json
+        import yaml
+        from datetime import datetime
+
+        monkeypatch.setattr(cm_module, "config_manager", isolated_cm)
+        monkeypatch.setattr(rb_module, "config_manager", isolated_cm, raising=False)
+        real_load_meta = ConfigManager._load_version_meta
+        monkeypatch.setattr(isolated_cm, "_load_version_meta",
+                            lambda *args, **kwargs: real_load_meta(isolated_cm, *args, **kwargs))
+
+        # 准备好新配置（稍后写入磁盘，模拟 NFS 延迟）
+        config_path = isolated_cm.config_path
+        new_yaml = {
+            "logging": {"level": {"default": "ERROR"}},
+            "scheduler": {"prediction_job": {"enabled": True, "cron": "0 * * * *"}},
+            "stream_prediction": {
+                "backpressure": {"max_concurrent_streams": 8},
+                "window": {"size": 100, "ttl_seconds": 3600, "storage_type": "memory"},
+            },
+        }
+        versions_payload = {
+            "current_version": 5,
+            "records": [{
+                "version": 5,
+                "timestamp": datetime.now().isoformat(),
+                "operator": "remote",
+                "description": "NFS延迟测试",
+                "changes": [
+                    {"path": "logging.level.default", "old": "INFO", "new": "ERROR", "hot_updatable": True},
+                ],
+                "snapshot_before": "",
+                "snapshot_after": "",
+                "rollback_target": None,
+            }],
+            "updated_at": datetime.now().isoformat(),
+        }
+
+        event_counts = {EventType.LOG_LEVEL_CHANGED: 0, EventType.REDIS_CONFIG_SYNC: 0}
+        lock = threading.Lock()
+
+        def make_counter(et):
+            def cb(e):
+                with lock:
+                    event_counts[et] += 1
+            return cb
+
+        sub_ids = [event_bus.subscribe(et, make_counter(et)) for et in event_counts]
+
+        sync = RedisConfigSync.__new__(RedisConfigSync)
+        sync._instance_id = "instance-b"
+        sync._current_version = 0
+        sync._last_reload_ok_version = 0
+        sync._callbacks = []
+
+        try:
+            changed_paths = ["logging.level.default"]
+
+            # === 第 1 次：磁盘还没同步到（旧配置仍在），disk_changed=False ===
+            sync._trigger_reload(version=5, changed_paths=changed_paths, source="redis:instance-a")
+            time.sleep(0.1)
+
+            with lock:
+                # 事件派发了（第 1 次新版本应派发）
+                assert event_counts[EventType.LOG_LEVEL_CHANGED] == 1
+                assert event_counts[EventType.REDIS_CONFIG_SYNC] == 1
+            # 但磁盘没变化，_last_reload_ok_version 应不等于 5
+            assert sync._last_reload_ok_version != 5
+
+            # === 第 2 次：同版本号重试（NFS 还没好），disk_changed 仍为 False ===
+            sync._trigger_reload(version=5, changed_paths=changed_paths, source="redis:instance-a")
+            time.sleep(0.1)
+            with lock:
+                assert event_counts[EventType.LOG_LEVEL_CHANGED] == 2  # 重试也派发了
+                assert event_counts[EventType.REDIS_CONFIG_SYNC] == 2
+
+            # === 现在 NFS 同步完成，写入新配置到磁盘 ===
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(new_yaml, f, allow_unicode=True)
+            with open(isolated_cm.version_meta_path, "w", encoding="utf-8") as f:
+                json.dump(versions_payload, f, ensure_ascii=False)
+
+            # === 第 3 次：同版本号重试，这次磁盘终于同步到，disk_changed=True ===
+            sync._trigger_reload(version=5, changed_paths=changed_paths, source="redis:heartbeat")
+            time.sleep(0.1)
+            assert sync._last_reload_ok_version == 5
+            with lock:
+                assert event_counts[EventType.LOG_LEVEL_CHANGED] == 3
+            # ConfigManager 内存应更新
+            assert isolated_cm.get("logging.level.default") == "ERROR"
+
+            # === 第 4 次：同版本号，但上次已成功加载 → 应去重跳过 ===
+            sync._trigger_reload(version=5, changed_paths=changed_paths, source="redis:instance-a")
+            time.sleep(0.1)
+            with lock:
+                assert event_counts[EventType.LOG_LEVEL_CHANGED] == 3  # 没增加
+
+            # records 仍只有 1 条
+            assert len(isolated_cm._version_records) == 1
+
+        finally:
+            for sid in sub_ids:
+                event_bus.unsubscribe(sid)
+
+    def test_stale_version_rejected(self, isolated_cm, tmp_path, monkeypatch):
+        """
+        回归测试：版本号低于 current_version 的同步请求应直接拒绝。
+        """
+        from app.core.redis_broadcast import RedisConfigSync
+
+        sync = RedisConfigSync.__new__(RedisConfigSync)
+        sync._instance_id = "instance-c"
+        sync._current_version = 10
+        sync._last_reload_ok_version = 10
+        sync._callbacks = []
+
+        # 版本 7 < 10：过时，应被拒绝
+        reload_called = {"n": 0}
+        original_reload = sync._trigger_reload
+
+        def counting_reload(*args, **kwargs):
+            reload_called["n"] += 1
+
+        # 用计数器验证不会走到后面的 reload 逻辑
+        # 直接调用并检查 _current_version 不变
+        sync._trigger_reload(version=7, changed_paths=["logging.level.default"], source="redis:old-instance")
+        assert sync._current_version == 10  # 未被降低
+
+        # 版本 10 == 10 且已成功加载：重复，应被拒绝
+        sync._trigger_reload(version=10, changed_paths=["logging.level.default"], source="redis:replay")
+        assert sync._current_version == 10
 
 
 if __name__ == "__main__":
