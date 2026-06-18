@@ -2089,3 +2089,98 @@ SHOW TABLES LIKE '%risk_propagation%';
 SHOW TABLES LIKE '%association_graph%';
 SHOW COLUMNS FROM sc_org_nodes LIKE '%pipeline%';
 SHOW COLUMNS FROM sc_org_nodes LIKE '%vibration%';
+
+-- ============================================================
+-- 智能复检周期排程模块
+-- ============================================================
+
+-- ============================================================
+-- 检验排程任务表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_inspection_schedules (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    schedule_id VARCHAR(64) NOT NULL COMMENT '排程任务ID',
+    node_id VARCHAR(100) COMMENT '节点ID（螺栓/法兰ID）',
+    node_type VARCHAR(20) COMMENT '节点类型: bolt/flange',
+    device_name VARCHAR(200) COMMENT '设备名称',
+    scheduled_date DATETIME COMMENT '计划开始日期',
+    end_date DATETIME COMMENT '计划结束日期',
+    priority VARCHAR(20) COMMENT '优先级: routine/attention/urgent/immediate',
+    priority_score FLOAT COMMENT '优先级分数 (0-100)',
+    status VARCHAR(20) COMMENT '状态: planned/confirmed/in_progress/completed/cancelled/conflict',
+    team_id VARCHAR(50) COMMENT '负责班组ID',
+    team_name VARCHAR(100) COMMENT '负责班组名称',
+    assignee_id VARCHAR(50) COMMENT '负责人ID',
+    assignee_name VARCHAR(100) COMMENT '负责人姓名',
+    inspection_type VARCHAR(50) COMMENT '检验类型: routine/enhanced/special/special_emergency',
+    title VARCHAR(500) COMMENT '任务标题',
+    description TEXT COMMENT '任务描述',
+    estimated_hours FLOAT COMMENT '预估工时（小时）',
+    standard_codes TEXT COMMENT '检验标准代号列表 JSON',
+    prerequisites TEXT COMMENT '前置条件 JSON',
+    conflict_detected BOOLEAN DEFAULT FALSE COMMENT '是否检测到冲突',
+    conflict_details TEXT COMMENT '冲突详情列表 JSON',
+    calculation_result TEXT COMMENT '排程计算原始结果 JSON',
+    work_order_id BIGINT COMMENT '关联工单ID',
+    cmms_external_id VARCHAR(100) COMMENT 'CMMS系统外部ID',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE KEY uk_schedule_id (schedule_id),
+    INDEX idx_team_date (team_id, scheduled_date),
+    INDEX idx_status (status),
+    INDEX idx_priority (priority),
+    INDEX idx_node (node_type, node_id),
+    INDEX idx_scheduled_date (scheduled_date),
+    INDEX idx_work_order (work_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能检验排程任务表';
+
+-- ============================================================
+-- 班组产能配置表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_team_capacity (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    team_id VARCHAR(50) NOT NULL COMMENT '班组ID',
+    team_name VARCHAR(100) COMMENT '班组名称',
+    daily_max_tasks INT DEFAULT 5 COMMENT '每日最大任务数',
+    daily_max_hours FLOAT DEFAULT 40.0 COMMENT '每日最大工时（小时）',
+    weekly_max_tasks INT DEFAULT 25 COMMENT '每周最大任务数',
+    member_count INT DEFAULT 5 COMMENT '班组人数',
+    working_days VARCHAR(50) DEFAULT '0,1,2,3,4' COMMENT '工作日 (0=周一, 6=周日)',
+    holidays TEXT COMMENT '节假日列表 JSON',
+    special_schedules TEXT COMMENT '特殊排班配置 JSON',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE KEY uk_team_id (team_id),
+    INDEX idx_team_name (team_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='班组产能配置表';
+
+-- ============================================================
+-- 排程同步日志表（CMMS推送）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_schedule_sync_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    schedule_id VARCHAR(64) NOT NULL COMMENT '排程任务ID',
+    sync_type VARCHAR(30) COMMENT '同步类型: cmms_push/ics_export/calendar_subscribe',
+    sync_target VARCHAR(100) COMMENT '同步目标: CMMS配置ID/文件名等',
+    status VARCHAR(20) COMMENT '状态: pending/success/failed',
+    external_id VARCHAR(100) COMMENT '外部系统ID',
+    request_data TEXT COMMENT '请求数据 JSON',
+    response_data TEXT COMMENT '响应数据 JSON',
+    error_message TEXT COMMENT '错误信息',
+    retry_count INT DEFAULT 0 COMMENT '重试次数',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+
+    INDEX idx_schedule_id (schedule_id),
+    INDEX idx_sync_type (sync_type),
+    INDEX idx_status (status),
+    INDEX idx_create_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='排程同步日志表';
+
+-- 显示智能复检排程模块的表
+SHOW TABLES LIKE '%inspection_schedule%';
+SHOW TABLES LIKE '%team_capacity%';
+SHOW TABLES LIKE '%schedule_sync%';
