@@ -782,6 +782,7 @@ class CmmsIntegrationConfig(Base):
         Index('idx_cmms_enabled', 'enabled'),
         Index('idx_cmms_tenant', 'tenant_id'),
         Index('idx_cmms_type', 'system_type'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1294,6 +1295,7 @@ class WorkingConditionAudit(Base):
         Index('idx_wc_audit_expire', 'expire_time'),
         Index('idx_wc_audit_condition', 'from_condition', 'to_condition'),
         Index('idx_wc_audit_event_id', 'event_id'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1331,6 +1333,7 @@ class WorkingConditionBaseline(Base):
         Index('idx_wc_baseline_node', 'node_type', 'node_id'),
         Index('idx_wc_baseline_condition', 'condition'),
         Index('idx_wc_baseline_active', 'is_active'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1398,6 +1401,7 @@ class BoltHealthHistory(Base):
         Index('idx_bolt_health_time', 'create_time'),
         Index('idx_bolt_health_score', 'hi_score'),
         Index('idx_bolt_health_level', 'hi_level'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1432,6 +1436,7 @@ class FlangeHealthHistory(Base):
         Index('idx_flange_health_flange', 'flange_id'),
         Index('idx_flange_health_time', 'create_time'),
         Index('idx_flange_health_score', 'hi_score'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1468,6 +1473,7 @@ class RULPrediction(Base):
         Index('idx_rul_node', 'node_type', 'node_id'),
         Index('idx_rul_time', 'prediction_date'),
         Index('idx_rul_rul', 'rul_days'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1510,6 +1516,7 @@ class HealthRollupReport(Base):
         Index('idx_rollup_date', 'report_date'),
         Index('idx_rollup_time', 'create_time'),
         Index('idx_rollup_line_date', 'line_id', 'report_date', unique=True),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1537,6 +1544,7 @@ class DegradationCurve(Base):
     __table_args__ = (
         Index('idx_degradation_node', 'node_type', 'node_id'),
         Index('idx_degradation_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1560,6 +1568,7 @@ class HealthConfig(Base):
 
     __table_args__ = (
         Index('idx_health_config_key', 'config_key'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1760,6 +1769,7 @@ class AnomalyData(Base):
         Index('idx_anomaly_confirmed', 'is_confirmed'),
         Index('idx_anomaly_false_positive', 'is_false_positive'),
         Index('idx_anomaly_create_time', 'create_time'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1816,6 +1826,7 @@ class StrategyAuditLog(Base):
         Index('idx_audit_action', 'action'),
         Index('idx_audit_time', 'create_time'),
         Index('idx_audit_operator', 'operator_id'),
+        Index('idx_tenant', 'tenant_id'),
     )
 
 

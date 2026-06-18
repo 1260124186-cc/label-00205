@@ -19,9 +19,12 @@ CREATE TABLE IF NOT EXISTS sc_bolt_data (
     splitter_num BIGINT COMMENT '分线器ID',
     position VARCHAR(200) COMMENT '安装位置',
     ptf DOUBLE COMMENT '预紧力',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_sensor_time (sensor_id, create_time),
-    INDEX idx_collector (collector_id, splitter_num, position)
+    INDEX idx_collector (collector_id, splitter_num, position),
+    INDEX idx_tenant_sensor_time (tenant_id, sensor_id, create_time),
+    INDEX idx_tenant (tenant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='螺栓预紧力数据表';
 
 -- ============================================================
@@ -42,12 +45,17 @@ CREATE TABLE IF NOT EXISTS sci_abnormal_prediction (
     fault_type VARCHAR(10) COMMENT '故障类型：loosening/overload/fracture/fatigue/corrosion',
     fault_confidence FLOAT COMMENT '故障分类置信度',
     fault_evidence TEXT COMMENT '故障证据JSON',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_node_type (node_type),
     INDEX idx_bolt_id (bolt_id),
     INDEX idx_flm_id (flm_id),
     INDEX idx_year_month (year_month),
-    INDEX idx_fault_type (fault_type)
+    INDEX idx_fault_type (fault_type),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_node_type (tenant_id, node_type),
+    INDEX idx_tenant_bolt_id (tenant_id, bolt_id),
+    INDEX idx_tenant_flm_id (tenant_id, flm_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='异常预测结果表';
 
 -- ============================================================
@@ -67,10 +75,14 @@ CREATE TABLE IF NOT EXISTS ci_month_prediction_details (
     fault_type VARCHAR(10) COMMENT '故障类型：loosening/overload/fracture/fatigue/corrosion',
     fault_confidence FLOAT COMMENT '故障分类置信度',
     fault_evidence TEXT COMMENT '故障证据JSON',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_node_type (node_type),
     INDEX idx_bolt_id (bolt_id),
-    INDEX idx_flm_id (flm_id)
+    INDEX idx_flm_id (flm_id),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_bolt (tenant_id, bolt_id),
+    INDEX idx_tenant_flm (tenant_id, flm_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='月度预测结果表';
 
 -- ============================================================
@@ -84,10 +96,12 @@ CREATE TABLE IF NOT EXISTS sc_anomaly_data (
     anomaly_score DOUBLE COMMENT '异常评分',
     original_time DATETIME COMMENT '原始数据时间',
     details TEXT COMMENT '详细信息JSON',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_sensor (sensor_id),
     INDEX idx_type (anomaly_type),
-    INDEX idx_time (create_time)
+    INDEX idx_time (create_time),
+    INDEX idx_tenant (tenant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='异常数据表';
 
 -- ============================================================
@@ -104,9 +118,11 @@ CREATE TABLE IF NOT EXISTS sc_model_versions (
     config TEXT COMMENT '训练配置JSON',
     is_active TINYINT DEFAULT 0 COMMENT '是否为活动版本',
     description VARCHAR(500) COMMENT '版本描述',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_model (model_id),
-    INDEX idx_active (is_active)
+    INDEX idx_active (is_active),
+    INDEX idx_tenant (tenant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型版本表';
 
 -- ============================================================
@@ -125,9 +141,11 @@ CREATE TABLE IF NOT EXISTS sc_training_logs (
     best_val_loss FLOAT COMMENT '最佳验证损失',
     config TEXT COMMENT '训练配置JSON',
     error_message TEXT COMMENT '错误信息',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_session (session_id),
-    INDEX idx_model (model_id)
+    INDEX idx_model (model_id),
+    INDEX idx_tenant (tenant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='训练日志表';
 
 -- ============================================================
@@ -191,10 +209,14 @@ CREATE TABLE IF NOT EXISTS sc_alert_rules (
     upgrade_to_level INT COMMENT '升级到的级别',
     enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
     description VARCHAR(500) COMMENT '规则描述',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     INDEX idx_alert_level (alert_level),
-    INDEX idx_enabled (enabled)
+    INDEX idx_enabled (enabled),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_level (tenant_id, alert_level),
+    INDEX idx_tenant_enabled (tenant_id, enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警规则表';
 
 -- ============================================================
@@ -224,12 +246,17 @@ CREATE TABLE IF NOT EXISTS sc_alert_events (
     work_order_id BIGINT COMMENT '关联工单ID',
     source_prediction_id BIGINT COMMENT '来源预测记录ID',
     silence_until DATETIME COMMENT '静默截止时间',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     INDEX idx_status (status),
     INDEX idx_level (alert_level),
     INDEX idx_node (node_type, node_id),
-    INDEX idx_create_time (create_time)
+    INDEX idx_create_time (create_time),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_status (tenant_id, status),
+    INDEX idx_tenant_level (tenant_id, alert_level),
+    INDEX idx_tenant_node (tenant_id, node_type, node_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警事件表';
 
 -- ============================================================
@@ -247,10 +274,14 @@ CREATE TABLE IF NOT EXISTS sc_alert_subscriptions (
     notify_channels TEXT COMMENT '通知渠道 JSON',
     notify_targets TEXT COMMENT '通知目标 JSON',
     enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     INDEX idx_subscriber (subscriber_type, subscriber_id),
-    INDEX idx_enabled (enabled)
+    INDEX idx_enabled (enabled),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_subscriber (tenant_id, subscriber_type, subscriber_id),
+    INDEX idx_tenant_enabled (tenant_id, enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警订阅管理表';
 
 -- ============================================================
@@ -263,9 +294,12 @@ CREATE TABLE IF NOT EXISTS sc_notification_channels (
     config TEXT COMMENT '渠道配置 JSON',
     enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
     is_default TINYINT(1) DEFAULT 0 COMMENT '是否默认渠道',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    INDEX idx_channel_type (channel_type)
+    INDEX idx_channel_type (channel_type),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_channel_type (tenant_id, channel_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通知渠道配置表';
 
 -- ============================================================
@@ -283,9 +317,13 @@ CREATE TABLE IF NOT EXISTS sc_notification_logs (
     status VARCHAR(20) DEFAULT 'pending' COMMENT '发送状态',
     error_message TEXT COMMENT '错误信息',
     retry_count INT DEFAULT 0 COMMENT '重试次数',
+    tenant_id BIGINT COMMENT '租户ID',
     send_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间',
     INDEX idx_alert_id (alert_id),
-    INDEX idx_status (status)
+    INDEX idx_status (status),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_alert (tenant_id, alert_id),
+    INDEX idx_tenant_status (tenant_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通知发送日志表';
 
 -- ============================================================
@@ -312,13 +350,18 @@ CREATE TABLE IF NOT EXISTS sc_work_orders (
     resolve_note TEXT COMMENT '解决备注',
     recommendations TEXT COMMENT '推荐措施 JSON',
     extra_info TEXT COMMENT '扩展信息 JSON',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     INDEX idx_status (status),
     INDEX idx_priority (priority),
     INDEX idx_alert_id (alert_id),
     INDEX idx_assignee (assignee_id),
-    INDEX idx_create_time (create_time)
+    INDEX idx_create_time (create_time),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_status (tenant_id, status),
+    INDEX idx_tenant_priority (tenant_id, priority),
+    INDEX idx_tenant_node (tenant_id, node_type, node_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='工单表';
 
 -- ============================================================
@@ -364,12 +407,15 @@ CREATE TABLE IF NOT EXISTS sc_data_quality_checks (
     quality_level VARCHAR(20) COMMENT '质量等级 excellent/good/fair/poor/critical',
     valid_for_training TINYINT DEFAULT 1 COMMENT '是否适合训练',
     confidence_adjustment FLOAT DEFAULT 1.0 COMMENT '置信度调整系数',
+    tenant_id BIGINT COMMENT '租户ID',
     check_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '检查时间',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_dqc_sensor (sensor_id),
     INDEX idx_dqc_time (check_time),
     INDEX idx_dqc_score (overall_score),
-    INDEX idx_dqc_level (quality_level)
+    INDEX idx_dqc_level (quality_level),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_sensor (tenant_id, sensor_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='数据质量检查表';
 
 -- ============================================================
@@ -386,9 +432,12 @@ CREATE TABLE IF NOT EXISTS sc_quality_reports (
     anomaly_statistics TEXT COMMENT '异常统计 JSON',
     quality_trend TEXT COMMENT '质量趋势 JSON',
     summary TEXT COMMENT '报告摘要',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     UNIQUE KEY idx_qr_date (report_date),
-    INDEX idx_qr_create (create_time)
+    INDEX idx_qr_create (create_time),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_date (tenant_id, report_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='质量报告表';
 
 -- ============================================================
@@ -493,12 +542,16 @@ CREATE TABLE IF NOT EXISTS sc_api_audit_logs (
     client_ip VARCHAR(50) COMMENT '客户端IP',
     request_id VARCHAR(64) COMMENT '请求ID',
     extra_info TEXT COMMENT '扩展信息 JSON',
+    tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_api_audit_key (key_id),
     INDEX idx_api_audit_path (path),
     INDEX idx_api_audit_status (status_code),
     INDEX idx_api_audit_time (create_time),
-    INDEX idx_api_audit_method (method)
+    INDEX idx_api_audit_method (method),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_key (tenant_id, key_id),
+    INDEX idx_tenant_time (tenant_id, create_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='API审计日志表';
 
 -- ============================================================
@@ -657,11 +710,13 @@ CREATE TABLE IF NOT EXISTS sc_tenant_quotas (
     max_storage_mb INT DEFAULT 5120 COMMENT '存储上限 MB',
     max_users INT DEFAULT 50 COMMENT '最大用户数',
     max_org_nodes INT DEFAULT 500 COMMENT '最大组织节点数',
+    max_training_concurrency INT DEFAULT 2 COMMENT '最大训练并发数',
     current_model_count INT DEFAULT 0 COMMENT '当前模型数',
     current_api_calls_today INT DEFAULT 0 COMMENT '今日API调用次数',
     current_storage_mb DOUBLE DEFAULT 0.0 COMMENT '当前存储用量 MB',
     current_user_count INT DEFAULT 0 COMMENT '当前用户数',
     current_org_node_count INT DEFAULT 0 COMMENT '当前组织节点数',
+    current_training_concurrency INT DEFAULT 0 COMMENT '当前训练并发数',
     api_call_reset_date VARCHAR(10) COMMENT 'API调用计数重置日期 YYYY-MM-DD',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
