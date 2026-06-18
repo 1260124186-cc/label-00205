@@ -299,9 +299,9 @@ def isolated_cm(tmp_path, monkeypatch):
         if config_file.exists():
             with open(config_file, "r", encoding="utf-8") as f:
                 self.config = yaml.safe_load(f) or {}
-        self._load_version_meta = lambda: None  # 简化
+        self._load_version_meta = lambda *args, **kwargs: None  # 简化，兼容参数签名
         self._initialized = True
-        self._sync_utils_config = lambda: None
+        self._sync_utils_config = lambda *args, **kwargs: None
         logger.info(f"[测试] 隔离ConfigManager初始化, path={config_file}")
 
     monkeypatch.setattr(cm_module.ConfigManager, "__init__", patched_init)
@@ -1101,6 +1101,94 @@ class TestCrossInstanceRedisSync:
         finally:
             for sid in sub_ids:
                 event_bus.unsubscribe(sid)
+
+    def test_reload_from_disk_idempotent_no_duplicate_records(self, isolated_cm, tmp_path, monkeypatch):
+        """多次调用 reload_from_disk 不应导致 records 重复追加"""
+        from app.core.config_manager import ConfigManager, ConfigVersionRecord
+        from datetime import datetime
+        import json
+
+        # 把 fixture 覆写成 lambda 的方法临时换回真实方法
+        real_load_meta = ConfigManager._load_version_meta
+        monkeypatch.setattr(isolated_cm, "_load_version_meta",
+                            lambda clear_existing=True: real_load_meta(isolated_cm, clear_existing=clear_existing))
+
+        # 构造磁盘上的 versions.json
+        versions_path = isolated_cm.version_meta_path
+        fake_records = [
+            {
+                "version": 1,
+                "timestamp": datetime.now().isoformat(),
+                "operator": "op1",
+                "description": "d1",
+                "changes": [{"path": "a.b", "old": 1, "new": 2, "hot_updatable": True}],
+                "snapshot_before": "",
+                "snapshot_after": "",
+                "rollback_target": None,
+            },
+            {
+                "version": 2,
+                "timestamp": datetime.now().isoformat(),
+                "operator": "op2",
+                "description": "d2",
+                "changes": [],
+                "snapshot_before": "",
+                "snapshot_after": "",
+                "rollback_target": None,
+            },
+        ]
+        payload = {
+            "current_version": 2,
+            "records": fake_records,
+            "updated_at": datetime.now().isoformat(),
+        }
+        with open(versions_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+        # 第 1 次：2 条
+        isolated_cm.reload_from_disk()
+        assert len(isolated_cm._version_records) == 2
+
+        # 第 2、3 次：应该仍然是 2 条（幂等，不重复追加）
+        isolated_cm.reload_from_disk()
+        isolated_cm.reload_from_disk()
+        assert len(isolated_cm._version_records) == 2, (
+            f"records 重复追加: {len(isolated_cm._version_records)} (应为 2)"
+        )
+
+    def test_reload_from_disk_version_never_rollback(self, isolated_cm, tmp_path, monkeypatch):
+        """磁盘版本比内存旧时，reload_from_disk 不应让版本号回退"""
+        from app.core.config_manager import ConfigManager
+        import json
+        from datetime import datetime
+
+        # 把 fixture 覆写成 lambda 的 _load_version_meta 临时换回真实方法
+        real_load_meta = ConfigManager._load_version_meta
+        monkeypatch.setattr(isolated_cm, "_load_version_meta",
+                            lambda clear_existing=True: real_load_meta(isolated_cm, clear_existing=clear_existing))
+
+        # 构造磁盘 versions.json：版本号为 5（比内存低）
+        payload = {"current_version": 5, "records": [], "updated_at": datetime.now().isoformat()}
+        with open(isolated_cm.version_meta_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+
+        # 先把内存版本号手动设到 10（模拟本地刚 apply 过但还没完全落盘）
+        isolated_cm._version = 10
+
+        # reload_from_disk 应该保护版本号不回退到 5
+        changed = isolated_cm.reload_from_disk(target_version=10)
+        assert isolated_cm.current_version == 10, (
+            f"版本号被回退了: expected 10, got {isolated_cm.current_version}"
+        )
+
+        # 反过来：磁盘版本更高（12），内存是 10，应该跟随磁盘更新
+        payload["current_version"] = 12
+        with open(isolated_cm.version_meta_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        isolated_cm.reload_from_disk(target_version=12)
+        assert isolated_cm.current_version == 12, (
+            f"版本号未跟随磁盘更新: expected 12, got {isolated_cm.current_version}"
+        )
 
 
 if __name__ == "__main__":

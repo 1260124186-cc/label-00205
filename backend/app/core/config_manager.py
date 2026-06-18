@@ -312,8 +312,18 @@ class ConfigManager:
         except Exception as e:
             logger.warning(f"同步到 utils.config 失败（非关键路径）: {e}")
 
-    def _load_version_meta(self) -> None:
-        """加载版本元数据与审计日志"""
+    def _load_version_meta(self, *, clear_existing: bool = True) -> None:
+        """
+        加载版本元数据与审计日志。
+
+        Args:
+            clear_existing: 是否清空内存中已有的 records（默认 True，保证幂等）。
+                            首次初始化时为 True；Redis 广播 reload 时也应为 True，
+                            避免反复调用导致 records 重复追加污染审计记录。
+        """
+        if clear_existing:
+            self._version_records.clear()
+
         if self.version_meta_path.exists():
             try:
                 with open(self.version_meta_path, 'r', encoding='utf-8') as f:
@@ -321,7 +331,10 @@ class ConfigManager:
                     self._version = int(data.get('current_version', 0))
                     for rec in data.get('records', []):
                         self._version_records.append(ConfigVersionRecord(**rec))
-                logger.debug(f"加载版本元数据: current_version=v{self._version}, records={len(self._version_records)}")
+                logger.debug(
+                    f"加载版本元数据: current_version=v{self._version}, "
+                    f"records={len(self._version_records)}, clear_existing={clear_existing}"
+                )
             except Exception as e:
                 logger.warning(f"加载版本元数据失败，将重置: {e}")
 
@@ -335,7 +348,7 @@ class ConfigManager:
                             continue
                         try:
                             obj = json.loads(line)
-                            if obj.get('type') == 'config_change' and obj.get('version') > self._version:
+                            if obj.get('type') == 'config_change' and obj.get('version', 0) > self._version:
                                 extra += 1
                         except Exception:
                             pass
@@ -755,26 +768,41 @@ class ConfigManager:
 
     def reload_from_disk(self, target_version: Optional[int] = None) -> bool:
         """
-        从磁盘重新加载 config.yaml + 版本元数据（用于跨实例 Redis 广播同步）
+        从磁盘重新加载 config.yaml + 版本元数据（用于跨实例 Redis 广播同步）。
+
+        幂等 & 安全保证：
+          1. 多次调用不会重复追加 _version_records（_load_version_meta 内部先 clear）
+          2. 永不回退版本号：若磁盘版本 < 内存版本，保留内存版本
+          3. 所有 records 以磁盘 versions.json 为唯一真值，按 version 升序排列
 
         Args:
-            target_version: 期望的版本号（来自 Redis 广播）。若磁盘版本落后会再次尝试读取
-                            （等待 NFS/共享存储延迟），最终仍以磁盘 versions.json 为准。
+            target_version: 期望的版本号（来自 Redis 广播），仅用于日志对比。
 
         Returns:
-            是否实际发生了重载（内存配置有变化）
+            是否实际发生了重载（config.yaml 内容有变化）
         """
-        from datetime import datetime
-
         old_config_snapshot = json.dumps(self.config, sort_keys=True, ensure_ascii=False, default=str)
+        old_version = self._version
 
         try:
             self._load()
-            self._load_version_meta()
+            # clear_existing=True 保证 records 不重复追加
+            self._load_version_meta(clear_existing=True)
             self._sync_utils_config()
         except Exception as e:
             logger.exception(f"从磁盘重载配置失败: {e}")
             return False
+
+        # 版本号保护：永不回退
+        if self._version < old_version:
+            logger.warning(
+                f"检测到磁盘版本号低于内存: disk=v{self._version}, "
+                f"memory=v{old_version}，保留内存版本号以避免回退"
+            )
+            self._version = old_version
+
+        # records 按 version 升序排列（保证 get_version_history 的稳定性）
+        self._version_records.sort(key=lambda r: r.version)
 
         new_config_snapshot = json.dumps(self.config, sort_keys=True, ensure_ascii=False, default=str)
         changed = new_config_snapshot != old_config_snapshot
@@ -782,11 +810,13 @@ class ConfigManager:
         if changed:
             logger.info(
                 f"从磁盘重载配置完成: version=v{self._version}, "
-                f"target_version=v{target_version}, changed={changed}"
+                f"target_version=v{target_version}, changed={changed}, "
+                f"records={len(self._version_records)}"
             )
         else:
             logger.debug(
-                f"从磁盘重载配置完成，但内容无变化: version=v{self._version}"
+                f"从磁盘重载配置完成，但内容无变化: version=v{self._version}, "
+                f"records={len(self._version_records)}"
             )
         return changed
 
