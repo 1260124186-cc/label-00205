@@ -12661,7 +12661,7 @@ async def calculate_batch_schedules(request: BatchScheduleCalculateRequest):
         if request.team_capacities:
             for tid, tc_schema in request.team_capacities.items():
                 tc = _team_capacity_schema_to_dataclass(tc_schema)
-                service.conflict_detector._capacity_cache[tid] = tc
+                service.conflict_detector.register_team_capacity(tc)
 
         device_list = []
         for f in request.devices:
@@ -12673,32 +12673,49 @@ async def calculate_batch_schedules(request: BatchScheduleCalculateRequest):
             device_list=device_list,
             check_conflict=request.enable_conflict_detection,
             resolve_conflicts=request.enable_auto_resolve,
+            create_work_order=request.auto_create_work_order,
         )
 
         if request.auto_create_work_order:
             for task in tasks:
+                if task.conflict_detected or task.work_order_id:
+                    continue
                 try:
                     from app.services.alert.work_order_service import WorkOrderService
                     wo_service = WorkOrderService()
                     priority_map = {
-                        'immediate': 'critical', 'urgent': 'high',
+                        'immediate': 'urgent', 'urgent': 'high',
                         'attention': 'medium', 'routine': 'low'
                     }
-                    wo = wo_service.create_work_order(
+                    due_hours = max(24, int((task.scheduled_date - datetime.now()).total_seconds() / 3600))
+                    wo = wo_service.create_manual_work_order(
                         title=task.title,
                         description=task.description,
+                        priority=priority_map.get(task.priority, 'medium'),
                         node_type=task.node_type,
                         node_id=task.node_id,
-                        priority=priority_map.get(task.priority, 'medium'),
-                        due_date=task.scheduled_date,
-                        assignee_id=task.assignee_id,
-                        team_id=task.team_id,
+                        alert_level=3 if task.priority in ('immediate', 'urgent') else 2,
+                        risk_score=task.priority_score,
+                        assignee_id=task.team_id,
+                        assignee_name=task.team_name,
+                        creator_id='system_scheduler',
+                        creator_name='智能排程系统',
+                        due_hours=due_hours,
+                        recommendations=task.prerequisites,
+                        extra_info={
+                            'schedule_id': task.schedule_id,
+                            'inspection_type': task.inspection_type,
+                            'standard_codes': task.standard_codes,
+                            'estimated_hours': task.estimated_hours,
+                        },
                     )
                     if wo and hasattr(wo, 'id'):
                         task.work_order_id = wo.id
+                        task.status = 'confirmed'
+                        task.update_time = datetime.now()
                         service._save_schedule_task(task)
                 except Exception as e:
-                    logger.warning(f"批量排程-自动建单失败 [{task.schedule_id}]: {e}")
+                    logger.warning(f"批量排程-路由层补建单失败 [{task.schedule_id}]: {e}")
 
         success_count = sum(1 for t in tasks if t.status != 'conflict')
         conflict_count = sum(1 for t in tasks if t.conflict_detected)

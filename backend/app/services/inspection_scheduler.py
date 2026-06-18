@@ -1400,10 +1400,12 @@ class InspectionScheduleService:
 
         if create_work_order and not task.conflict_detected:
             try:
-                success, external_id, _ = self.cmms_pusher.push_schedule_to_cmms(task)
-                if success:
-                    task.cmms_external_id = external_id
-                    task.status = ScheduleStatus.CONFIRMED.value
+                wo_id = self.cmms_pusher._ensure_work_order(task)
+                if wo_id:
+                    task.work_order_id = wo_id
+                    logger.info(f"排程建单成功: schedule_id={task.schedule_id}, work_order_id={wo_id}")
+                else:
+                    logger.warning(f"排程建单返回空: schedule_id={task.schedule_id}")
             except Exception as e:
                 logger.warning(f"创建工单失败: {e}")
 
@@ -1416,6 +1418,7 @@ class InspectionScheduleService:
         device_list: List[Dict[str, Any]],
         check_conflict: bool = True,
         resolve_conflicts: bool = True,
+        create_work_order: bool = False,
     ) -> List[InspectionScheduleTask]:
         """
         批量为多个设备生成排程
@@ -1424,6 +1427,7 @@ class InspectionScheduleService:
             device_list: 设备列表，每项含 device_data, hi_score, hi_level, rul_days 等
             check_conflict: 是否检测冲突
             resolve_conflicts: 是否自动尝试解决冲突
+            create_work_order: 是否为无冲突的排程自动创建工单
 
         Returns:
             排程任务列表
@@ -1472,6 +1476,19 @@ class InspectionScheduleService:
 
             if resolve_conflicts:
                 tasks = self._auto_resolve_conflicts(tasks)
+
+        if create_work_order:
+            for task in tasks:
+                if task.conflict_detected:
+                    continue
+                try:
+                    wo_id = self.cmms_pusher._ensure_work_order(task)
+                    if wo_id:
+                        task.work_order_id = wo_id
+                        self._save_schedule_task(task)
+                        logger.info(f"批量排程建单: {task.schedule_id} -> wo_id={wo_id}")
+                except Exception as e:
+                    logger.warning(f"批量排程建单失败 [{task.schedule_id}]: {e}")
 
         return tasks
 
