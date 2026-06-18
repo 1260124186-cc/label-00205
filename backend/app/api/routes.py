@@ -223,6 +223,10 @@ from app.api.schemas import (
     ScheduleListRequest, ScheduleListResponse,
     ScheduleUpdateRequest,
     TeamCalendarRequest, TeamCalendarResponse,
+    DeviceHeartbeatRegisterRequest, DeviceHeartbeatRecordRequest,
+    DeviceHealthQueryRequest, DeviceHeartbeatSchema, DeviceHealthListResponse,
+    DeviceFaultAlertHandleRequest, DeviceFaultAlertQueryRequest,
+    DeviceFaultAlertSchema, DeviceFaultAlertListResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -13337,4 +13341,133 @@ async def get_team_calendar_view(request: TeamCalendarRequest):
         raise
     except Exception as e:
         logger.error(f"获取班组日历视图失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 设备健康监控 API ==========
+
+@router.post("/device-health/register", tags=["设备健康监控"])
+async def register_device_heartbeat(request: DeviceHeartbeatRegisterRequest):
+    """注册设备到心跳监控"""
+    try:
+        from app.services.device_health_service import get_device_health_service
+        dh_service = get_device_health_service()
+        result = dh_service.register_device(
+            collector_id=request.collector_id,
+            sensor_id=request.sensor_id,
+            device_type=request.device_type,
+            device_name=request.device_name,
+            expected_interval_seconds=request.expected_interval_seconds,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"注册设备心跳失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/device-health/heartbeat", tags=["设备健康监控"])
+async def record_device_heartbeat(request: DeviceHeartbeatRecordRequest):
+    """记录设备心跳数据（含故障检测）"""
+    try:
+        from app.services.device_health_service import get_device_health_service
+        dh_service = get_device_health_service()
+        ts = None
+        if request.timestamp:
+            from datetime import datetime as _dt
+            try:
+                ts = _dt.fromisoformat(request.timestamp)
+            except ValueError:
+                ts = _dt.utcnow()
+        result = dh_service.record_heartbeat(
+            collector_id=request.collector_id,
+            sensor_id=request.sensor_id,
+            value=request.value,
+            timestamp=ts,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"记录设备心跳失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/device-health/check-offline", tags=["设备健康监控"])
+async def check_offline_devices():
+    """批量检查离线设备（调度器定期调用）"""
+    try:
+        from app.services.device_health_service import get_device_health_service
+        dh_service = get_device_health_service()
+        result = dh_service.check_offline_devices()
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"检查离线设备失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/device-health/query", tags=["设备健康监控"], response_model=DeviceHealthListResponse)
+async def query_device_health(request: DeviceHealthQueryRequest):
+    """查询设备健康状态"""
+    try:
+        from app.services.device_health_service import get_device_health_service
+        dh_service = get_device_health_service()
+        result = dh_service.get_device_health(
+            collector_id=request.collector_id,
+            sensor_id=request.sensor_id,
+            health_status=request.health_status,
+            excluded_from_training=request.excluded_from_training,
+            page=request.page,
+            page_size=request.page_size,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询设备健康状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/device-fault-alerts/query", tags=["设备健康监控"], response_model=DeviceFaultAlertListResponse)
+async def query_device_fault_alerts(request: DeviceFaultAlertQueryRequest):
+    """查询设备故障告警列表"""
+    try:
+        from app.services.device_health_service import get_device_health_service
+        dh_service = get_device_health_service()
+        result = dh_service.list_fault_alerts(
+            collector_id=request.collector_id,
+            sensor_id=request.sensor_id,
+            fault_type=request.fault_type,
+            status=request.status,
+            page=request.page,
+            page_size=request.page_size,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询设备故障告警失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/device-fault-alerts/handle", tags=["设备健康监控"])
+async def handle_device_fault_alert(request: DeviceFaultAlertHandleRequest):
+    """处理设备故障告警（确认/解决/忽略）"""
+    try:
+        from app.services.device_health_service import get_device_health_service
+        dh_service = get_device_health_service()
+        result = dh_service.handle_fault_alert(
+            alert_id=request.alert_id,
+            action=request.action,
+            handler_name=request.handler_name,
+            handle_note=request.handle_note,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"处理设备故障告警失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

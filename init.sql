@@ -156,7 +156,7 @@ CREATE PROCEDURE IF NOT EXISTS generate_test_data()
 BEGIN
     DECLARE i INT DEFAULT 0;
     DECLARE base_time DATETIME DEFAULT '2025-04-01 00:00:00';
-    
+
     WHILE i < 100 DO
         INSERT INTO sc_bolt_data (sensor_id, collector_id, splitter_num, position, ptf, create_time)
         VALUES (
@@ -875,9 +875,9 @@ CREATE TABLE IF NOT EXISTS sc_health_config (
 -- 插入健康度默认配置
 -- ============================================================
 INSERT INTO sc_health_config (config_key, config_value, config_type, description) VALUES
-('health_weights', 
+('health_weights',
  '{"preload_stability": 0.30, "alert_frequency": 0.20, "fault_history": 0.20, "environmental_stress": 0.15, "service_age": 0.15}',
- 'weights', 
+ 'weights',
  '健康度各因子权重配置，总和为1'),
 ('health_thresholds',
  '{"excellent": 90, "good": 70, "fair": 50, "poor": 30, "critical": 0}',
@@ -1685,7 +1685,7 @@ CREATE TABLE IF NOT EXISTS sc_hpo_trials (
     framework VARCHAR(20) NOT NULL COMMENT '优化框架：optuna/ray_tune/ax',
     status VARCHAR(20) DEFAULT 'running' COMMENT '状态：running/completed/failed/pruned',
     trial_number INT COMMENT '试验序号',
-    
+
     -- 超参配置
     num_layers INT COMMENT '层数',
     hidden_size INT COMMENT '隐藏层大小',
@@ -1693,7 +1693,7 @@ CREATE TABLE IF NOT EXISTS sc_hpo_trials (
     learning_rate FLOAT COMMENT '学习率',
     sequence_length INT COMMENT '序列长度',
     params JSON COMMENT '完整超参JSON',
-    
+
     -- 指标结果
     val_f1_score FLOAT COMMENT '验证集F1分数',
     val_precision FLOAT COMMENT '验证集精确率',
@@ -1704,21 +1704,21 @@ CREATE TABLE IF NOT EXISTS sc_hpo_trials (
     inference_latency_ms FLOAT COMMENT '推理延迟（毫秒）',
     training_time_seconds FLOAT COMMENT '训练耗时（秒）',
     objective_value FLOAT COMMENT '综合优化目标值',
-    
+
     -- 约束违反
     latency_constraint_violated TINYINT(1) DEFAULT 0 COMMENT '是否违反延迟约束',
     f1_constraint_violated TINYINT(1) DEFAULT 0 COMMENT '是否违反F1约束',
-    
+
     -- 元数据
     training_session_id VARCHAR(100) COMMENT '关联的训练会话ID',
     model_version VARCHAR(50) COMMENT '模型版本',
     error_message TEXT COMMENT '错误信息',
     pruned_reason VARCHAR(200) COMMENT '被修剪原因',
-    
+
     tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    
+
     INDEX idx_study (study_id),
     INDEX idx_model_node (model_type, node_id),
     INDEX idx_status (status),
@@ -1738,17 +1738,17 @@ CREATE TABLE IF NOT EXISTS sc_hpo_studies (
     model_type VARCHAR(20) NOT NULL COMMENT '模型类型：bolt/flange',
     node_id VARCHAR(100) COMMENT '节点ID（为空表示全局）',
     node_type VARCHAR(20) COMMENT '节点类型',
-    
+
     -- 搜索空间配置
     search_space JSON NOT NULL COMMENT '搜索空间定义JSON',
-    
+
     -- 优化目标配置
     objective_config JSON NOT NULL COMMENT '优化目标配置JSON',
     f1_weight FLOAT DEFAULT 1.0 COMMENT 'F1权重',
     false_positive_penalty FLOAT DEFAULT 0.5 COMMENT '误报惩罚系数',
     latency_threshold_ms FLOAT DEFAULT 100.0 COMMENT '推理延迟阈值（毫秒）',
     latency_weight FLOAT DEFAULT 0.3 COMMENT '延迟权重',
-    
+
     -- 优化配置
     framework VARCHAR(20) DEFAULT 'optuna' COMMENT '优化框架',
     optimizer VARCHAR(20) DEFAULT 'tpe' COMMENT '优化算法：tpe/random/grid/bo',
@@ -1756,27 +1756,27 @@ CREATE TABLE IF NOT EXISTS sc_hpo_studies (
     max_concurrent_trials INT DEFAULT 2 COMMENT '最大并发试验数',
     min_trials_to_prune INT DEFAULT 5 COMMENT '最小试验数后开启剪枝',
     pruner_type VARCHAR(20) DEFAULT 'median' COMMENT '剪枝类型：median/halver/none',
-    
+
     -- 约束配置
     constraints JSON COMMENT '约束条件JSON',
-    
+
     -- 状态
     status VARCHAR(20) DEFAULT 'pending' COMMENT '状态：pending/running/completed/failed',
     best_trial_id VARCHAR(64) COMMENT '最佳试验ID',
     best_params JSON COMMENT '最佳超参JSON',
     best_objective_value FLOAT COMMENT '最佳目标值',
-    
+
     -- 每节点超参
     per_node_hpo_enabled TINYINT(1) DEFAULT 0 COMMENT '是否启用per-node超参',
     node_scope VARCHAR(20) DEFAULT 'global' COMMENT '节点范围：global/group/single',
-    
+
     tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
     created_by VARCHAR(100) COMMENT '创建人',
     start_time DATETIME COMMENT '开始时间',
     end_time DATETIME COMMENT '结束时间',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    
+
     INDEX idx_study_id (study_id),
     INDEX idx_model_node (model_type, node_id),
     INDEX idx_status (status),
@@ -1791,26 +1791,26 @@ CREATE TABLE IF NOT EXISTS sc_hpo_node_overrides (
     study_id VARCHAR(64) NOT NULL COMMENT '研究ID',
     node_id VARCHAR(100) NOT NULL COMMENT '节点ID',
     node_type VARCHAR(20) NOT NULL COMMENT '节点类型',
-    
+
     -- 覆盖的搜索空间
     search_space_override JSON COMMENT '覆盖的搜索空间JSON',
-    
+
     -- 覆盖的超参值（固定值）
     fixed_params JSON COMMENT '固定超参值JSON',
-    
+
     -- 该节点找到的最佳配置
     best_params JSON COMMENT '该节点最佳超参',
     best_trial_id VARCHAR(64) COMMENT '该节点最佳试验ID',
     best_objective_value FLOAT COMMENT '该节点最佳目标值',
-    
+
     -- 是否已应用到训练
     applied_to_training TINYINT(1) DEFAULT 0 COMMENT '是否已应用到训练',
     applied_time DATETIME COMMENT '应用时间',
-    
+
     tenant_id BIGINT DEFAULT 0 COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    
+
     UNIQUE KEY uk_study_node (study_id, node_id),
     INDEX idx_node (node_id),
     INDEX idx_tenant (tenant_id)
@@ -1818,3 +1818,96 @@ CREATE TABLE IF NOT EXISTS sc_hpo_node_overrides (
 
 -- 显示 HPO 相关表
 SHOW TABLES LIKE '%hpo%';
+
+-- ============================================================
+-- 采集器/传感器设备健康监控模块
+-- ============================================================
+
+-- ============================================================
+-- 采集器心跳表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_collector_heartbeat (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    collector_id VARCHAR(100) NOT NULL COMMENT '采集器ID',
+    sensor_id VARCHAR(100) NOT NULL COMMENT '传感器/螺栓ID',
+    device_type VARCHAR(20) DEFAULT 'collector' COMMENT '设备类型 collector/sensor',
+    device_name VARCHAR(200) COMMENT '设备名称',
+
+    last_data_time DATETIME COMMENT '最后收到数据的时间',
+    expected_interval_seconds DOUBLE DEFAULT 60.0 COMMENT '预期采样间隔（秒）',
+    consecutive_missing_count INT DEFAULT 0 COMMENT '连续缺失次数',
+
+    last_value DOUBLE COMMENT '最后一次采样的数值',
+    previous_value DOUBLE COMMENT '倒数第二次采样的数值',
+    stuck_count INT DEFAULT 0 COMMENT '连续数值不变次数',
+    jump_count INT DEFAULT 0 COMMENT '跳变次数',
+
+    health_status VARCHAR(20) DEFAULT 'healthy' COMMENT '健康状态 healthy/offline/stuck/jump/degraded',
+    fault_types TEXT COMMENT '当前故障类型列表 JSON，如 ["offline","jump"]',
+    last_fault_time DATETIME COMMENT '最近一次故障发生时间',
+    recovery_time DATETIME COMMENT '最近一次恢复时间',
+
+    confidence_penalty DOUBLE DEFAULT 1.0 COMMENT '置信度惩罚系数 0-1，1=无惩罚',
+    excluded_from_training TINYINT(1) DEFAULT 0 COMMENT '是否排除出训练数据',
+
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE KEY idx_hb_collector_sensor (collector_id, sensor_id),
+    INDEX idx_hb_collector (collector_id),
+    INDEX idx_hb_sensor (sensor_id),
+    INDEX idx_hb_status (health_status),
+    INDEX idx_hb_last_data (last_data_time),
+    INDEX idx_hb_excluded (excluded_from_training),
+    INDEX idx_hb_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='采集器心跳表';
+
+-- ============================================================
+-- 设备故障告警表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_device_fault_alerts (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    alert_no VARCHAR(50) UNIQUE COMMENT '告警编号',
+    collector_id VARCHAR(100) NOT NULL COMMENT '采集器ID',
+    sensor_id VARCHAR(100) NOT NULL COMMENT '传感器/螺栓ID',
+
+    fault_type VARCHAR(20) NOT NULL COMMENT '故障类型 offline/stuck/jump',
+    fault_level INT DEFAULT 2 COMMENT '故障级别 1=提示 2=警告 3=严重 4=紧急',
+
+    title VARCHAR(200) COMMENT '告警标题',
+    content TEXT COMMENT '告警内容',
+    evidence TEXT COMMENT '故障证据 JSON',
+
+    last_value DOUBLE COMMENT '最后采样值',
+    expected_value_range VARCHAR(100) COMMENT '期望值范围 JSON',
+    offline_duration_seconds DOUBLE COMMENT '离线时长（秒）',
+    consecutive_missing INT COMMENT '连续缺失次数',
+    stuck_count INT COMMENT '卡死次数',
+    jump_magnitude DOUBLE COMMENT '跳变幅度',
+
+    status VARCHAR(20) DEFAULT 'pending' COMMENT '状态 pending/acknowledged/resolved/ignored',
+    handler_id VARCHAR(50) COMMENT '处理人ID',
+    handler_name VARCHAR(100) COMMENT '处理人姓名',
+    handle_time DATETIME COMMENT '处理时间',
+    handle_note TEXT COMMENT '处理备注',
+
+    silence_until DATETIME COMMENT '静默截止时间',
+    is_auto_resolved TINYINT(1) DEFAULT 0 COMMENT '是否自动恢复',
+
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    INDEX idx_dfa_collector (collector_id),
+    INDEX idx_dfa_sensor (sensor_id),
+    INDEX idx_dfa_fault_type (fault_type),
+    INDEX idx_dfa_status (status),
+    INDEX idx_dfa_time (create_time),
+    INDEX idx_dfa_level (fault_level),
+    INDEX idx_dfa_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='设备故障告警表';
+
+-- 显示设备健康监控模块新增的表
+SHOW TABLES LIKE '%heartbeat%';
+SHOW TABLES LIKE '%device_fault%';

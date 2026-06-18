@@ -743,6 +743,22 @@ class TrainingService:
         self, session_id, tenant_id, force_retrain, training_config, is_incremental
     ):
         bolt_ids = self._get_all_bolt_ids(tenant_id)
+
+        faulty_sensor_ids = set()
+        try:
+            from app.services.device_health_service import get_device_health_service
+            dh_service = get_device_health_service()
+            faulty_sensor_ids = dh_service.get_faulty_sensor_ids(tenant_id=tenant_id)
+        except Exception as e:
+            logger.warning(f"获取故障设备列表失败，跳过设备过滤: {e}")
+
+        if faulty_sensor_ids:
+            original_count = len(bolt_ids)
+            bolt_ids = [bid for bid in bolt_ids if str(bid) not in faulty_sensor_ids]
+            skipped_faulty = original_count - len(bolt_ids)
+            if skipped_faulty > 0:
+                logger.info(f"训练排除 {skipped_faulty} 个故障设备传感器")
+
         results = {
             'total': len(bolt_ids), 'success': 0, 'failed': 0,
             'skipped': 0, 'details': [], 'combined_metrics': defaultdict(list)
@@ -1167,6 +1183,25 @@ class TrainingService:
         self, session_id, tenant_id, force_retrain, training_config, is_incremental
     ):
         flange_ids = self._get_all_flange_ids_fixed(tenant_id)
+
+        faulty_sensor_ids = set()
+        try:
+            from app.services.device_health_service import get_device_health_service
+            dh_service = get_device_health_service()
+            faulty_sensor_ids = dh_service.get_faulty_sensor_ids(tenant_id=tenant_id)
+        except Exception as e:
+            logger.warning(f"获取故障设备列表失败，跳过法兰面设备过滤: {e}")
+
+        if faulty_sensor_ids:
+            original_count = len(flange_ids)
+            flange_ids = [
+                fid for fid in flange_ids
+                if not any(str(sid) in faulty_sensor_ids for sid in fid.split('-'))
+            ]
+            skipped_faulty = original_count - len(flange_ids)
+            if skipped_faulty > 0:
+                logger.info(f"法兰面训练排除 {skipped_faulty} 个含故障设备的法兰面")
+
         results = {
             'total': len(flange_ids), 'success': 0, 'failed': 0,
             'skipped': 0, 'details': []

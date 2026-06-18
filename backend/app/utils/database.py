@@ -2747,6 +2747,111 @@ class HPONodeOverride(Base):
     )
 
 
+# ============================================================
+# 采集器/传感器设备健康监控模块 ORM 模型
+# ============================================================
+
+class CollectorHeartbeat(Base):
+    """
+    采集器心跳表模型
+
+    对应数据库表: sc_collector_heartbeat
+    存储采集器/传感器的心跳状态，包括最后数据时间、预期采样间隔、连续缺失次数等。
+    用于判定设备离线、卡死、跳变等异常。
+    """
+    __tablename__ = 'sc_collector_heartbeat'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    collector_id = Column(String(100), nullable=False, comment='采集器ID')
+    sensor_id = Column(String(100), nullable=False, comment='传感器/螺栓ID')
+    device_type = Column(String(20), default='collector', comment='设备类型 collector/sensor')
+    device_name = Column(String(200), comment='设备名称')
+
+    last_data_time = Column(DateTime, comment='最后收到数据的时间')
+    expected_interval_seconds = Column(Float, default=60.0, comment='预期采样间隔（秒）')
+    consecutive_missing_count = Column(Integer, default=0, comment='连续缺失次数')
+
+    last_value = Column(Float, comment='最后一次采样的数值')
+    previous_value = Column(Float, comment='倒数第二次采样的数值')
+    stuck_count = Column(Integer, default=0, comment='连续数值不变次数')
+    jump_count = Column(Integer, default=0, comment='跳变次数')
+
+    health_status = Column(String(20), default='healthy', comment='健康状态 healthy/offline/stuck/jump/degraded')
+    fault_types = Column(Text, comment='当前故障类型列表 JSON，如 ["offline","jump"]')
+    last_fault_time = Column(DateTime, comment='最近一次故障发生时间')
+    recovery_time = Column(DateTime, comment='最近一次恢复时间')
+
+    confidence_penalty = Column(Float, default=1.0, comment='置信度惩罚系数 0-1，1=无惩罚')
+    excluded_from_training = Column(Boolean, default=False, comment='是否排除出训练数据')
+
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_hb_collector', 'collector_id'),
+        Index('idx_hb_sensor', 'sensor_id'),
+        Index('idx_hb_collector_sensor', 'collector_id', 'sensor_id', unique=True),
+        Index('idx_hb_status', 'health_status'),
+        Index('idx_hb_last_data', 'last_data_time'),
+        Index('idx_hb_excluded', 'excluded_from_training'),
+        Index('idx_hb_tenant', 'tenant_id'),
+    )
+
+
+class DeviceFaultAlert(Base):
+    """
+    设备故障告警表模型
+
+    对应数据库表: sc_device_fault_alerts
+    存储 device_fault 类型的设备异常告警，与预紧力预警区分。
+    告警类型包括离线(offline)、卡死(stuck)、跳变(jump)。
+    """
+    __tablename__ = 'sc_device_fault_alerts'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    alert_no = Column(String(50), unique=True, comment='告警编号')
+    collector_id = Column(String(100), nullable=False, comment='采集器ID')
+    sensor_id = Column(String(100), nullable=False, comment='传感器/螺栓ID')
+
+    fault_type = Column(String(20), nullable=False, comment='故障类型 offline/stuck/jump')
+    fault_level = Column(Integer, default=2, comment='故障级别 1=提示 2=警告 3=严重 4=紧急')
+
+    title = Column(String(200), comment='告警标题')
+    content = Column(Text, comment='告警内容')
+    evidence = Column(Text, comment='故障证据 JSON')
+
+    last_value = Column(Float, comment='最后采样值')
+    expected_value_range = Column(String(100), comment='期望值范围 JSON')
+    offline_duration_seconds = Column(Float, comment='离线时长（秒）')
+    consecutive_missing = Column(Integer, comment='连续缺失次数')
+    stuck_count = Column(Integer, comment='卡死次数')
+    jump_magnitude = Column(Float, comment='跳变幅度')
+
+    status = Column(String(20), default='pending', comment='状态 pending/acknowledged/resolved/ignored')
+    handler_id = Column(String(50), comment='处理人ID')
+    handler_name = Column(String(100), comment='处理人姓名')
+    handle_time = Column(DateTime, comment='处理时间')
+    handle_note = Column(Text, comment='处理备注')
+
+    silence_until = Column(DateTime, comment='静默截止时间')
+    is_auto_resolved = Column(Boolean, default=False, comment='是否自动恢复')
+
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_dfa_collector', 'collector_id'),
+        Index('idx_dfa_sensor', 'sensor_id'),
+        Index('idx_dfa_fault_type', 'fault_type'),
+        Index('idx_dfa_status', 'status'),
+        Index('idx_dfa_time', 'create_time'),
+        Index('idx_dfa_level', 'fault_level'),
+        Index('idx_dfa_tenant', 'tenant_id'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器类

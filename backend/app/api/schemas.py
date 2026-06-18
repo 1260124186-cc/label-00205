@@ -5722,3 +5722,99 @@ class TeamCalendarResponse(BaseModel):
     month_total_hours: float = Field(..., description="本月总工时")
     month_capacity_hours: float = Field(..., description="本月可用工时")
     month_utilization_rate: float = Field(..., description="本月工时利用率")
+
+
+class DeviceHeartbeatRegisterRequest(BaseModel):
+    collector_id: str = Field(..., description="采集器ID")
+    sensor_id: str = Field(..., description="传感器/螺栓ID")
+    device_type: str = Field(default="collector", description="设备类型 collector/sensor")
+    device_name: Optional[str] = Field(None, description="设备名称")
+    expected_interval_seconds: float = Field(default=60.0, description="预期采样间隔（秒）")
+
+
+class DeviceHeartbeatRecordRequest(BaseModel):
+    collector_id: str = Field(..., description="采集器ID")
+    sensor_id: str = Field(..., description="传感器/螺栓ID")
+    value: float = Field(..., description="当前采样数值")
+    timestamp: Optional[str] = Field(None, description="数据时间戳 ISO格式")
+
+
+class DeviceHealthQueryRequest(BaseModel):
+    collector_id: Optional[str] = Field(None, description="采集器ID过滤")
+    sensor_id: Optional[str] = Field(None, description="传感器ID过滤")
+    health_status: Optional[str] = Field(None, description="健康状态过滤 healthy/offline/stuck/jump/degraded")
+    excluded_from_training: Optional[bool] = Field(None, description="是否被排除出训练")
+    page: int = Field(default=1, ge=1, description="页码")
+    page_size: int = Field(default=20, ge=1, le=100, description="每页数量")
+
+
+class DeviceHeartbeatSchema(BaseModel):
+    id: int
+    collector_id: str
+    sensor_id: str
+    device_type: str
+    device_name: Optional[str]
+    last_data_time: Optional[str]
+    expected_interval_seconds: float
+    consecutive_missing_count: int
+    last_value: Optional[float]
+    previous_value: Optional[float]
+    stuck_count: int
+    jump_count: int
+    health_status: str
+    fault_types: Optional[str]
+    last_fault_time: Optional[str]
+    recovery_time: Optional[str]
+    confidence_penalty: float
+    excluded_from_training: bool
+
+
+class DeviceHealthListResponse(BaseModel):
+    total: int = Field(..., description="总数")
+    items: List[DeviceHeartbeatSchema] = Field(default_factory=list, description="设备健康列表")
+
+
+class DeviceFaultAlertHandleRequest(BaseModel):
+    alert_id: int = Field(..., description="告警ID")
+    action: str = Field(..., description="处理动作 acknowledge/resolve/ignore")
+    handler_name: Optional[str] = Field(None, description="处理人姓名")
+    handle_note: Optional[str] = Field(None, description="处理备注")
+
+
+class DeviceFaultAlertQueryRequest(BaseModel):
+    collector_id: Optional[str] = Field(None, description="采集器ID过滤")
+    sensor_id: Optional[str] = Field(None, description="传感器ID过滤")
+    fault_type: Optional[str] = Field(None, description="故障类型过滤 offline/stuck/jump")
+    status: Optional[str] = Field(None, description="告警状态过滤 pending/acknowledged/resolved/ignored")
+    page: int = Field(default=1, ge=1, description="页码")
+    page_size: int = Field(default=20, ge=1, le=100, description="每页数量")
+
+
+class DeviceFaultAlertSchema(BaseModel):
+    id: int
+    alert_no: str
+    collector_id: str
+    sensor_id: str
+    fault_type: str
+    fault_level: int
+    title: Optional[str]
+    content: Optional[str]
+    evidence: Optional[str]
+    last_value: Optional[float]
+    offline_duration_seconds: Optional[float]
+    consecutive_missing: Optional[int]
+    stuck_count: Optional[int]
+    jump_magnitude: Optional[float]
+    status: str
+    handler_id: Optional[str]
+    handler_name: Optional[str]
+    handle_time: Optional[str]
+    handle_note: Optional[str]
+    silence_until: Optional[str]
+    is_auto_resolved: bool
+    created_at: Optional[str]
+
+
+class DeviceFaultAlertListResponse(BaseModel):
+    total: int = Field(..., description="总数")
+    items: List[DeviceFaultAlertSchema] = Field(default_factory=list, description="告警列表")

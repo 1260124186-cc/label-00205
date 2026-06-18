@@ -897,6 +897,22 @@ class PredictionOrchestrator:
             condition=condition_for_risk,
         )
 
+        # Step 4.5: 设备健康置信度惩罚
+        try:
+            from app.services.device_health_service import get_device_health_service
+            dh_service = get_device_health_service()
+            dh_penalty = dh_service.get_confidence_penalty(str(bolt_id), tenant_id=tenant_id)
+            if dh_penalty < 1.0:
+                original_confidence = confidence
+                confidence = confidence * dh_penalty
+                logger.info(
+                    f"设备健康置信度惩罚: 螺栓 {bolt_id}, "
+                    f"惩罚系数={dh_penalty:.2f}, "
+                    f"置信度 {original_confidence:.3f} → {confidence:.3f}"
+                )
+        except Exception as e:
+            logger.debug(f"设备健康惩罚查询失败，跳过: {e}")
+
         # Step 5: 应用预警策略（融合工况信息）
         final_status_code, final_status = self._apply_warning_with_condition(
             original_status_code=original_status_code,
@@ -1358,6 +1374,22 @@ class PredictionOrchestrator:
             node_type='bolt',
             node_id=bolt_id,
         )
+
+        # ============== Step 4.5: 设备健康置信度惩罚 ==============
+        try:
+            from app.services.device_health_service import get_device_health_service
+            dh_service = get_device_health_service()
+            dh_penalty = dh_service.get_confidence_penalty(str(bolt_id))
+            if dh_penalty < 1.0:
+                original_confidence = confidence
+                confidence = confidence * dh_penalty
+                logger.info(
+                    f"设备健康置信度惩罚(多变量): 螺栓 {bolt_id}, "
+                    f"惩罚系数={dh_penalty:.2f}, "
+                    f"置信度 {original_confidence:.3f} → {confidence:.3f}"
+                )
+        except Exception as e:
+            logger.debug(f"设备健康惩罚查询失败，跳过: {e}")
 
         # ============== Step 5: 预警策略 ==============
         final_status_code, final_status = self.warning_policy.apply(
@@ -2087,6 +2119,22 @@ class PredictionOrchestrator:
             condition=flange_condition,
             lstm_probs=None,
         )
+
+        # Step 3.5: 设备健康置信度惩罚
+        try:
+            from app.services.device_health_service import get_device_health_service
+            dh_service = get_device_health_service()
+            dh_penalty = dh_service.get_confidence_penalty(str(flange_id))
+            if dh_penalty < 1.0:
+                original_confidence = confidence
+                confidence = confidence * dh_penalty
+                logger.info(
+                    f"设备健康置信度惩罚: 法兰面 {flange_id}, "
+                    f"惩罚系数={dh_penalty:.2f}, "
+                    f"置信度 {original_confidence:.3f} → {confidence:.3f}"
+                )
+        except Exception as e:
+            logger.debug(f"设备健康惩罚查询失败，跳过: {e}")
 
         # Step 4: 应用预警策略
         final_status_code, final_status = self._apply_warning_with_condition(
