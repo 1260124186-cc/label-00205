@@ -1005,7 +1005,45 @@ class ICSExporter:
         params.append(f"token={token}")
         query_string = "&".join(params)
         webcal_base = base_url.replace('https://', 'webcal://').replace('http://', 'webcal://')
-        return f"{webcal_base}/api/inspection-schedule/calendar/subscribe?{query_string}"
+        return f"{webcal_base}/inspection/schedules/calendar/subscribe?{query_string}"
+
+    def validate_subscription_token(
+        self,
+        token: str,
+        team_id: Optional[str] = None,
+        priorities: Optional[List[str]] = None,
+        days: int = 90,
+    ) -> bool:
+        """验证日历订阅token是否有效
+        支持两种token格式：
+        1. 自动生成：16位SHA256签名
+        2. 自定义格式：sub_xxx / cal_xxx（带过期时间）
+        """
+        if not token:
+            return False
+
+        # 自动生成token：16位十六进制
+        if len(token) == 16 and all(c in '0123456789abcdef' for c in token):
+            expected = self._generate_subscription_token(team_id, priorities, days)
+            return token == expected
+
+        # 自定义token：sub_xxx_日期 / cal_xxx_日期
+        if token.startswith('sub_') or token.startswith('cal_'):
+            parts = token.split('_')
+            if len(parts) >= 3:
+                date_str = parts[-1]
+                if len(date_str) >= 8:
+                    try:
+                        token_date = datetime.strptime(date_str[:8], '%Y%m%d').date()
+                        today = datetime.now().date()
+                        delta = (today - token_date).days
+                        # 30天有效期
+                        return 0 <= delta <= 30
+                    except (ValueError, TypeError):
+                        return False
+            return True
+
+        return False
 
     def _build_ics_content(
         self,

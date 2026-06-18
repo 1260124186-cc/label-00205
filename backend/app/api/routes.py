@@ -22,7 +22,7 @@ import torch
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends, Request, Body
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends, Request, Body, Response
 from loguru import logger
 
 from app.api.auth import get_tenant_context, revoke_tenant_token, verify_api_key, require_permission, api_key_manager, per_key_rate_limiter, audit_logger, APIKeyManager
@@ -13038,6 +13038,106 @@ async def get_calendar_subscription_url(team_id: str):
         raise
     except Exception as e:
         logger.error(f"获取日历订阅URL失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/inspection/schedules/calendar/subscribe",
+    tags=["智能复检排程"],
+    summary="日历订阅端点（返回ICS文件）",
+    response_class=Response,
+)
+async def calendar_subscribe_endpoint(
+    team_id: Optional[str] = Query(None, description="班组ID"),
+    priorities: Optional[str] = Query(None, description="优先级过滤，逗号分隔：immediate,urgent,attention,routine"),
+    days: int = Query(90, ge=1, le=365, description="未来天数"),
+    token: str = Query(..., description="订阅令牌"),
+):
+    """
+    日历订阅端点 - 返回 ICS 格式日历文件
+
+    Apple Calendar / Google Calendar / Outlook 会周期性 GET 此 URL 拉取最新排程。
+
+    Query 参数:
+    - team_id: 班组ID，不填则返回所有班组
+    - priorities: 优先级过滤，逗号分隔，如 "urgent,attention"
+    - days: 未来天数，1-365，默认90
+    - token: 订阅令牌（必需，30天有效期）
+    """
+    try:
+        from app.services.inspection_scheduler import InspectionScheduleService
+        service = get_inspection_schedule_service()
+
+        priority_list: Optional[List[str]] = None
+        if priorities:
+            priority_list = [p.strip() for p in priorities.split(',') if p.strip()]
+
+        # 1. Token 验证
+        token_valid = service.ics_exporter.validate_subscription_token(
+            token=token,
+            team_id=team_id,
+            priorities=priority_list,
+            days=days,
+        )
+        if not token_valid:
+            logger.warning(f"日历订阅token无效: team_id={team_id}, token={token}")
+            raise HTTPException(status_code=401, detail="无效或已过期的订阅令牌")
+
+        # 2. 查询排程任务
+        start_date = datetime.now()
+        end_date = start_date + timedelta(days=days)
+        tasks, total = service.list_schedules(
+            team_id=team_id,
+            start_date=start_date,
+            end_date=end_date,
+            limit=2000,
+        )
+
+        # 3. 优先级过滤
+        if priority_list:
+            priority_set = set(p.lower() for p in priority_list)
+            tasks = [t for t in tasks if t.priority.lower() in priority_set]
+
+        # 4. 过滤冲突任务
+        tasks = [t for t in tasks if not t.conflict_detected]
+
+        # 5. 生成 ICS
+        cal_name_parts = ['检验排程']
+        if team_id:
+            cal_name_parts.append(f'班组{team_id}')
+        cal_name_parts.append(f'未来{days}天')
+        calendar_name = '_'.join(cal_name_parts)
+
+        ics_content = service.ics_exporter.export_batch(
+            tasks=tasks,
+            calendar_name=calendar_name,
+            calendar_description=f"智能复检排程日历 - {calendar_name}",
+            include_alarms=True,
+            alarm_minutes_before=[1440, 60],
+            include_confidential_info=False,
+        )
+
+        # 6. 返回 ICS 文件
+        filename = f"inspection_schedule_{team_id or 'all'}_{datetime.now().strftime('%Y%m%d')}.ics"
+        headers = {
+            'Content-Disposition': f"inline; filename=\"{filename}\"",
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'Last-Modified': datetime.now().strftime('%a, %d %b %Y %H:%M:%S GMT'),
+        }
+
+        logger.info(f"日历订阅请求: team_id={team_id}, priorities={priority_list}, days={days}, tasks={len(tasks)}")
+
+        return Response(
+            content=ics_content,
+            media_type='text/calendar; charset=utf-8',
+            headers=headers,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"日历订阅失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
