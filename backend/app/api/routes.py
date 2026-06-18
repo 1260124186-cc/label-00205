@@ -244,6 +244,7 @@ from app import __version__
 
 # 创建路由器
 router = APIRouter(dependencies=[Depends(verify_api_key)])
+public_router = APIRouter(tags=["智能复检排程"])
 
 # 服务实例
 prediction_service = None
@@ -13041,10 +13042,9 @@ async def get_calendar_subscription_url(team_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get(
+@public_router.get(
     "/inspection/schedules/calendar/subscribe",
-    tags=["智能复检排程"],
-    summary="日历订阅端点（返回ICS文件）",
+    summary="日历订阅端点（返回ICS文件，无需API Key）",
     response_class=Response,
 )
 async def calendar_subscribe_endpoint(
@@ -13054,15 +13054,16 @@ async def calendar_subscribe_endpoint(
     token: str = Query(..., description="订阅令牌"),
 ):
     """
-    日历订阅端点 - 返回 ICS 格式日历文件
+    日历订阅端点 - 返回 ICS 格式日历文件（公开端点，无需 API Key）
 
+    使用独立的订阅令牌(token)进行鉴权，日历客户端可直接 GET 访问。
     Apple Calendar / Google Calendar / Outlook 会周期性 GET 此 URL 拉取最新排程。
 
     Query 参数:
     - team_id: 班组ID，不填则返回所有班组
     - priorities: 优先级过滤，逗号分隔，如 "urgent,attention"
     - days: 未来天数，1-365，默认90
-    - token: 订阅令牌（必需，30天有效期）
+    - token: 订阅令牌（必需，30天有效期，由日历订阅URL接口签发）
     """
     try:
         from app.services.inspection_scheduler import InspectionScheduleService

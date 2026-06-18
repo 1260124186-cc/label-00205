@@ -1005,7 +1005,7 @@ class ICSExporter:
         params.append(f"token={token}")
         query_string = "&".join(params)
         webcal_base = base_url.replace('https://', 'webcal://').replace('http://', 'webcal://')
-        return f"{webcal_base}/inspection/schedules/calendar/subscribe?{query_string}"
+        return f"{webcal_base}/api/v1/inspection/schedules/calendar/subscribe?{query_string}"
 
     def validate_subscription_token(
         self,

@@ -274,6 +274,9 @@ def create_app() -> FastAPI:
     app.include_router(sso_router)
     app.include_router(timeseries_router, prefix="/api/v1")
 
+    from app.api.routes import public_router
+    app.include_router(public_router, prefix="/api/v1")
+
     from app.bff.schema import create_bff_router
     bff_router = create_bff_router()
     app.include_router(bff_router, prefix="/graphql")
