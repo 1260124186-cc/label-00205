@@ -41,7 +41,8 @@ from app.services.prediction.warning_strategy import WarningStrategyPolicy
 from app.services.prediction.repository import PredictionRepository
 from app.core.model_version import version_manager
 from app.core.prometheus import metrics
-from app.middleware import set_bolt_id
+from app.middleware import set_bolt_id, get_effective_tenant_id
+from app.services.tenant import get_active_model_path, not_found_404
 from app.utils.config import config
 
 _data_quality_engine = None
@@ -115,12 +116,12 @@ class PredictionOrchestrator:
             'working_condition.min_confidence_for_adjustment', 0.6
         )
 
-        # 模型缓存：按版本缓存 {node_id: {version: model}}
-        self.bolt_models: Dict[str, Dict[str, BoltLSTMModel]] = {}
-        self.flange_models: Dict[str, Dict[str, FlangeAttentionModel]] = {}
+        # 模型缓存：(tenant_id, node_id) → {version: model}
+        self.bolt_models: Dict[Tuple[Optional[int], str], Dict[str, BoltLSTMModel]] = {}
+        self.flange_models: Dict[Tuple[Optional[int], str], Dict[str, FlangeAttentionModel]] = {}
 
-        # 集成学习模型缓存 {bolt_id: {version: BoltEnsemblePredictor}}
-        self.bolt_ensembles: Dict[str, Dict[str, BoltEnsemblePredictor]] = {}
+        # 集成学习模型缓存 {(tenant_id, bolt_id): {version: BoltEnsemblePredictor}}
+        self.bolt_ensembles: Dict[Tuple[Optional[int], str], Dict[str, BoltEnsemblePredictor]] = {}
 
         # Ensemble 配置
         self.ensemble_enabled = config.get('ensemble.enabled', True)
@@ -128,91 +129,149 @@ class PredictionOrchestrator:
             'ensemble.confidence_threshold', 0.7
         )
 
-        logger.info("预测编排器初始化完成")
+        logger.info("预测编排器初始化完成（租户隔离版）")
 
     # ---------- 模型管理 ----------
 
-    def get_bolt_model(self, bolt_id: str, version: Optional[str] = None) -> BoltLSTMModel:
+    def get_bolt_model(
+        self,
+        bolt_id: str,
+        version: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> BoltLSTMModel:
         """
-        获取或创建螺栓 LSTM 模型（带版本缓存）
+        获取或创建螺栓 LSTM 模型（带版本缓存 + 租户隔离）
 
         Args:
             bolt_id: 螺栓ID
             version: 版本号，None 表示使用当前活动版本（默认路径）
+            tenant_id: 租户ID（None则从上下文解析）
 
         Returns:
             BoltLSTMModel 实例
         """
-        cache_key = version or 'active'
-        if bolt_id not in self.bolt_models:
-            self.bolt_models[bolt_id] = {}
+        effective_tid = tenant_id or get_effective_tenant_id()
+        cache_key_node: Tuple[Optional[int], str] = (effective_tid, str(bolt_id))
+        cache_key_ver = version or 'active'
 
-        if cache_key not in self.bolt_models[bolt_id]:
+        if cache_key_node not in self.bolt_models:
+            self.bolt_models[cache_key_node] = {}
+
+        if cache_key_ver not in self.bolt_models[cache_key_node]:
             if version is None:
-                model = BoltLSTMModel.load_or_create(bolt_id)
+                model = self._load_active_bolt_model(str(bolt_id), effective_tid)
             else:
-                model = self._load_versioned_bolt_model(bolt_id, version)
-            self.bolt_models[bolt_id][cache_key] = model
+                model = self._load_versioned_bolt_model(str(bolt_id), version, effective_tid)
+            self.bolt_models[cache_key_node][cache_key_ver] = model
 
-        return self.bolt_models[bolt_id][cache_key]
+        return self.bolt_models[cache_key_node][cache_key_ver]
 
-    def get_flange_model(self, flange_id: str, version: Optional[str] = None) -> FlangeAttentionModel:
+    @staticmethod
+    def _load_active_bolt_model(bolt_id: str, tenant_id: Optional[int]) -> BoltLSTMModel:
+        """加载活动版本螺栓模型（按租户路径）"""
+        model = BoltLSTMModel(bolt_id=bolt_id)
+        model_path = get_active_model_path('bolt', bolt_id, tenant_id)
+
+        if model_path.exists():
+            metadata = model.load(str(model_path))
+            logger.info(
+                f"已加载螺栓模型: tenant={tenant_id}, bolt={bolt_id}, "
+                f"feature_dim={metadata.get('feature_dim', 0)}"
+            )
+        else:
+            logger.info(
+                f"模型不存在，创建新的螺栓模型: tenant={tenant_id}, bolt={bolt_id}"
+            )
+        return model
+
+    def get_flange_model(
+        self,
+        flange_id: str,
+        version: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> FlangeAttentionModel:
         """
-        获取或创建法兰面 Attention 模型（带版本缓存）
+        获取或创建法兰面 Attention 模型（带版本缓存 + 租户隔离）
 
         Args:
             flange_id: 法兰面ID
             version: 版本号，None 表示使用当前活动版本（默认路径）
+            tenant_id: 租户ID
 
         Returns:
             FlangeAttentionModel 实例
         """
-        cache_key = version or 'active'
-        if flange_id not in self.flange_models:
-            self.flange_models[flange_id] = {}
+        effective_tid = tenant_id or get_effective_tenant_id()
+        cache_key_node: Tuple[Optional[int], str] = (effective_tid, str(flange_id))
+        cache_key_ver = version or 'active'
 
-        if cache_key not in self.flange_models[flange_id]:
+        if cache_key_node not in self.flange_models:
+            self.flange_models[cache_key_node] = {}
+
+        if cache_key_ver not in self.flange_models[cache_key_node]:
             if version is None:
-                model = FlangeAttentionModel.load_or_create(flange_id)
+                model = self._load_active_flange_model(str(flange_id), effective_tid)
             else:
-                model = self._load_versioned_flange_model(flange_id, version)
-            self.flange_models[flange_id][cache_key] = model
+                model = self._load_versioned_flange_model(str(flange_id), version, effective_tid)
+            self.flange_models[cache_key_node][cache_key_ver] = model
 
-        return self.flange_models[flange_id][cache_key]
+        return self.flange_models[cache_key_node][cache_key_ver]
+
+    @staticmethod
+    def _load_active_flange_model(flange_id: str, tenant_id: Optional[int]) -> FlangeAttentionModel:
+        """加载活动版本法兰面模型（按租户路径）"""
+        model = FlangeAttentionModel(flange_id=flange_id)
+        model_path = get_active_model_path('flange', flange_id, tenant_id)
+
+        if model_path.exists():
+            model.load(str(model_path))
+            logger.info(
+                f"已加载法兰面模型: tenant={tenant_id}, flange={flange_id}"
+            )
+        else:
+            logger.info(
+                f"模型不存在，创建新的法兰面模型: tenant={tenant_id}, flange={flange_id}"
+            )
+        return model
 
     def get_bolt_ensemble(
-        self, bolt_id: str, version: Optional[str] = None
+        self,
+        bolt_id: str,
+        version: Optional[str] = None,
+        tenant_id: Optional[int] = None,
     ) -> BoltEnsemblePredictor:
         """
-        获取或创建螺栓集成学习预测器（带版本缓存）
-
-        Args:
-            bolt_id: 螺栓ID
-            version: 版本号，None 表示使用当前活动版本
-
-        Returns:
-            BoltEnsemblePredictor 实例
+        获取或创建螺栓集成学习预测器（带版本缓存 + 租户隔离）
         """
-        cache_key = version or 'active'
-        if bolt_id not in self.bolt_ensembles:
-            self.bolt_ensembles[bolt_id] = {}
+        effective_tid = tenant_id or get_effective_tenant_id()
+        cache_key_node: Tuple[Optional[int], str] = (effective_tid, str(bolt_id))
+        cache_key_ver = version or 'active'
 
-        if cache_key not in self.bolt_ensembles[bolt_id]:
+        if cache_key_node not in self.bolt_ensembles:
+            self.bolt_ensembles[cache_key_node] = {}
+
+        if cache_key_ver not in self.bolt_ensembles[cache_key_node]:
             ensemble = BoltEnsemblePredictor(
                 bolt_id=bolt_id,
                 version=version,
             )
-            self.bolt_ensembles[bolt_id][cache_key] = ensemble
+            self.bolt_ensembles[cache_key_node][cache_key_ver] = ensemble
 
-        return self.bolt_ensembles[bolt_id][cache_key]
+        return self.bolt_ensembles[cache_key_node][cache_key_ver]
 
-    def _load_versioned_bolt_model(self, bolt_id: str, version: str) -> BoltLSTMModel:
+    def _load_versioned_bolt_model(
+        self,
+        bolt_id: str,
+        version: str,
+        tenant_id: Optional[int] = None,
+    ) -> BoltLSTMModel:
         """
-        加载指定版本的螺栓模型
+        加载指定版本的螺栓模型（带租户隔离）
 
         Args:
             bolt_id: 螺栓ID
             version: 版本号
+            tenant_id: 租户ID
 
         Returns:
             BoltLSTMModel 实例
@@ -220,23 +279,33 @@ class PredictionOrchestrator:
         from app.services.model_version_service import get_model_version_service
 
         service = get_model_version_service()
-        model_path = service.get_model_file_path('bolt', bolt_id, version)
+        model_path = service.get_model_file_path(
+            'bolt', bolt_id, version, tenant_id=tenant_id
+        )
 
         if model_path is None or not os.path.exists(model_path):
-            raise FileNotFoundError(f"未找到版本 {version} 的螺栓模型: {bolt_id}")
+            raise FileNotFoundError(
+                f"未找到版本 {version} 的螺栓模型: tenant={tenant_id}, bolt={bolt_id}"
+            )
 
         model = BoltLSTMModel(bolt_id=bolt_id)
         model.load(model_path)
-        logger.info(f"已加载螺栓模型版本: {bolt_id} v{version}")
+        logger.info(f"已加载螺栓模型版本: tenant={tenant_id}, {bolt_id} v{version}")
         return model
 
-    def _load_versioned_flange_model(self, flange_id: str, version: str) -> FlangeAttentionModel:
+    def _load_versioned_flange_model(
+        self,
+        flange_id: str,
+        version: str,
+        tenant_id: Optional[int] = None,
+    ) -> FlangeAttentionModel:
         """
-        加载指定版本的法兰面模型
+        加载指定版本的法兰面模型（带租户隔离）
 
         Args:
             flange_id: 法兰面ID
             version: 版本号
+            tenant_id: 租户ID
 
         Returns:
             FlangeAttentionModel 实例
@@ -244,37 +313,63 @@ class PredictionOrchestrator:
         from app.services.model_version_service import get_model_version_service
 
         service = get_model_version_service()
-        model_path = service.get_model_file_path('flange', flange_id, version)
+        model_path = service.get_model_file_path(
+            'flange', flange_id, version, tenant_id=tenant_id
+        )
 
         if model_path is None or not os.path.exists(model_path):
-            raise FileNotFoundError(f"未找到版本 {version} 的法兰面模型: {flange_id}")
+            raise FileNotFoundError(
+                f"未找到版本 {version} 的法兰面模型: tenant={tenant_id}, flange={flange_id}"
+            )
 
         model = FlangeAttentionModel(flange_id=flange_id)
         model.load(model_path)
-        logger.info(f"已加载法兰面模型版本: {flange_id} v{version}")
+        logger.info(f"已加载法兰面模型版本: tenant={tenant_id}, {flange_id} v{version}")
         return model
 
-    def reload_model(self, model_type: str, node_id: str, version: Optional[str] = None) -> None:
+    def reload_model(
+        self,
+        model_type: str,
+        node_id: str,
+        version: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> None:
         """
-        重新加载模型（清除缓存）
+        重新加载模型（清除缓存，按租户隔离）
+        """
+        effective_tid = tenant_id or get_effective_tenant_id()
+        cache_key_node: Tuple[Optional[int], str] = (effective_tid, str(node_id))
+        cache_key_ver = version or 'active'
 
-        Args:
-            model_type: 模型类型 bolt/flange
-            node_id: 节点ID
-            version: 版本号，None 表示活动版本
-        """
-        cache_key = version or 'active'
         if model_type == 'bolt':
-            if node_id in self.bolt_models and cache_key in self.bolt_models[node_id]:
-                del self.bolt_models[node_id][cache_key]
-                logger.info(f"已清除螺栓模型缓存: {node_id} v{cache_key}")
-            if node_id in self.bolt_ensembles and cache_key in self.bolt_ensembles[node_id]:
-                del self.bolt_ensembles[node_id][cache_key]
-                logger.info(f"已清除螺栓Ensemble缓存: {node_id} v{cache_key}")
+            if (
+                cache_key_node in self.bolt_models
+                and cache_key_ver in self.bolt_models[cache_key_node]
+            ):
+                del self.bolt_models[cache_key_node][cache_key_ver]
+                logger.info(
+                    f"已清除螺栓模型缓存: tenant={effective_tid}, "
+                    f"{node_id} v{cache_key_ver}"
+                )
+            if (
+                cache_key_node in self.bolt_ensembles
+                and cache_key_ver in self.bolt_ensembles[cache_key_node]
+            ):
+                del self.bolt_ensembles[cache_key_node][cache_key_ver]
+                logger.info(
+                    f"已清除螺栓Ensemble缓存: tenant={effective_tid}, "
+                    f"{node_id} v{cache_key_ver}"
+                )
         elif model_type == 'flange':
-            if node_id in self.flange_models and cache_key in self.flange_models[node_id]:
-                del self.flange_models[node_id][cache_key]
-                logger.info(f"已清除法兰面模型缓存: {node_id} v{cache_key}")
+            if (
+                cache_key_node in self.flange_models
+                and cache_key_ver in self.flange_models[cache_key_node]
+            ):
+                del self.flange_models[cache_key_node][cache_key_ver]
+                logger.info(
+                    f"已清除法兰面模型缓存: tenant={effective_tid}, "
+                    f"{node_id} v{cache_key_ver}"
+                )
 
     # ---------- 螺栓预测 ----------
 

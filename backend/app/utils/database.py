@@ -758,7 +758,6 @@ class CmmsIntegrationConfig(Base):
     __tablename__ = 'sc_cmms_configs'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    tenant_id = Column(BigInteger, comment='租户ID')
     system_name = Column(String(200), nullable=False, comment='系统名称')
     system_type = Column(String(50), comment='系统类型')
     base_url = Column(String(500), comment='系统基础URL')
@@ -774,15 +773,15 @@ class CmmsIntegrationConfig(Base):
     sync_direction = Column(String(20), default='push', comment='同步方向')
     last_sync_time = Column(DateTime, comment='最后同步时间')
     sync_interval = Column(Integer, default=60, comment='同步间隔分钟')
+    tenant_id = Column(BigInteger, comment='租户ID')
     extra_info = Column(Text, comment='扩展信息 JSON')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
 
     __table_args__ = (
-        Index('idx_cmms_tenant', 'tenant_id'),
         Index('idx_cmms_enabled', 'enabled'),
+        Index('idx_cmms_tenant', 'tenant_id'),
         Index('idx_cmms_type', 'system_type'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1000,12 +999,13 @@ class TenantQuota(Base):
     max_storage_mb = Column(Integer, default=5120, comment='存储上限 MB')
     max_users = Column(Integer, default=50, comment='最大用户数')
     max_org_nodes = Column(Integer, default=500, comment='最大组织节点数')
-    max_training_concurrent = Column(Integer, default=2, comment='最大训练并发数')
+    max_training_concurrency = Column(Integer, default=2, comment='最大训练并发数')
     current_model_count = Column(Integer, default=0, comment='当前模型数')
     current_api_calls_today = Column(Integer, default=0, comment='今日API调用次数')
     current_storage_mb = Column(Float, default=0.0, comment='当前存储用量 MB')
     current_user_count = Column(Integer, default=0, comment='当前用户数')
     current_org_node_count = Column(Integer, default=0, comment='当前组织节点数')
+    current_training_concurrency = Column(Integer, default=0, comment='当前训练并发数')
     api_call_reset_date = Column(String(10), comment='API调用计数重置日期 YYYY-MM-DD')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
@@ -1294,7 +1294,6 @@ class WorkingConditionAudit(Base):
         Index('idx_wc_audit_expire', 'expire_time'),
         Index('idx_wc_audit_condition', 'from_condition', 'to_condition'),
         Index('idx_wc_audit_event_id', 'event_id'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1332,7 +1331,6 @@ class WorkingConditionBaseline(Base):
         Index('idx_wc_baseline_node', 'node_type', 'node_id'),
         Index('idx_wc_baseline_condition', 'condition'),
         Index('idx_wc_baseline_active', 'is_active'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1400,7 +1398,6 @@ class BoltHealthHistory(Base):
         Index('idx_bolt_health_time', 'create_time'),
         Index('idx_bolt_health_score', 'hi_score'),
         Index('idx_bolt_health_level', 'hi_level'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1435,7 +1432,6 @@ class FlangeHealthHistory(Base):
         Index('idx_flange_health_flange', 'flange_id'),
         Index('idx_flange_health_time', 'create_time'),
         Index('idx_flange_health_score', 'hi_score'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1472,7 +1468,6 @@ class RULPrediction(Base):
         Index('idx_rul_node', 'node_type', 'node_id'),
         Index('idx_rul_time', 'prediction_date'),
         Index('idx_rul_rul', 'rul_days'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1542,7 +1537,6 @@ class DegradationCurve(Base):
     __table_args__ = (
         Index('idx_degradation_node', 'node_type', 'node_id'),
         Index('idx_degradation_time', 'create_time'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1566,7 +1560,6 @@ class HealthConfig(Base):
 
     __table_args__ = (
         Index('idx_health_config_key', 'config_key'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -1767,7 +1760,6 @@ class AnomalyData(Base):
         Index('idx_anomaly_confirmed', 'is_confirmed'),
         Index('idx_anomaly_false_positive', 'is_false_positive'),
         Index('idx_anomaly_create_time', 'create_time'),
-        Index('idx_tenant', 'tenant_id'),
     )
 
 
@@ -2146,6 +2138,7 @@ class MultivariateBoltData(Base):
     __tablename__ = 'sc_bolt_multivariate_data'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     sensor_id = Column(BigInteger, nullable=False, comment='通道ID/螺栓ID')
     collector_id = Column(BigInteger, comment='采集器ID')
     splitter_num = Column(BigInteger, comment='分线器ID')
@@ -2169,10 +2162,12 @@ class MultivariateBoltData(Base):
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')
 
     __table_args__ = (
+        Index('idx_tenant_sensor_time_multi', 'tenant_id', 'sensor_id', 'timestamp'),
         Index('idx_sensor_time_multi', 'sensor_id', 'timestamp'),
         Index('idx_collector_multi', 'collector_id', 'splitter_num', 'position'),
         Index('idx_quality_multi', 'data_quality'),
         Index('idx_create_time_multi', 'create_time'),
+        Index('idx_tenant_multi', 'tenant_id'),
     )
 
     def to_channel_array(self, channel_list: List[str]) -> np.ndarray:
@@ -2215,6 +2210,7 @@ class MultivariateTrainingConfig(Base):
     __tablename__ = 'sc_multivariate_training_config'
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
     model_id = Column(String(100), nullable=False, comment='模型标识（bolt_id 或 flange_id）')
     model_type = Column(String(20), nullable=False, comment='模型类型: bolt/flange')
     input_channels = Column(Text, nullable=False, comment='输入通道配置 JSON')
@@ -2230,8 +2226,10 @@ class MultivariateTrainingConfig(Base):
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
 
     __table_args__ = (
+        Index('idx_tenant_model_config', 'tenant_id', 'model_id', 'model_type', 'is_active', unique=True),
         Index('idx_model_config', 'model_id', 'model_type', 'is_active', unique=True),
         Index('idx_model_type', 'model_type'),
+        Index('idx_tenant_config', 'tenant_id'),
     )
 
     @property

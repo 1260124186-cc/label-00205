@@ -8,10 +8,10 @@
 
 使用示例:
     from app.middleware import RequestContextMiddleware, get_request_id
-
+    
     # 在 FastAPI 应用中添加中间件
     app.add_middleware(RequestContextMiddleware)
-
+    
     # 获取当前请求 ID
     request_id = get_request_id()
 """
@@ -169,29 +169,29 @@ def clear_tenant_context() -> None:
 class RequestContextMiddleware(BaseHTTPMiddleware):
     """
     请求上下文中间件
-
+    
     为每个请求生成唯一的 request_id，并记录请求指标。
-
+    
     功能:
     1. 生成/传递 X-Request-ID
     2. 记录请求开始时间
     3. 采集 HTTP 请求指标（Prometheus）
     4. 计算请求耗时
     """
-
+    
     async def dispatch(self, request: Request, call_next):
         # 从请求头获取或生成 request_id
         request_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
         _request_id_var.set(request_id)
-
+        
         # 记录开始时间
         start_time = time.time()
         _request_start_time_var.set(start_time)
-
+        
         # 获取请求路径（去掉查询参数）
         path = request.url.path
         method = request.method
-
+        
         # 结构化日志 - 请求开始
         logger.bind(
             request_id=request_id,
@@ -199,20 +199,20 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             path=path,
             client_ip=request.client.host if request.client else 'unknown'
         ).info(f"Request started: {method} {path}")
-
+        
         try:
             # 处理请求
             response = await call_next(request)
-
+            
             # 计算耗时
             duration = time.time() - start_time
-
+            
             # 获取状态码
             status_code = str(response.status_code)
-
+            
             # 添加 request_id 到响应头
             response.headers['X-Request-ID'] = request_id
-
+            
             # 记录 Prometheus 指标
             metrics.record_http_request(
                 method=method,
@@ -220,7 +220,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 status_code=status_code,
                 duration=duration
             )
-
+            
             # 结构化日志 - 请求完成
             logger.bind(
                 request_id=request_id,
@@ -229,13 +229,13 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 status_code=status_code,
                 duration_ms=round(duration * 1000, 2)
             ).info(f"Request completed: {method} {path} - {status_code}")
-
+            
             return response
-
+            
         except Exception as e:
             # 计算耗时
             duration = time.time() - start_time
-
+            
             # 记录错误指标
             metrics.record_http_request(
                 method=method,
@@ -243,7 +243,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 status_code="500",
                 duration=duration
             )
-
+            
             # 结构化日志 - 请求错误
             logger.bind(
                 request_id=request_id,
@@ -252,30 +252,34 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 duration_ms=round(duration * 1000, 2),
                 error=str(e)
             ).exception(f"Request failed: {method} {path}")
-
+            
             raise
 
 
 class TenantContextMiddleware(BaseHTTPMiddleware):
     """
-    租户上下文中间件
+    租户上下文中间件（强隔离 Enforcement）
 
     为每个请求注入租户上下文：
     1. 从 JWT (Authorization: Bearer) 或 X-Tenant-API-Key 头解析租户ID
     2. 支持超级管理员审计模式（X-Audit-Tenant-Id 头）
     3. 将租户ID注入 contextvars，供下游业务代码使用
+    4. 租户状态（suspended/deleted）→ 404（防枚举）
+    5. 审计模式（只读）拦截所有 POST/PUT/DELETE/PATCH → 403
 
     认证优先级:
-    1. X-Tenant-API-Key: 租户 API Key 认证
-    2. Authorization: Bearer JWT 令牌认证
-    3. 支持超级管理员通过 X-Audit-Tenant-Id 进入审计模式
+    1. X-Tenant-API-Key: 租户 API Key 认证（适合服务/机器调用）
+    2. Authorization: Bearer JWT 令牌认证（适合用户登录）
+    3. X-Tenant-Token: 兼容旧版登录令牌
+    4. 无凭据：匿名（仅公开路径）
 
     安全策略:
-    - 跨租户访问返回 404（非 403，防止枚举攻击
-    - 超级管理员审计模式为只读
+    - 跨租户/无效租户/停用租户一律返回 404（非 403），防止枚举攻击
+    - 超级管理员审计模式为严格只读
+    - API 调用每日计数在验证后自动递增
     """
 
-    PUBLIC_PATHS = {"/health", "/metrics", "/docs", "/openapi.json", "/redoc", "/docs/oauth2-redirect"}
+    PUBLIC_PATHS = {"/health", "/metrics", "/docs", "/openapi.json", "/redoc"}
 
     SUPER_ADMIN_ROLES = {"super_admin", "platform_admin"}
 
@@ -284,7 +288,7 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
 
-        if path in self.PUBLIC_PATHS or path.startswith("/docs") or path.startswith("/redoc"):
+        if path in self.PUBLIC_PATHS:
             return await call_next(request)
 
         clear_tenant_context()
@@ -295,7 +299,25 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         is_super_admin_flag = False
 
         try:
-            tenant_id, user_id, user_role, is_super_admin_flag = await self._resolve_tenant_context(request)
+            (
+                tenant_id,
+                user_id,
+                user_role,
+                is_super_admin_flag,
+            ) = await self._resolve_tenant_context(request)
+
+            if tenant_id is not None and not is_super_admin_flag:
+                if not self._is_tenant_active(tenant_id):
+                    logger.bind(
+                        request_id=get_request_id(),
+                        tenant_id=tenant_id,
+                    ).warning("Tenant not active, returning 404")
+                    clear_tenant_context()
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=404,
+                        content={"detail": {"error": "NotFound", "message": "Resource not found"}},
+                    )
 
             if tenant_id:
                 set_tenant_context(tenant_id, user_id, user_role, is_super_admin_flag)
@@ -304,25 +326,17 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
                 if audit_tenant_id_header and is_super_admin_flag:
                     try:
                         audit_tenant_id = int(audit_tenant_id_header)
-                        from app.utils.database import get_db, Tenant
-                        with get_db() as db:
-                            if db is not None:
-                                target_tenant = db.query(Tenant).filter(
-                                    Tenant.id == audit_tenant_id,
-                                    Tenant.status == "active"
-                                ).first()
-                                if target_tenant:
-                                    set_audit_mode(audit_tenant_id)
-                                    logger.bind(
-                                        request_id=get_request_id(),
-                                        tenant_id=tenant_id,
-                                        audit_tenant_id=audit_tenant_id
-                                    ).info(f"Super admin audit mode: tenant_id={audit_tenant_id}")
-                                else:
-                                    logger.bind(
-                                        request_id=get_request_id(),
-                                        audit_tenant_id=audit_tenant_id
-                                    ).warning(f"Audit target tenant not found or inactive: {audit_tenant_id}")
+                        if not self._is_tenant_exists(audit_tenant_id):
+                            logger.warning(
+                                f"Super admin audit target tenant not found: {audit_tenant_id}"
+                            )
+                        else:
+                            set_audit_mode(audit_tenant_id)
+                            logger.bind(
+                                request_id=get_request_id(),
+                                super_tenant_id=tenant_id,
+                                audit_tenant_id=audit_tenant_id,
+                            ).info(f"Super admin audit mode: tenant_id={audit_tenant_id}")
                     except (ValueError, TypeError):
                         pass
 
@@ -330,26 +344,28 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
                     from fastapi import HTTPException
                     raise HTTPException(
                         status_code=403,
-                        detail={"error": "Forbidden", "message": "审计模式为只读，不允许修改操作"}
+                        detail={
+                            "error": "Forbidden",
+                            "message": "审计模式为只读，不允许修改操作 (Audit mode is read-only)",
+                            "audit_mode": True,
+                        },
                     )
-
-                if request.method in self.WRITE_METHODS and not is_super_admin_flag:
-                    self._check_api_quota(tenant_id)
 
             logger.bind(
                 request_id=get_request_id(),
                 tenant_id=get_effective_tenant_id(),
                 user_id=user_id,
                 user_role=user_role,
-                is_audit_mode=is_audit_mode()
-            ).debug(f"Tenant context resolved: tenant_id={get_effective_tenant_id()}")
+                is_super_admin=is_super_admin_flag,
+                is_audit_mode=is_audit_mode(),
+            ).debug(f"Tenant context resolved: effective_tenant_id={get_effective_tenant_id()}")
 
+        except HTTPException as he:
+            raise
         except Exception as e:
-            if isinstance(e, Exception) and e.__class__.__name__ == 'HTTPException':
-                raise
             logger.bind(
                 request_id=get_request_id(),
-                error=str(e)
+                error=str(e),
             ).warning(f"Failed to resolve tenant context: {e}")
 
         response = await call_next(request)
@@ -358,39 +374,23 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
 
         return response
 
-    def _check_api_quota(self, tenant_id: int) -> None:
-        """检查API调用配额"""
-        try:
-            from app.services.tenant import QuotaService
-            qs = QuotaService()
-            quota = qs.get_quota(tenant_id)
-            if quota and not qs.check_quota(tenant_id, 'api_call'):
-                from fastapi import HTTPException
-                raise HTTPException(
-                    status_code=429,
-                    detail={
-                        "error": "QuotaExceeded",
-                        "message": f"今日API调用已达上限 ({quota.max_api_calls_per_day})",
-                        "resource": "api_call",
-                    }
-                )
-        except Exception as e:
-            if e.__class__.__name__ == 'HTTPException':
-                raise
-
     async def _resolve_tenant_context(
         self, request: Request
     ) -> tuple[Optional[int], Optional[int], str, bool]:
         api_key = request.headers.get("X-Tenant-API-Key")
         if api_key:
             try:
-                from app.services.tenant import TenantAPIKeyService
+                from app.services.tenant import TenantAPIKeyService, QuotaService
                 svc = TenantAPIKeyService()
                 key_info = svc.validate_api_key(api_key)
                 if key_info:
-                    from app.services.tenant import QuotaService
                     QuotaService().increment_api_calls(key_info["tenant_id"])
-                    return key_info["tenant_id"], key_info.get("user_id"), "api_key", False
+                    return (
+                        key_info["tenant_id"],
+                        key_info.get("user_id"),
+                        "api_key",
+                        False,
+                    )
             except Exception as e:
                 logger.warning(f"Tenant API Key validation failed: {e}")
 
@@ -398,41 +398,97 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         if auth_header and auth_header.startswith("Bearer "):
             try:
                 token = auth_header[7:]
-                from app.services.sso.jwt_manager import jwt_manager
-                payload = jwt_manager.verify_token(token, "access")
+                from app.services.sso.jwt_manager import JWTManager
+                jwt_mgr = JWTManager()
+                payload = jwt_mgr.verify_token(token, "access")
                 if payload:
-                    subject = jwt_manager.get_subject(payload)
+                    subject = jwt_mgr.get_subject(payload)
                     if subject:
-                        tenant_id = subject.get("tenant_id")
-                        user_id = subject.get("user_id")
-                        role = subject.get("role", "")
-                        is_super = role in self.SUPER_ADMIN_ROLES
-                        return tenant_id, user_id, role, is_super
+                        tid = subject.get("tenant_id")
+                        uid = subject.get("user_id")
+                        role = str(subject.get("role", ""))
+                        is_super = role in self.SUPER_ADMIN_ROLES or bool(
+                            subject.get("is_super_admin")
+                        )
+                        try:
+                            from app.services.tenant import QuotaService
+                            if tid is not None:
+                                QuotaService().increment_api_calls(tid)
+                        except Exception:
+                            pass
+                        return tid, uid, role, is_super
             except Exception as e:
                 logger.warning(f"JWT validation failed: {e}")
 
         tenant_token = request.headers.get("X-Tenant-Token")
         if tenant_token:
             try:
-                from app.api.auth import verify_tenant_token
+                from app.api.auth import verify_tenant_token, QuotaService
                 token_info = verify_tenant_token(tenant_token)
                 if token_info:
                     role = token_info.get("role", "")
                     is_super = role in self.SUPER_ADMIN_ROLES
-                    return token_info["tenant_id"], token_info.get("user_id"), role, is_super
+                    try:
+                        tid = token_info.get("tenant_id")
+                        if tid is not None:
+                            QuotaService().increment_api_calls(tid)
+                    except Exception:
+                        pass
+                    return (
+                        token_info["tenant_id"],
+                        token_info.get("user_id"),
+                        role,
+                        is_super,
+                    )
             except Exception as e:
                 logger.warning(f"Tenant token validation failed: {e}")
 
         return None, None, "", False
 
+    @staticmethod
+    def _is_tenant_active(tenant_id: int) -> bool:
+        try:
+            from app.utils.database import get_db, Tenant
+            with get_db() as db:
+                if db is None:
+                    return True
+                tenant = (
+                    db.query(Tenant)
+                    .filter(
+                        Tenant.id == tenant_id,
+                        Tenant.status == "active",
+                    )
+                    .first()
+                )
+                return tenant is not None
+        except Exception as e:
+            logger.warning(f"Tenant status check failed: {e}")
+            return True
+
+    @staticmethod
+    def _is_tenant_exists(tenant_id: int) -> bool:
+        try:
+            from app.utils.database import get_db, Tenant
+            with get_db() as db:
+                if db is None:
+                    return False
+                return (
+                    db.query(Tenant.id)
+                    .filter(Tenant.id == tenant_id)
+                    .first()
+                    is not None
+                )
+        except Exception:
+            return False
+
 
 class StructuredLogFilter:
     """
     结构化日志过滤器
-
+    
     为 loguru 日志添加上下文信息。
     """
-
+    
     @staticmethod
     def patch(record: Dict[str, Any]) -> None:
         """
@@ -510,15 +566,4 @@ def setup_structured_logging() -> None:
         }
     )
 
-from app.middleware.tenant_isolation import (
-    TenantIsolationMixin,
-    enforce_tenant_ownership,
-    require_tenant_context,
-    require_write_permission,
-    QuotaEnforcer,
-    quota_enforcer,
-    get_tenant_model_path,
-    resolve_model_filename,
-)
-
-logger.info("Structured logging initialized")
+    logger.info("Structured logging initialized")

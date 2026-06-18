@@ -406,38 +406,69 @@ class QuotaService:
             )
             if not quota:
                 return None
+
+            old_concurrency_limit = quota.max_training_concurrency
+
             for k, v in kwargs.items():
                 if v is not None and hasattr(quota, k):
                     setattr(quota, k, v)
             db.flush()
+
+            new_concurrency_limit = quota.max_training_concurrency
+            if (
+                old_concurrency_limit != new_concurrency_limit
+                and new_concurrency_limit is not None
+            ):
+                try:
+                    from app.services.tenant import refresh_tenant_concurrency_limit
+
+                    refresh_tenant_concurrency_limit(tenant_id)
+                    logger.info(
+                        f"租户 {tenant_id} 训练并发上限已变更: "
+                        f"{old_concurrency_limit} → {new_concurrency_limit}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"刷新训练并发信号量失败（不影响配额存储）: {e}"
+                    )
+
             return quota
 
     def check_quota(self, tenant_id: int, resource: str) -> bool:
         quota = self.get_quota(tenant_id)
         if not quota:
             return False
+        try:
+            from app.services.tenant import check_hard_quota
+
+            result = check_hard_quota(tenant_id)
+        except Exception:
+            result = {}
+
         checks = {
-            "model": quota.current_model_count < quota.max_models,
-            "api_call": quota.current_api_calls_today < quota.max_api_calls_per_day,
-            "storage": quota.current_storage_mb < quota.max_storage_mb,
+            "model": (
+                result.get("models", {}).get("ok")
+                if result
+                else quota.current_model_count < quota.max_models
+            ),
+            "api_call": (
+                result.get("api_calls", {}).get("ok")
+                if result
+                else quota.current_api_calls_today < quota.max_api_calls_per_day
+            ),
+            "storage": (
+                result.get("storage", {}).get("ok")
+                if result
+                else quota.current_storage_mb < quota.max_storage_mb
+            ),
             "user": quota.current_user_count < quota.max_users,
             "org_node": quota.current_org_node_count < quota.max_org_nodes,
-            "training": True,
+            "training_concurrency": (
+                result.get("training_concurrency", {}).get("ok")
+                if result
+                else quota.current_training_concurrency < (quota.max_training_concurrency or 2)
+            ),
         }
-        if resource == "training":
-            try:
-                from app.utils.database import get_db, TrainingLog
-                with get_db() as db:
-                    if db is None:
-                        return True
-                    running_count = db.query(TrainingLog).filter(
-                        TrainingLog.tenant_id == tenant_id,
-                        TrainingLog.status.in_(['pending', 'running']),
-                    ).count()
-                    max_concurrent = getattr(quota, 'max_training_concurrent', 2)
-                    return running_count < max_concurrent
-            except Exception:
-                return True
         return checks.get(resource, False)
 
     def increment_api_calls(self, tenant_id: int) -> Optional[TenantQuota]:
@@ -456,6 +487,15 @@ class QuotaService:
                 quota.current_api_calls_today = 1
                 quota.api_call_reset_date = today
             else:
+                if (
+                    quota.max_api_calls_per_day is not None
+                    and quota.current_api_calls_today >= quota.max_api_calls_per_day
+                ):
+                    logger.info(
+                        f"租户 {tenant_id} 今日 API 调用已达上限: "
+                        f"{quota.current_api_calls_today}/{quota.max_api_calls_per_day}"
+                    )
+                    return quota
                 quota.current_api_calls_today += 1
             db.flush()
             return quota

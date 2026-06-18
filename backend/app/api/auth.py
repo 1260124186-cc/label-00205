@@ -804,7 +804,17 @@ def check_tenant_quota(resource: str) -> Callable:
         @wraps(func)
         async def wrapper(*args, request: Request = None, **kwargs):
             tenant_id = None
-            if request:
+
+            try:
+                from app.middleware import get_effective_tenant_id, is_audit_mode
+
+                tenant_id = get_effective_tenant_id()
+                if is_audit_mode():
+                    return await func(*args, **kwargs)
+            except Exception:
+                tenant_id = None
+
+            if not tenant_id and request:
                 token = request.headers.get("X-Tenant-Token")
                 api_key_str = request.headers.get("X-Tenant-API-Key")
                 if token:
@@ -819,16 +829,54 @@ def check_tenant_quota(resource: str) -> Callable:
                         tenant_id = key_info["tenant_id"]
 
             if tenant_id:
-                from app.services.tenant import QuotaService
-                quota_svc = QuotaService()
-                if not quota_svc.check_quota(tenant_id, resource):
-                    raise HTTPException(
-                        status_code=429,
-                        detail={
-                            "error": "QuotaExceeded",
-                            "message": f"租户 {resource} 配额已用尽",
-                        },
+                try:
+                    from app.services.tenant import (
+                        QuotaService,
+                        ensure_model_quota_available,
+                        check_hard_quota,
                     )
+
+                    if resource == "model":
+                        ensure_model_quota_available(tenant_id)
+                    else:
+                        hard_result = check_hard_quota(tenant_id)
+                        check_map = {
+                            "api_call": "api_calls",
+                            "storage": "storage",
+                            "training_concurrency": "training_concurrency",
+                            "user": "users",
+                            "org_node": "org_nodes",
+                        }
+                        key = check_map.get(resource)
+                        if key and hard_result.get(key, {}).get("ok") is False:
+                            detail = hard_result[key]
+                            raise HTTPException(
+                                status_code=429,
+                                detail={
+                                    "error": "QuotaExceeded",
+                                    "message": detail.get(
+                                        "message",
+                                        f"租户 {resource} 配额已用尽",
+                                    ),
+                                    "used": detail.get("used"),
+                                    "limit": detail.get("limit"),
+                                },
+                            )
+                        else:
+                            quota_svc = QuotaService()
+                            if not quota_svc.check_quota(tenant_id, resource):
+                                raise HTTPException(
+                                    status_code=429,
+                                    detail={
+                                        "error": "QuotaExceeded",
+                                        "message": f"租户 {resource} 配额已用尽",
+                                    },
+                                )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.warning(f"配额检查异常: {e}，继续执行请求")
+
             return await func(*args, **kwargs)
 
         return wrapper

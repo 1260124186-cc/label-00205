@@ -21,9 +21,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
+from fastapi import HTTPException
 from loguru import logger
 from sklearn.preprocessing import StandardScaler
 
@@ -34,15 +36,25 @@ from app.services.feature_engineering import FeatureEngineer
 from app.services.label_import import label_import_service
 from app.api.validators import get_validator, ValidationMode, format_validation_errors
 from app.utils.config import config
-from app.middleware import get_effective_tenant_id
-from app.middleware.tenant_isolation import get_tenant_model_path, resolve_model_filename, quota_enforcer
+from app.middleware import (
+    get_effective_tenant_id,
+    is_super_admin,
+    is_audit_mode,
+)
+from app.services.tenant import (
+    get_active_model_path,
+    acquire_training_slot,
+    enforce_tenant_access,
+    ensure_model_quota_available,
+    not_found_404,
+)
 from app.utils.database import (
     get_db,
     BoltData,
     MultivariateBoltData,
     MultivariateTrainingConfig,
     TrainingLog,
-    ModelVersionORM
+    ModelVersionORM,
 )
 
 _data_quality_engine = None
@@ -67,13 +79,11 @@ class TrainingService:
     def __init__(self):
         self.preprocessor = DataPreprocessor()
         self.feature_engineer = FeatureEngineer()
-        self.model_save_path = Path(config.get('model.save_path', './trained_models'))
-        self.model_save_path.mkdir(parents=True, exist_ok=True)
-
-        self._active_sessions: Dict[str, Dict[str, Any]] = {}
         self.training_config_template = config.get('model.training', {})
 
-        logger.info("增强版训练服务初始化完成")
+        self._active_sessions: Dict[str, Dict[str, Any]] = {}
+
+        logger.info("增强版训练服务初始化完成（租户隔离版）")
 
     def _generate_session_id(self) -> str:
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
@@ -100,7 +110,19 @@ class TrainingService:
         base_model_version: Optional[str] = None,
         freeze_layers: Optional[List[str]] = None
     ) -> str:
-        quota_enforcer.check_all_for_training()
+        if is_audit_mode():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Forbidden",
+                    "message": "审计模式为只读，无法启动训练任务",
+                    "audit_mode": True,
+                },
+            )
+
+        tenant_id = get_effective_tenant_id()
+        if tenant_id is None:
+            raise not_found_404()
 
         session_id = self._generate_session_id()
         merged_config = dict(self.training_config_template)
@@ -117,6 +139,7 @@ class TrainingService:
             with get_db() as db:
                 if db is not None:
                     log = TrainingLog(
+                        tenant_id=tenant_id,
                         session_id=session_id,
                         model_id=node_id or 'all',
                         model_type=model_type,
@@ -127,7 +150,6 @@ class TrainingService:
                         base_model_version=base_model_version,
                         freeze_layers=json.dumps(freeze_layers or []) if freeze_layers else None,
                         start_time=datetime.now(),
-                        tenant_id=get_effective_tenant_id(),
                         create_time=datetime.now()
                     )
                     db.add(log)
@@ -136,6 +158,7 @@ class TrainingService:
 
         self._active_sessions[session_id] = {
             'session_id': session_id,
+            'tenant_id': tenant_id,
             'model_type': model_type,
             'node_id': node_id,
             'status': 'pending',
@@ -155,7 +178,7 @@ class TrainingService:
         }
 
         logger.info(
-            f"训练任务已创建: session={session_id}, "
+            f"训练任务已创建: tenant={tenant_id}, session={session_id}, "
             f"type={model_type}, node={node_id or 'all'}, "
             f"incremental={is_incremental}"
         )
@@ -166,6 +189,10 @@ class TrainingService:
         session = self._active_sessions.get(session_id)
         if not session:
             return {'status': 'failed', 'error': f'会话不存在: {session_id}'}
+
+        tenant_id = session.get('tenant_id') or get_effective_tenant_id()
+        if tenant_id is None:
+            return {'status': 'failed', 'error': '缺少租户上下文'}
 
         session['status'] = 'running'
         self._update_session_status(session_id, 'running', {'start_time': datetime.now()})
@@ -179,45 +206,65 @@ class TrainingService:
         overall_start = time.time()
 
         try:
-            if model_type == 'bolt':
-                result = self._train_bolt_model_enhanced(
-                    session_id, node_id, force_retrain, training_config, is_incremental
-                )
-            elif model_type == 'flange':
-                result = self._train_flange_model_enhanced(
-                    session_id, node_id, force_retrain, training_config, is_incremental
-                )
-            else:
-                raise ValueError(f"未知模型类型: {model_type}")
+            with acquire_training_slot(tenant_id, timeout=300):
+                if model_type == 'bolt':
+                    result = self._train_bolt_model_enhanced(
+                        session_id, tenant_id, node_id, force_retrain, training_config, is_incremental
+                    )
+                elif model_type == 'flange':
+                    result = self._train_flange_model_enhanced(
+                        session_id, tenant_id, node_id, force_retrain, training_config, is_incremental
+                    )
+                else:
+                    raise ValueError(f"未知模型类型: {model_type}")
 
-            elapsed = time.time() - overall_start
-            result['total_training_time_seconds'] = round(elapsed, 2)
+                elapsed = time.time() - overall_start
+                result['total_training_time_seconds'] = round(elapsed, 2)
 
+                final_result = {
+                    'session_id': session_id,
+                    'tenant_id': tenant_id,
+                    'status': 'completed',
+                    **result
+                }
+
+                self._update_session_status(
+                    session_id, 'completed',
+                    {'end_time': datetime.now(), 'result': result}
+                )
+
+                self._save_model_version(
+                    session_id, tenant_id, model_type, node_id, result, is_incremental
+                )
+
+                logger.info(
+                    f"训练完成: tenant={tenant_id}, session={session_id}, "
+                    f"duration={elapsed:.1f}s, "
+                    f"best_val_acc={result.get('best_val_acc')}"
+                )
+
+        except HTTPException as he:
+            error_msg = str(he.detail) if isinstance(he.detail, str) else str(he.detail.get('message', he.detail))
+            error_stack = traceback.format_exc()
+            logger.error(f"训练失败(配额): tenant={tenant_id}, session={session_id}, error={error_msg}")
+            self._update_session_status(
+                session_id, 'failed',
+                {
+                    'end_time': datetime.now(),
+                    'error_message': error_msg,
+                    'error_stack': error_stack
+                }
+            )
             final_result = {
                 'session_id': session_id,
-                'status': 'completed',
-                **result
+                'tenant_id': tenant_id,
+                'status': 'failed',
+                'error': error_msg
             }
-
-            self._update_session_status(
-                session_id, 'completed',
-                {'end_time': datetime.now(), 'result': result}
-            )
-
-            self._save_model_version(
-                session_id, model_type, node_id, result, is_incremental
-            )
-
-            logger.info(
-                f"训练完成: session={session_id}, "
-                f"duration={elapsed:.1f}s, "
-                f"best_val_acc={result.get('best_val_acc')}"
-            )
-
         except Exception as e:
             error_msg = str(e)
             error_stack = traceback.format_exc()
-            logger.error(f"训练失败: session={session_id}, error={error_msg}")
+            logger.error(f"训练失败: tenant={tenant_id}, session={session_id}, error={error_msg}")
 
             self._update_session_status(
                 session_id, 'failed',
@@ -230,6 +277,7 @@ class TrainingService:
 
             final_result = {
                 'session_id': session_id,
+                'tenant_id': tenant_id,
                 'status': 'failed',
                 'error': error_msg
             }
@@ -248,13 +296,20 @@ class TrainingService:
             if extra_data:
                 self._active_sessions[session_id].update(extra_data)
 
+        current_tenant_id = None
+        if session_id in self._active_sessions:
+            current_tenant_id = self._active_sessions[session_id].get('tenant_id')
+
         try:
             with get_db() as db:
                 if db is None:
                     return
-                log = db.query(TrainingLog).filter(
+                log_q = db.query(TrainingLog).filter(
                     TrainingLog.session_id == session_id
-                ).first()
+                )
+                if current_tenant_id:
+                    log_q = log_q.filter(TrainingLog.tenant_id == current_tenant_id)
+                log = log_q.first()
                 if not log:
                     return
 
@@ -334,8 +389,12 @@ class TrainingService:
             logger.warning(f"更新训练日志状态失败: {e}")
 
     def get_training_status(self, session_id: str) -> Dict[str, Any]:
+        tenant_id = get_effective_tenant_id()
+
         if session_id in self._active_sessions:
             s = self._active_sessions[session_id]
+            if tenant_id and s.get('tenant_id') != tenant_id:
+                raise not_found_404()
             return {
                 'session_id': session_id,
                 'model_type': s['model_type'],
@@ -356,19 +415,22 @@ class TrainingService:
                         'error': '数据库不可用且内存中无会话'
                     }
 
-                log = db.query(TrainingLog).filter(
+                log_q = db.query(TrainingLog).filter(
                     TrainingLog.session_id == session_id
-                ).first()
+                )
+                if tenant_id:
+                    log_q = log_q.filter(TrainingLog.tenant_id == tenant_id)
+                log = log_q.first()
 
                 if not log:
-                    return {
-                        'session_id': session_id,
-                        'status': 'not_found',
-                        'error': '会话不存在'
-                    }
+                    raise not_found_404()
+
+                if tenant_id:
+                    enforce_tenant_access(log.tenant_id, log.id, "TrainingLog")
 
                 return {
                     'session_id': session_id,
+                    'tenant_id': log.tenant_id,
                     'model_type': log.model_type,
                     'node_id': log.model_id,
                     'status': log.status,
@@ -394,6 +456,8 @@ class TrainingService:
                     'message': self._status_message(log.status)
                 }
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"查询训练状态失败: {e}")
             return {'session_id': session_id, 'status': 'error', 'error': str(e)}
@@ -409,28 +473,27 @@ class TrainingService:
         return messages.get(status, f'未知状态: {status}')
 
     def _train_bolt_model_enhanced(
-        self, session_id, bolt_id, force_retrain, training_config, is_incremental
+        self, session_id, tenant_id, bolt_id, force_retrain, training_config, is_incremental
     ):
         if bolt_id:
             return self._train_single_bolt_enhanced(
-                session_id, bolt_id, force_retrain, training_config, is_incremental
+                session_id, tenant_id, bolt_id, force_retrain, training_config, is_incremental
             )
         return self._train_all_bolts_enhanced(
-            session_id, force_retrain, training_config, is_incremental
+            session_id, tenant_id, force_retrain, training_config, is_incremental
         )
 
     def _train_single_bolt_enhanced(
-        self, session_id, bolt_id, force_retrain, training_config, is_incremental
+        self, session_id, tenant_id, bolt_id, force_retrain, training_config, is_incremental
     ):
-        tenant_id = get_effective_tenant_id()
-        model_path = Path(get_tenant_model_path(
-            str(self.model_save_path), tenant_id, f"bolt_lstm_{bolt_id}.pt"
-        ))
+        model_path = get_active_model_path('bolt', str(bolt_id), tenant_id)
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+
         if model_path.exists() and not force_retrain and not is_incremental:
-            logger.info(f"螺栓模型已存在，跳过: {bolt_id}")
+            logger.info(f"螺栓模型已存在，跳过: tenant={tenant_id}, bolt={bolt_id}")
             return {'status': 'skipped', 'bolt_id': bolt_id, 'message': '模型已存在'}
 
-        data, labels, data_source_info = self._load_bolt_training_data_enhanced(bolt_id)
+        data, labels, data_source_info = self._load_bolt_training_data_enhanced(tenant_id, bolt_id)
 
         if len(data) < 100:
             return {
@@ -677,9 +740,9 @@ class TrainingService:
         return result
 
     def _train_all_bolts_enhanced(
-        self, session_id, force_retrain, training_config, is_incremental
+        self, session_id, tenant_id, force_retrain, training_config, is_incremental
     ):
-        bolt_ids = self._get_all_bolt_ids()
+        bolt_ids = self._get_all_bolt_ids(tenant_id)
         results = {
             'total': len(bolt_ids), 'success': 0, 'failed': 0,
             'skipped': 0, 'details': [], 'combined_metrics': defaultdict(list)
@@ -692,7 +755,7 @@ class TrainingService:
                     {'progress': {'phase': f'训练螺栓 {idx+1}/{len(bolt_ids)}', 'bolt_id': bolt_id}}
                 )
                 result = self._train_single_bolt_enhanced(
-                    session_id, bolt_id, force_retrain, training_config, is_incremental
+                    session_id, tenant_id, bolt_id, force_retrain, training_config, is_incremental
                 )
                 status = result.get('status', 'failed')
                 if status == 'success':
@@ -730,27 +793,26 @@ class TrainingService:
         return results
 
     def _train_flange_model_enhanced(
-        self, session_id, flange_id, force_retrain, training_config, is_incremental
+        self, session_id, tenant_id, flange_id, force_retrain, training_config, is_incremental
     ):
         if flange_id:
             return self._train_single_flange_enhanced(
-                session_id, flange_id, force_retrain, training_config, is_incremental
+                session_id, tenant_id, flange_id, force_retrain, training_config, is_incremental
             )
         return self._train_all_flanges_enhanced(
-            session_id, force_retrain, training_config, is_incremental
+            session_id, tenant_id, force_retrain, training_config, is_incremental
         )
 
     def _train_single_flange_enhanced(
-        self, session_id, flange_id, force_retrain, training_config, is_incremental
+        self, session_id, tenant_id, flange_id, force_retrain, training_config, is_incremental
     ):
-        tenant_id = get_effective_tenant_id()
-        model_path = Path(get_tenant_model_path(
-            str(self.model_save_path), tenant_id, f"flange_attention_{flange_id}.pt"
-        ))
+        model_path = get_active_model_path('flange', str(flange_id), tenant_id)
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+
         if model_path.exists() and not force_retrain and not is_incremental:
             return {'status': 'skipped', 'flange_id': flange_id, 'message': '模型已存在'}
 
-        flange_dataset, data_source_info = self._load_flange_training_data_fixed(flange_id)
+        flange_dataset, data_source_info = self._load_flange_training_data_fixed(tenant_id, flange_id)
         if not flange_dataset or len(flange_dataset) < 20:
             return {
                 'status': 'failed', 'flange_id': flange_id,
@@ -1102,9 +1164,9 @@ class TrainingService:
         return result
 
     def _train_all_flanges_enhanced(
-        self, session_id, force_retrain, training_config, is_incremental
+        self, session_id, tenant_id, force_retrain, training_config, is_incremental
     ):
-        flange_ids = self._get_all_flange_ids_fixed()
+        flange_ids = self._get_all_flange_ids_fixed(tenant_id)
         results = {
             'total': len(flange_ids), 'success': 0, 'failed': 0,
             'skipped': 0, 'details': []
@@ -1116,7 +1178,7 @@ class TrainingService:
                     {'progress': {'phase': f'训练法兰面 {idx+1}/{len(flange_ids)}', 'flange_id': flange_id}}
                 )
                 result = self._train_single_flange_enhanced(
-                    session_id, flange_id, force_retrain, training_config, is_incremental
+                    session_id, tenant_id, flange_id, force_retrain, training_config, is_incremental
                 )
                 s = result.get('status', 'failed')
                 if s == 'success':
@@ -1136,7 +1198,7 @@ class TrainingService:
         )
         return results
 
-    def _load_bolt_training_data_enhanced(self, bolt_id):
+    def _load_bolt_training_data_enhanced(self, tenant_id, bolt_id):
         dq_enabled = config.get('data_quality.enabled', True)
         auto_filter = config.get('data_quality.integration.auto_filter_training_data', True)
         info = {
@@ -1157,11 +1219,14 @@ class TrainingService:
         try:
             with get_db() as db:
                 if db is not None:
-                    mv_cfg = db.query(MultivariateTrainingConfig).filter(
+                    mv_cfg_q = db.query(MultivariateTrainingConfig).filter(
                         MultivariateTrainingConfig.model_id == str(bolt_id),
                         MultivariateTrainingConfig.model_type == 'bolt',
                         MultivariateTrainingConfig.is_active == 1,
-                    ).first()
+                    )
+                    if tenant_id:
+                        mv_cfg_q = mv_cfg_q.filter(MultivariateTrainingConfig.tenant_id == tenant_id)
+                    mv_cfg = mv_cfg_q.first()
         except Exception as e:
             logger.warning(f"读取多变量训练配置失败，使用默认: {e}")
 
@@ -1185,13 +1250,18 @@ class TrainingService:
                         if bolt_id.isdigit()
                         else BoltData.sensor_id == bolt_id
                     )
+                    if tenant_id:
+                        sensor_filter = and_(sensor_filter, BoltData.tenant_id == tenant_id)
 
                     # 2a. 尝试 sc_bolt_multivariate_data 表
                     try:
                         sensor_id_val = int(bolt_id) if bolt_id.isdigit() else bolt_id
-                        mv_data = db.query(MultivariateBoltData).filter(
+                        mv_q = db.query(MultivariateBoltData).filter(
                             MultivariateBoltData.sensor_id == sensor_id_val
-                        ).order_by(MultivariateBoltData.timestamp.asc()).all()
+                        )
+                        if tenant_id:
+                            mv_q = mv_q.filter(MultivariateBoltData.tenant_id == tenant_id)
+                        mv_data = mv_q.order_by(MultivariateBoltData.timestamp.asc()).all()
                         if mv_data and len(mv_data) >= 50:
                             N = len(mv_data)
                             ts_arr = np.array([r.timestamp for r in mv_data], dtype=object)
@@ -1424,7 +1494,7 @@ class TrainingService:
             logger.error(f"读取螺栓CSV失败: {e}")
             return None, None, None
 
-    def _load_flange_training_data_fixed(self, flange_id):
+    def _load_flange_training_data_fixed(self, tenant_id, flange_id):
         info = {
             'primary': 'none', 'flange_grouping': 'collector-splitter-position',
             'bolt_count': 0, 'time_points': 0
@@ -1445,6 +1515,8 @@ class TrainingService:
                         )
                     else:
                         query = query.filter(BoltData.flange_id == flange_id)
+                    if tenant_id:
+                        query = query.filter(BoltData.tenant_id == tenant_id)
                     all_data = query.order_by(BoltData.create_time.asc()).all()
                     if all_data:
                         grouped = defaultdict(list)
@@ -1676,12 +1748,15 @@ class TrainingService:
                 labels[i] = 0
         return labels
 
-    def _get_all_bolt_ids(self):
+    def _get_all_bolt_ids(self, tenant_id: Optional[int] = None):
         try:
             with get_db() as db:
                 if db:
                     from sqlalchemy import distinct
-                    result = db.query(distinct(BoltData.sensor_id)).all()
+                    q = db.query(distinct(BoltData.sensor_id))
+                    if tenant_id:
+                        q = q.filter(BoltData.tenant_id == tenant_id)
+                    result = q.all()
                     ids = [str(r[0]) for r in result]
                     if ids:
                         return ids
@@ -1697,16 +1772,19 @@ class TrainingService:
                 pass
         return []
 
-    def _get_all_flange_ids_fixed(self):
+    def _get_all_flange_ids_fixed(self, tenant_id: Optional[int] = None):
         try:
             with get_db() as db:
                 if db:
                     from sqlalchemy import distinct
-                    result = db.query(
+                    q = db.query(
                         BoltData.collector_id,
                         BoltData.splitter_num,
                         BoltData.position
-                    ).distinct().all()
+                    ).distinct()
+                    if tenant_id:
+                        q = q.filter(BoltData.tenant_id == tenant_id)
+                    result = q.all()
                     flange_ids = set()
                     for cid, sn, pos in result:
                         if cid and sn is not None and pos:
@@ -1754,7 +1832,7 @@ class TrainingService:
             return None, None
 
     def _save_model_version(
-        self, session_id, model_type, node_id, train_result, is_incremental
+        self, session_id, tenant_id, model_type, node_id, train_result, is_incremental
     ):
         try:
             from app.services.model_version_service import get_model_version_service
@@ -1812,7 +1890,7 @@ class TrainingService:
                 if is_incremental:
                     with get_db() as db:
                         if db:
-                            parent_v = self._get_previous_version(db, nid, model_type)
+                            parent_v = self._get_previous_version(db, nid, model_type, tenant_id)
 
                 freeze_layers_list = None
                 if is_incremental:
@@ -1839,44 +1917,26 @@ class TrainingService:
                     training_duration_seconds=train_result.get('total_training_time_seconds'),
                     architecture_summary=arch,
                     freeze_layers=freeze_layers_list,
+                    tenant_id=tenant_id,
                 )
 
                 logger.info(
-                    f"模型版本已注册: {model_type}/{nid} "
+                    f"模型版本已注册: tenant={tenant_id}, {model_type}/{nid} "
                     f"v{version_info['version']}, F1={node_r.get('f1_score')}"
                 )
-
-            self._update_storage_quota()
 
         except Exception as e:
             logger.warning(f"保存模型版本失败: {e}")
 
-    def _update_storage_quota(self):
-        """更新租户存储配额"""
-        tenant_id = get_effective_tenant_id()
-        if tenant_id is None:
-            return
+    def _get_next_version(self, db, model_id, model_type, tenant_id: Optional[int] = None):
         try:
-            from app.services.tenant import QuotaService
-            tenant_model_dir = Path(get_tenant_model_path(
-                str(self.model_save_path), tenant_id, ""
-            ))
-            total_size_mb = 0.0
-            if tenant_model_dir.exists():
-                for f in tenant_model_dir.rglob("*.pt"):
-                    if f.is_file():
-                        total_size_mb += f.stat().st_size / (1024 * 1024)
-            qs = QuotaService()
-            qs.update_quota(tenant_id, current_storage_mb=round(total_size_mb, 2))
-        except Exception as e:
-            logger.warning(f"更新存储配额失败: {e}")
-
-    def _get_next_version(self, db, model_id, model_type):
-        try:
-            latest = db.query(ModelVersionORM).filter(
+            q = db.query(ModelVersionORM).filter(
                 ModelVersionORM.model_id == model_id,
                 ModelVersionORM.model_type == model_type
-            ).order_by(ModelVersionORM.create_time.desc()).first()
+            )
+            if tenant_id:
+                q = q.filter(ModelVersionORM.tenant_id == tenant_id)
+            latest = q.order_by(ModelVersionORM.create_time.desc()).first()
             if latest and latest.version.startswith('v'):
                 parts = latest.version[1:].split('.')
                 if len(parts) == 3:
@@ -1886,12 +1946,15 @@ class TrainingService:
         except Exception:
             return f"v1.0.0-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-    def _get_previous_version(self, db, model_id, model_type):
+    def _get_previous_version(self, db, model_id, model_type, tenant_id: Optional[int] = None):
         try:
-            latest = db.query(ModelVersionORM).filter(
+            q = db.query(ModelVersionORM).filter(
                 ModelVersionORM.model_id == model_id,
                 ModelVersionORM.model_type == model_type
-            ).order_by(ModelVersionORM.create_time.desc()).first()
+            )
+            if tenant_id:
+                q = q.filter(ModelVersionORM.tenant_id == tenant_id)
+            latest = q.order_by(ModelVersionORM.create_time.desc()).first()
             return latest.version if latest else None
         except Exception:
             return None
@@ -1914,10 +1977,8 @@ class TrainingService:
 
     def get_model_info(self, model_type, node_id):
         tenant_id = get_effective_tenant_id()
-        filename = resolve_model_filename(model_type, node_id)
-        model_path = Path(get_tenant_model_path(
-            str(self.model_save_path), tenant_id, filename
-        ))
+        model_path = get_active_model_path(model_type, str(node_id), tenant_id)
+
         info = {
             'is_trained': model_path.exists(),
             'model_file_path': str(model_path) if model_path.exists() else None
@@ -1926,12 +1987,17 @@ class TrainingService:
             with get_db() as db:
                 if db is None:
                     return info
-                version = db.query(ModelVersionORM).filter(
-                    ModelVersionORM.model_id == node_id,
+                v_q = db.query(ModelVersionORM).filter(
+                    ModelVersionORM.model_id == str(node_id),
                     ModelVersionORM.model_type == model_type,
                     ModelVersionORM.is_active == True
-                ).first()
+                )
+                if tenant_id:
+                    v_q = v_q.filter(ModelVersionORM.tenant_id == tenant_id)
+                version = v_q.first()
                 if version:
+                    if tenant_id:
+                        enforce_tenant_access(version.tenant_id, version.id, "ModelVersion")
                     info.update({
                         'version': version.version,
                         'file_hash': version.file_hash,
@@ -1952,10 +2018,13 @@ class TrainingService:
                             ]}
                         except Exception:
                             pass
-                    all_v = db.query(ModelVersionORM).filter(
-                        ModelVersionORM.model_id == node_id,
+                    all_q = db.query(ModelVersionORM).filter(
+                        ModelVersionORM.model_id == str(node_id),
                         ModelVersionORM.model_type == model_type
-                    ).order_by(ModelVersionORM.create_time.desc()).limit(10).all()
+                    )
+                    if tenant_id:
+                        all_q = all_q.filter(ModelVersionORM.tenant_id == tenant_id)
+                    all_v = all_q.order_by(ModelVersionORM.create_time.desc()).limit(10).all()
                     info['version_history'] = [
                         {
                             'version': v.version, 'create_time': v.create_time,
@@ -1963,16 +2032,21 @@ class TrainingService:
                         }
                         for v in all_v
                     ]
+        except HTTPException:
+            raise
         except Exception as e:
             logger.warning(f"获取模型信息失败: {e}")
         return info
 
     def list_training_sessions(self, model_type=None, status=None, limit=50):
+        tenant_id = get_effective_tenant_id()
         try:
             with get_db() as db:
                 if db is None:
                     return []
                 q = db.query(TrainingLog)
+                if tenant_id:
+                    q = q.filter(TrainingLog.tenant_id == tenant_id)
                 if model_type:
                     q = q.filter(TrainingLog.model_type == model_type)
                 if status:
@@ -1981,6 +2055,7 @@ class TrainingService:
                 return [
                     {
                         'session_id': l.session_id,
+                        'tenant_id': l.tenant_id,
                         'model_type': l.model_type,
                         'model_id': l.model_id,
                         'status': l.status,

@@ -1,12 +1,20 @@
 """
-模型版本管理服务
+模型版本管理服务（租户隔离版）
 
 基于数据库的模型版本管理，支持：
 1. 版本注册（训练完成后自动注册）
-2. 版本列表查询
-3. 激活/回滚指定版本
+2. 版本列表查询（自动按当前租户过滤）
+3. 激活/回滚指定版本（跨租户访问→404）
 4. 自动清理旧版本（超过 max_versions）
 5. 按版本加载模型（用于 A/B 测试和 shadow mode）
+6. 模型路径标准化：trained_models/{tenant_id}/xxx
+7. 配额硬限制检查（模型数、存储）
+8. 注册/删除后自动同步模型数与存储统计
+
+安全策略：
+- 所有查询自动注入 tenant_id 过滤
+- 每条记录在返回前 enforce_tenant_access，跨租户→404
+- 注册新模型前检查 ensure_model_quota_available
 """
 
 import json
@@ -16,58 +24,72 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
+from fastapi import HTTPException
 from loguru import logger
 from sqlalchemy import and_
 
 from app.utils.config import config
 from app.utils.database import get_db, ModelVersionORM
-from app.middleware import get_effective_tenant_id
-from app.middleware.tenant_isolation import get_tenant_model_path, resolve_model_filename
+from app.middleware import (
+    get_effective_tenant_id,
+    is_super_admin,
+    is_audit_mode,
+)
+from app.services.tenant import (
+    enforce_tenant_access,
+    enforce_tenant_query,
+    get_active_model_path,
+    get_versioned_model_path,
+    ensure_model_quota_available,
+    sync_tenant_storage_usage,
+    sync_tenant_model_count,
+    not_found_404,
+)
 
 
 class ModelVersionService:
     """
-    模型版本管理服务（基于数据库实现）
+    模型版本管理服务（基于数据库 + 强租户隔离）
 
     提供模型版本的完整生命周期管理。
     """
 
     def __init__(self):
-        self.save_path = Path(config.get('model.save_path', './trained_models'))
-        self.save_path.mkdir(parents=True, exist_ok=True)
-        self.max_versions = config.get('model_version.max_versions', 10)
-        self.auto_cleanup = config.get('model_version.auto_cleanup', True)
-
-        self._versioned_models_dir = self.save_path / 'versioned'
-        self._versioned_models_dir.mkdir(parents=True, exist_ok=True)
+        self.max_versions = config.get("model_version.max_versions", 10)
+        self.auto_cleanup = config.get("model_version.auto_cleanup", True)
 
         logger.info(
-            f"模型版本管理服务初始化完成: "
-            f"save_path={self.save_path}, "
+            "模型版本管理服务初始化完成: "
             f"max_versions={self.max_versions}, "
             f"auto_cleanup={self.auto_cleanup}"
         )
 
-    def _get_version_file_path(
-        self, model_type: str, node_id: str, version: str
-    ) -> Path:
-        """获取版本化模型文件的路径（租户隔离）"""
-        tenant_id = get_effective_tenant_id()
-        base = str(self._versioned_models_dir)
-        if tenant_id is not None:
-            return Path(get_tenant_model_path(base, tenant_id, f"{model_type}/{node_id}/{version}.pt"))
-        return (
-            self._versioned_models_dir
-            / model_type
-            / node_id
-            / f"{version}.pt"
-        )
+    # ============================================================
+    # 路径解析（全部走 enforcement 模块）
+    # ============================================================
 
-    def _get_active_file_path(self, model_type: str, node_id: str) -> Path:
-        """获取活动版本模型文件的路径（租户隔离）"""
-        tenant_id = get_effective_tenant_id()
-        filename = resolve_model_filename(model_type, node_id)
-        return Path(get_tenant_model_path(str(self.save_path), tenant_id, filename))
+    def _get_version_file_path(
+        self,
+        model_type: str,
+        node_id: str,
+        version: str,
+        tenant_id: Optional[int] = None,
+    ) -> Path:
+        """获取版本化模型文件的路径"""
+        return get_versioned_model_path(model_type, str(node_id), version, tenant_id)
+
+    def _get_active_file_path(
+        self,
+        model_type: str,
+        node_id: str,
+        tenant_id: Optional[int] = None,
+    ) -> Path:
+        """获取活动版本模型文件的路径（主路径）"""
+        return get_active_model_path(model_type, str(node_id), tenant_id)
+
+    # ============================================================
+    # 版本注册
+    # ============================================================
 
     def register_version(
         self,
@@ -84,54 +106,63 @@ class ModelVersionService:
         training_duration_seconds: Optional[float] = None,
         architecture_summary: Optional[Dict[str, Any]] = None,
         freeze_layers: Optional[List[str]] = None,
+        tenant_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         注册新的模型版本
 
-        Args:
-            model_type: 模型类型 (bolt/flange)
-            node_id: 节点ID
-            model_file_path: 当前模型文件路径
-            metrics: 训练指标
-            training_config: 训练配置
-            description: 版本描述
-            training_session_id: 训练会话ID
-            parent_version: 父版本号（增量训练用）
-            training_samples: 训练样本数
-            validation_samples: 验证样本数
-            training_duration_seconds: 训练时长（秒）
-            architecture_summary: 模型架构摘要
-            freeze_layers: 冻结层列表
+        前置检查：
+        1. 必须有有效 tenant_id（显式传入或从上下文解析）
+        2. 检查配额：模型数、存储用量
 
-        Returns:
-            版本信息字典
+        写入：
+        1. 复制模型文件到 trained_models/{tenant_id}/versioned/{type}/{id}/vX.Y.Z.pt
+        2. 复制一份为活动版本 trained_models/{tenant_id}/bolt_lstm_{id}.pt
+        3. 写入 ModelVersionORM（带 tenant_id）
+        4. 同步 TenantQuota 计数与存储
         """
+        effective_id = tenant_id or get_effective_tenant_id()
+        if effective_id is None:
+            raise not_found_404()
+
         try:
             with get_db() as db:
                 if db is None:
                     raise RuntimeError("数据库不可用")
 
-                version_number = self._get_next_version(db, model_type, node_id)
+                ensure_model_quota_available(effective_id, db)
+
+                version_number = self._get_next_version(
+                    db, model_type, node_id, effective_id
+                )
 
                 version_file = self._get_version_file_path(
-                    model_type, node_id, version_number
+                    model_type, node_id, version_number, effective_id
                 )
                 version_file.parent.mkdir(parents=True, exist_ok=True)
 
                 shutil.copy2(model_file_path, version_file)
 
+                active_file = self._get_active_file_path(
+                    model_type, node_id, effective_id
+                )
+                active_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(model_file_path, active_file)
+
                 file_hash = self._calculate_file_hash(version_file)
                 file_size = version_file.stat().st_size
 
                 db.query(ModelVersionORM).filter(
+                    ModelVersionORM.tenant_id == effective_id,
                     ModelVersionORM.model_type == model_type,
-                    ModelVersionORM.model_id == node_id,
-                    ModelVersionORM.is_active == True
+                    ModelVersionORM.model_id == str(node_id),
+                    ModelVersionORM.is_active == True,
                 ).update({ModelVersionORM.is_active: False})
 
                 version_orm = ModelVersionORM(
+                    tenant_id=effective_id,
                     model_type=model_type,
-                    model_id=node_id,
+                    model_id=str(node_id),
                     version=version_number,
                     file_path=str(version_file),
                     file_hash=file_hash,
@@ -147,11 +178,13 @@ class ModelVersionService:
                     training_duration_seconds=training_duration_seconds,
                     architecture_summary=(
                         json.dumps(architecture_summary, ensure_ascii=False)
-                        if architecture_summary else None
+                        if architecture_summary
+                        else None
                     ),
                     freeze_layers=(
                         json.dumps(freeze_layers, ensure_ascii=False)
-                        if freeze_layers else None
+                        if freeze_layers
+                        else None
                     ),
                     create_time=datetime.now(),
                 )
@@ -159,58 +192,74 @@ class ModelVersionService:
                 db.flush()
 
                 if self.auto_cleanup:
-                    self._cleanup_old_versions(db, model_type, node_id)
+                    self._cleanup_old_versions(
+                        db, model_type, node_id, effective_id
+                    )
+
+                sync_tenant_model_count(effective_id, db)
+                sync_tenant_storage_usage(effective_id, db)
 
                 db.commit()
+                db.refresh(version_orm)
 
                 logger.info(
-                    f"模型版本已注册: {model_type}/{node_id} "
-                    f"v{version_number}, F1={metrics.get('f1_score', 'N/A')}"
+                    f"模型版本已注册: tenant={effective_id}, "
+                    f"{model_type}/{node_id} "
+                    f"v{version_number}, F1={metrics.get('f1_score', 'N/A')}, "
+                    f"size={file_size}B"
                 )
 
                 return self._orm_to_dict(version_orm)
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"注册模型版本失败: {e}")
             raise
 
     def _get_next_version(
-        self, db, model_type: str, node_id: str
+        self, db, model_type: str, node_id: str, tenant_id: int
     ) -> str:
-        """获取下一个版本号"""
+        """获取下一个版本号（按租户隔离）"""
         latest = (
             db.query(ModelVersionORM)
             .filter(
+                ModelVersionORM.tenant_id == tenant_id,
                 ModelVersionORM.model_type == model_type,
-                ModelVersionORM.model_id == node_id,
+                ModelVersionORM.model_id == str(node_id),
             )
             .order_by(ModelVersionORM.create_time.desc())
             .first()
         )
 
-        if latest and latest.version.startswith('v'):
-            parts = latest.version[1:].split('.')
+        if latest and latest.version.startswith("v"):
+            parts = latest.version[1:].split(".")
             if len(parts) == 3:
                 major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
                 return f"v{major}.{minor}.{patch + 1}"
 
         return "v1.0.0"
 
-    def _calculate_file_hash(self, file_path: Path) -> str:
+    @staticmethod
+    def _calculate_file_hash(file_path: Path) -> str:
         """计算文件MD5哈希"""
         import hashlib
 
         hash_md5 = hashlib.md5()
-        with open(file_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(8192), b''):
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
+    # ============================================================
+    # 旧版本清理
+    # ============================================================
+
     def _cleanup_old_versions(
-        self, db, model_type: str, node_id: str
+        self, db, model_type: str, node_id: str, tenant_id: int
     ) -> int:
         """
-        清理超过 max_versions 的旧版本
+        清理超过 max_versions 的旧版本（按租户隔离）
 
         Returns:
             清理的版本数量
@@ -218,8 +267,9 @@ class ModelVersionService:
         versions = (
             db.query(ModelVersionORM)
             .filter(
+                ModelVersionORM.tenant_id == tenant_id,
                 ModelVersionORM.model_type == model_type,
-                ModelVersionORM.model_id == node_id,
+                ModelVersionORM.model_id == str(node_id),
             )
             .order_by(ModelVersionORM.create_time.desc())
             .all()
@@ -248,63 +298,82 @@ class ModelVersionService:
                 db.delete(v)
                 deleted_count += 1
                 logger.debug(
-                    f"清理旧版本: {model_type}/{node_id} v{v.version}"
+                    f"清理旧版本: tenant={tenant_id}, "
+                    f"{model_type}/{node_id} v{v.version}"
                 )
             except Exception as e:
                 logger.warning(
-                    f"删除旧版本失败: {model_type}/{node_id} v{v.version}, error={e}"
+                    f"删除旧版本失败: tenant={tenant_id}, "
+                    f"{model_type}/{node_id} v{v.version}, error={e}"
                 )
 
         if deleted_count > 0:
+            sync_tenant_storage_usage(tenant_id, db)
+            sync_tenant_model_count(tenant_id, db)
             logger.info(
                 f"已清理 {deleted_count} 个旧版本: "
-                f"{model_type}/{node_id}"
+                f"tenant={tenant_id}, {model_type}/{node_id}"
             )
 
         return deleted_count
+
+    # ============================================================
+    # 查询（全部 enforce 租户隔离）
+    # ============================================================
 
     def list_versions(
         self,
         model_type: str,
         node_id: str,
         limit: int = 50,
+        tenant_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        列出模型的所有版本
+        列出模型的所有版本（当前租户可见）
 
-        Args:
-            model_type: 模型类型
-            node_id: 节点ID
-            limit: 返回数量限制
-
-        Returns:
-            版本列表信息
+        Raises:
+            HTTPException(404): 无有效 tenant context
         """
+        effective_id = tenant_id or get_effective_tenant_id()
+        if effective_id is None:
+            raise not_found_404()
+
         try:
             with get_db() as db:
                 if db is None:
                     raise RuntimeError("数据库不可用")
 
+                q = db.query(ModelVersionORM).filter(
+                    ModelVersionORM.tenant_id == effective_id,
+                    ModelVersionORM.model_type == model_type,
+                    ModelVersionORM.model_id == str(node_id),
+                )
                 versions = (
-                    db.query(ModelVersionORM)
-                    .filter(
-                        ModelVersionORM.model_type == model_type,
-                        ModelVersionORM.model_id == node_id,
-                    )
-                    .order_by(ModelVersionORM.create_time.desc())
+                    q.order_by(ModelVersionORM.create_time.desc())
                     .limit(limit)
                     .all()
                 )
 
-                items = [self._orm_to_dict(v) for v in versions]
+                items = []
+                for v in versions:
+                    try:
+                        enforce_tenant_access(
+                            v.tenant_id, v.id, "ModelVersion"
+                        )
+                        items.append(self._orm_to_dict(v))
+                    except HTTPException:
+                        continue
 
                 return {
-                    'model_type': model_type,
-                    'node_id': node_id,
-                    'total': len(items),
-                    'items': items,
+                    "tenant_id": effective_id,
+                    "model_type": model_type,
+                    "node_id": node_id,
+                    "total": len(items),
+                    "items": items,
                 }
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"列出模型版本失败: {e}")
             raise
@@ -314,18 +383,15 @@ class ModelVersionService:
         model_type: str,
         node_id: str,
         version: Optional[str] = None,
+        tenant_id: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        获取指定版本信息
-
-        Args:
-            model_type: 模型类型
-            node_id: 节点ID
-            version: 版本号，None 则返回活动版本
-
-        Returns:
-            版本信息字典，不存在则返回 None
+        获取指定版本信息。跨租户访问 → 404
         """
+        effective_id = tenant_id or get_effective_tenant_id()
+        if effective_id is None:
+            return None
+
         try:
             with get_db() as db:
                 if db is None:
@@ -335,8 +401,9 @@ class ModelVersionService:
                     v = (
                         db.query(ModelVersionORM)
                         .filter(
+                            ModelVersionORM.tenant_id == effective_id,
                             ModelVersionORM.model_type == model_type,
-                            ModelVersionORM.model_id == node_id,
+                            ModelVersionORM.model_id == str(node_id),
                             ModelVersionORM.version == version,
                         )
                         .first()
@@ -345,36 +412,58 @@ class ModelVersionService:
                     v = (
                         db.query(ModelVersionORM)
                         .filter(
+                            ModelVersionORM.tenant_id == effective_id,
                             ModelVersionORM.model_type == model_type,
-                            ModelVersionORM.model_id == node_id,
+                            ModelVersionORM.model_id == str(node_id),
                             ModelVersionORM.is_active == True,
                         )
                         .first()
                     )
 
-                return self._orm_to_dict(v) if v else None
+                if v is None:
+                    return None
 
+                enforce_tenant_access(v.tenant_id, v.id, "ModelVersion")
+                return self._orm_to_dict(v)
+
+        except HTTPException:
+            return None
         except Exception as e:
             logger.error(f"获取模型版本失败: {e}")
             return None
+
+    # ============================================================
+    # 激活 / 回滚
+    # ============================================================
 
     def activate_version(
         self,
         model_type: str,
         node_id: str,
         version: str,
+        tenant_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        激活指定版本（切换活动版本）
+        激活指定版本（切换活动版本）。跨租户访问 → 404
 
-        Args:
-            model_type: 模型类型
-            node_id: 节点ID
-            version: 目标版本号
-
-        Returns:
-            激活后的版本信息
+        操作：
+        1. 校验租户权限
+        2. 将目标版本文件复制为活动文件（trained_models/{tenant_id}/xxx）
+        3. 数据库中切换 is_active 标志
         """
+        if is_audit_mode():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Forbidden",
+                    "message": "审计模式为只读，无法激活模型版本",
+                },
+            )
+
+        effective_id = tenant_id or get_effective_tenant_id()
+        if effective_id is None:
+            raise not_found_404()
+
         try:
             with get_db() as db:
                 if db is None:
@@ -383,27 +472,34 @@ class ModelVersionService:
                 target = (
                     db.query(ModelVersionORM)
                     .filter(
+                        ModelVersionORM.tenant_id == effective_id,
                         ModelVersionORM.model_type == model_type,
-                        ModelVersionORM.model_id == node_id,
+                        ModelVersionORM.model_id == str(node_id),
                         ModelVersionORM.version == version,
                     )
                     .first()
                 )
 
                 if target is None:
-                    raise ValueError(f"版本不存在: {version}")
+                    raise not_found_404("目标模型版本不存在")
+
+                enforce_tenant_access(
+                    target.tenant_id, target.id, "ModelVersion"
+                )
 
                 if not target.file_path or not os.path.exists(target.file_path):
-                    raise FileNotFoundError(
-                        f"版本文件不存在: {target.file_path}"
-                    )
+                    raise not_found_404("版本文件已丢失")
 
-                active_file = self._get_active_file_path(model_type, node_id)
+                active_file = self._get_active_file_path(
+                    model_type, node_id, effective_id
+                )
+                active_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target.file_path, active_file)
 
                 db.query(ModelVersionORM).filter(
+                    ModelVersionORM.tenant_id == effective_id,
                     ModelVersionORM.model_type == model_type,
-                    ModelVersionORM.model_id == node_id,
+                    ModelVersionORM.model_id == str(node_id),
                     ModelVersionORM.is_active == True,
                 ).update({ModelVersionORM.is_active: False})
 
@@ -414,11 +510,14 @@ class ModelVersionService:
                 db.refresh(target)
 
                 logger.info(
-                    f"模型版本已激活: {model_type}/{node_id} -> v{version}"
+                    f"模型版本已激活: tenant={effective_id}, "
+                    f"{model_type}/{node_id} -> v{version}"
                 )
 
                 return self._orm_to_dict(target)
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"激活模型版本失败: {e}")
             raise
@@ -428,44 +527,47 @@ class ModelVersionService:
         model_type: str,
         node_id: str,
         version: Optional[str] = None,
+        tenant_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         回滚到指定版本（或上一个版本）
-
-        Args:
-            model_type: 模型类型
-            node_id: 节点ID
-            version: 目标版本号，None 则回滚到上一个版本
-
-        Returns:
-            回滚后的版本信息
         """
         if version is None:
-            version_list = self.list_versions(model_type, node_id, limit=2)
-            items = version_list.get('items', [])
+            version_list = self.list_versions(model_type, node_id, limit=2, tenant_id=tenant_id)
+            items = version_list.get("items", [])
             if len(items) < 2:
-                raise ValueError("没有可回滚的上一个版本")
-            version = items[1]['version']
+                raise not_found_404("没有可回滚的上一个版本")
+            version = items[1]["version"]
 
-        return self.activate_version(model_type, node_id, version)
+        return self.activate_version(model_type, node_id, version, tenant_id=tenant_id)
+
+    # ============================================================
+    # 删除版本
+    # ============================================================
 
     def delete_version(
         self,
         model_type: str,
         node_id: str,
         version: str,
+        tenant_id: Optional[int] = None,
     ) -> bool:
         """
-        删除指定版本
-
-        Args:
-            model_type: 模型类型
-            node_id: 节点ID
-            version: 版本号
-
-        Returns:
-            是否成功
+        删除指定版本（不能是活动版本）。跨租户访问 → 404
         """
+        if is_audit_mode():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Forbidden",
+                    "message": "审计模式为只读，无法删除模型版本",
+                },
+            )
+
+        effective_id = tenant_id or get_effective_tenant_id()
+        if effective_id is None:
+            raise not_found_404()
+
         try:
             with get_db() as db:
                 if db is None:
@@ -474,15 +576,20 @@ class ModelVersionService:
                 target = (
                     db.query(ModelVersionORM)
                     .filter(
+                        ModelVersionORM.tenant_id == effective_id,
                         ModelVersionORM.model_type == model_type,
-                        ModelVersionORM.model_id == node_id,
+                        ModelVersionORM.model_id == str(node_id),
                         ModelVersionORM.version == version,
                     )
                     .first()
                 )
 
                 if target is None:
-                    return False
+                    raise not_found_404()
+
+                enforce_tenant_access(
+                    target.tenant_id, target.id, "ModelVersion"
+                )
 
                 if target.is_active:
                     raise ValueError("不能删除活动版本")
@@ -494,67 +601,87 @@ class ModelVersionService:
                         logger.warning(f"删除版本文件失败: {e}")
 
                 db.delete(target)
+                sync_tenant_model_count(effective_id, db)
+                sync_tenant_storage_usage(effective_id, db)
                 db.commit()
 
                 logger.info(
-                    f"版本已删除: {model_type}/{node_id} v{version}"
+                    f"版本已删除: tenant={effective_id}, "
+                    f"{model_type}/{node_id} v{version}"
                 )
 
                 return True
 
+        except HTTPException:
+            raise
         except ValueError:
             raise
         except Exception as e:
             logger.error(f"删除版本失败: {e}")
             return False
 
+    # ============================================================
+    # 文件路径查询
+    # ============================================================
+
     def get_model_file_path(
         self,
         model_type: str,
         node_id: str,
         version: Optional[str] = None,
+        tenant_id: Optional[int] = None,
     ) -> Optional[str]:
         """
-        获取指定版本的模型文件路径
-
-        Args:
-            model_type: 模型类型
-            node_id: 节点ID
-            version: 版本号，None 则返回活动版本路径
+        获取指定版本的模型文件路径（带租户权限校验）
 
         Returns:
-            模型文件路径，不存在则返回 None
+            模型文件路径，不存在或无权限则返回 None
         """
-        version_info = self.get_version(model_type, node_id, version)
-        if version_info and version_info.get('file_path'):
-            if os.path.exists(version_info['file_path']):
-                return version_info['file_path']
+        version_info = self.get_version(model_type, node_id, version, tenant_id=tenant_id)
+        if version_info and version_info.get("file_path"):
+            if os.path.exists(version_info["file_path"]):
+                return version_info["file_path"]
         return None
+
+    # ============================================================
+    # 其它 API
+    # ============================================================
 
     def cleanup_old_versions_manual(
         self,
         model_type: str,
         node_id: str,
+        tenant_id: Optional[int] = None,
     ) -> int:
         """
         手动清理旧版本（供 API 调用）
-
-        Args:
-            model_type: 模型类型
-            node_id: 节点ID
-
-        Returns:
-            清理的版本数量
         """
+        if is_audit_mode():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Forbidden",
+                    "message": "审计模式为只读",
+                },
+            )
+
+        effective_id = tenant_id or get_effective_tenant_id()
+        if effective_id is None:
+            raise not_found_404()
+
         try:
             with get_db() as db:
                 if db is None:
                     raise RuntimeError("数据库不可用")
 
-                count = self._cleanup_old_versions(db, model_type, node_id)
+                count = self._cleanup_old_versions(
+                    db, model_type, node_id, effective_id
+                )
                 db.commit()
                 return count
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"手动清理旧版本失败: {e}")
             raise
@@ -565,27 +692,19 @@ class ModelVersionService:
         node_id: str,
         version1: str,
         version2: str,
+        tenant_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         对比两个版本的指标
-
-        Args:
-            model_type: 模型类型
-            node_id: 节点ID
-            version1: 版本1
-            version2: 版本2
-
-        Returns:
-            对比结果
         """
-        v1 = self.get_version(model_type, node_id, version1)
-        v2 = self.get_version(model_type, node_id, version2)
+        v1 = self.get_version(model_type, node_id, version1, tenant_id=tenant_id)
+        v2 = self.get_version(model_type, node_id, version2, tenant_id=tenant_id)
 
         if v1 is None or v2 is None:
-            raise ValueError("版本不存在")
+            raise not_found_404("版本不存在")
 
-        metrics1 = v1.get('metrics') or {}
-        metrics2 = v2.get('metrics') or {}
+        metrics1 = v1.get("metrics") or {}
+        metrics2 = v2.get("metrics") or {}
 
         all_metrics = set(metrics1.keys()) | set(metrics2.keys())
         metrics_comparison = {}
@@ -603,24 +722,29 @@ class ModelVersionService:
             metrics_comparison[metric] = {
                 version1: val1,
                 version2: val2,
-                'diff': diff,
-                'improved': improved,
+                "diff": diff,
+                "improved": improved,
             }
 
         return {
-            'model_type': model_type,
-            'node_id': node_id,
-            'version1': version1,
-            'version2': version2,
-            'metrics_comparison': metrics_comparison,
-            'config_diff': {
-                version1: v1.get('config') or {},
-                version2: v2.get('config') or {},
+            "model_type": model_type,
+            "node_id": node_id,
+            "version1": version1,
+            "version2": version2,
+            "metrics_comparison": metrics_comparison,
+            "config_diff": {
+                version1: v1.get("config") or {},
+                version2: v2.get("config") or {},
             },
         }
 
-    def _orm_to_dict(self, orm: ModelVersionORM) -> Dict[str, Any]:
-        """将 ORM 对象转换为字典"""
+    # ============================================================
+    # ORM → Dict
+    # ============================================================
+
+    @staticmethod
+    def _orm_to_dict(orm: ModelVersionORM) -> Dict[str, Any]:
+        """将 ORM 对象转换为字典（含 tenant_id）"""
         metrics = None
         if orm.metrics:
             try:
@@ -650,26 +774,27 @@ class ModelVersionService:
                 freeze_layers = None
 
         return {
-            'id': orm.id,
-            'model_type': orm.model_type,
-            'model_id': orm.model_id,
-            'version': orm.version,
-            'file_path': orm.file_path,
-            'file_hash': orm.file_hash,
-            'file_size_bytes': orm.file_size_bytes,
-            'metrics': metrics,
-            'config': config_data,
-            'is_active': orm.is_active or False,
-            'description': orm.description,
-            'training_session_id': orm.training_session_id,
-            'parent_version': orm.parent_version,
-            'training_samples': orm.training_samples,
-            'validation_samples': orm.validation_samples,
-            'training_duration_seconds': orm.training_duration_seconds,
-            'architecture_summary': arch_summary,
-            'freeze_layers': freeze_layers,
-            'create_time': orm.create_time,
-            'update_time': orm.update_time,
+            "id": orm.id,
+            "tenant_id": orm.tenant_id,
+            "model_type": orm.model_type,
+            "model_id": orm.model_id,
+            "version": orm.version,
+            "file_path": orm.file_path,
+            "file_hash": orm.file_hash,
+            "file_size_bytes": orm.file_size_bytes,
+            "metrics": metrics,
+            "config": config_data,
+            "is_active": orm.is_active or False,
+            "description": orm.description,
+            "training_session_id": orm.training_session_id,
+            "parent_version": orm.parent_version,
+            "training_samples": orm.training_samples,
+            "validation_samples": orm.validation_samples,
+            "training_duration_seconds": orm.training_duration_seconds,
+            "architecture_summary": arch_summary,
+            "freeze_layers": freeze_layers,
+            "create_time": orm.create_time,
+            "update_time": orm.update_time,
         }
 
 
