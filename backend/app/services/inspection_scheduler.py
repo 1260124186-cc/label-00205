@@ -267,6 +267,15 @@ class IntelligentScheduler:
         else:
             final_date = preliminary_date
 
+        # RUL硬约束：检验必须在剩余寿命耗尽前完成（默认取RUL的70%作为安全裕度）
+        if factors.rul_days is not None and factors.rul_days > 0:
+            rul_confidence = factors.rul_confidence if factors.rul_confidence else 0.7
+            safety_margin = 0.5 + 0.3 * rul_confidence  # 置信度越高，安全裕度越紧(0.5~0.8)
+            rul_deadline = reference_date + timedelta(days=max(1, factors.rul_days * safety_margin))
+            if final_date > rul_deadline:
+                final_date = rul_deadline
+                rul_adj_days = min(rul_adj_days, (rul_deadline - (last_inspection + timedelta(days=base_cycle_days))).days)
+
         if final_date < reference_date:
             final_date = reference_date + timedelta(days=1)
 
@@ -579,6 +588,64 @@ class ConflictDetector:
             )
         return self.team_capacities[team_id]
 
+    def _count_day_tasks(
+        self,
+        team_id: str,
+        check_date: datetime,
+        exclude_schedule_id: Optional[str] = None,
+    ) -> Tuple[int, float]:
+        """
+        统计指定班组在指定日期的任务数和工时
+
+        Args:
+            team_id: 班组ID
+            check_date: 检查日期
+            exclude_schedule_id: 排除的排程ID（用于重新计算自身）
+
+        Returns:
+            (任务数, 总工时)
+        """
+        existing = self._load_tasks_for_date(team_id, check_date)
+        day_start = check_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        count = 0
+        hours = 0.0
+        for t in existing:
+            if exclude_schedule_id and hasattr(t, 'schedule_id') and t.schedule_id == exclude_schedule_id:
+                continue
+            t_start = t.scheduled_date if hasattr(t, 'scheduled_date') else (
+                t.due_time if hasattr(t, 'due_time') else check_date
+            )
+            if day_start <= t_start < day_end:
+                count += 1
+                hours += float(getattr(t, 'estimated_hours', 4.0))
+        return count, hours
+
+    def _count_week_tasks(
+        self,
+        team_id: str,
+        check_date: datetime,
+    ) -> Tuple[int, float]:
+        """
+        统计指定班组在指定日期所在周的任务数和工时
+
+        Returns:
+            (本周任务数, 本周总工时)
+        """
+        weekday = check_date.weekday()
+        week_start = (check_date - timedelta(days=weekday)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        week_end = week_start + timedelta(days=7)
+        total_count = 0
+        total_hours = 0.0
+        for i in range(7):
+            d = week_start + timedelta(days=i)
+            c, h = self._count_day_tasks(team_id, d)
+            total_count += c
+            total_hours += h
+        return total_count, total_hours
+
     def detect_conflicts(
         self,
         team_id: str,
@@ -745,60 +812,86 @@ class ConflictDetector:
     def _load_tasks_for_date(
         self, team_id: str, target_date: datetime
     ) -> List[InspectionScheduleTask]:
-        """从数据库加载指定班组指定日期的任务"""
+        """从数据库加载指定班组指定日期的任务（同时读WorkOrder和sc_inspection_schedules）"""
+        tasks: List[InspectionScheduleTask] = []
         try:
+            from app.utils.database import get_db, Base
             with get_db() as db:
                 if db is None:
-                    return []
+                    return tasks
                 start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
                 end = start + timedelta(days=1)
-                rows = db.query(WorkOrder).filter(
-                    WorkOrder.assignee_id == str(team_id),
-                    WorkOrder.due_time >= start,
-                    WorkOrder.due_time < end,
-                    WorkOrder.status.notin_(['closed', 'cancelled']),
-                ).all()
-                tasks = []
-                for row in rows:
-                    extra = {}
-                    if row.extra_info:
-                        try:
-                            extra = json.loads(row.extra_info)
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    tasks.append(InspectionScheduleTask(
-                        schedule_id=str(row.id),
-                        node_id=row.node_id or "",
-                        node_type=row.node_type or "",
-                        device_name="",
-                        scheduled_date=row.due_time or start,
-                        end_date=row.due_time or start,
-                        priority=row.priority or "medium",
-                        priority_score=0.0,
-                        status=row.status or "open",
-                        team_id=str(team_id),
-                        team_name="",
-                        assignee_id=row.assignee_id,
-                        assignee_name=row.assignee_name,
-                        inspection_type="work_order",
-                        title=row.title or "",
-                        description=row.description or "",
-                        estimated_hours=float(extra.get('estimated_hours', 4.0)),
-                        standard_codes=[],
-                        prerequisites=[],
-                        conflict_detected=False,
-                        conflict_details=[],
-                        calculation_result=None,
-                        work_order_id=row.id,
-                        cmms_external_id=None,
-                        extra_info=extra,
-                        create_time=row.create_time or datetime.now(),
-                        update_time=row.update_time or datetime.now(),
-                    ))
-                return tasks
+
+                # 1) 读WorkOrder表
+                try:
+                    wo_rows = db.query(WorkOrder).filter(
+                        WorkOrder.assignee_id == str(team_id),
+                        WorkOrder.due_time >= start,
+                        WorkOrder.due_time < end,
+                        WorkOrder.status.notin_(['closed', 'cancelled']),
+                    ).all()
+                    for row in wo_rows:
+                        extra = {}
+                        if row.extra_info:
+                            try:
+                                extra = json.loads(row.extra_info)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        tasks.append(InspectionScheduleTask(
+                            schedule_id=f"WO_{row.id}",
+                            node_id=row.node_id or "",
+                            node_type=row.node_type or "",
+                            device_name="",
+                            scheduled_date=row.due_time or start,
+                            end_date=row.due_time or start,
+                            priority=row.priority or "medium",
+                            priority_score=0.0,
+                            status=row.status or "open",
+                            team_id=str(team_id),
+                            team_name="",
+                            assignee_id=row.assignee_id,
+                            assignee_name=row.assignee_name,
+                            inspection_type="work_order",
+                            title=row.title or "",
+                            description=row.description or "",
+                            estimated_hours=float(extra.get('estimated_hours', 4.0)),
+                            standard_codes=[],
+                            prerequisites=[],
+                            conflict_detected=False,
+                            conflict_details=[],
+                            calculation_result=None,
+                            work_order_id=row.id,
+                            cmms_external_id=None,
+                            extra_info=extra,
+                            create_time=row.create_time or datetime.now(),
+                            update_time=row.update_time or datetime.now(),
+                        ))
+                except Exception as e:
+                    logger.debug(f"读WorkOrder表失败(可接受): {e}")
+
+                # 2) 读sc_inspection_schedules表（自身排程表）
+                try:
+                    sched_table = Base.classes.get('sc_inspection_schedules')
+                    if sched_table is not None:
+                        sched_rows = db.query(sched_table).filter(
+                            sched_table.team_id == str(team_id),
+                            sched_table.scheduled_date >= start,
+                            sched_table.scheduled_date < end,
+                            sched_table.status.notin_(['completed', 'cancelled']),
+                        ).all()
+                        for row in sched_rows:
+                            try:
+                                t = _row_to_schedule_task(row)
+                                if t and t.schedule_id not in {x.schedule_id for x in tasks}:
+                                    tasks.append(t)
+                            except Exception as ie:
+                                logger.debug(f"解析sc_inspection_schedules行失败(可接受): {ie}")
+                except Exception as e:
+                    logger.debug(f"读sc_inspection_schedules表失败(可接受): {e}")
+
         except Exception as e:
-            logger.warning(f"加载班组任务失败: {e}")
-            return []
+            logger.warning(f"加载班组任务失败(返回空列表): {e}")
+        return tasks
 
     def _count_weekly_tasks(self, team_id: str, week_start: datetime) -> int:
         """统计本周任务数"""
@@ -852,6 +945,8 @@ class ICSExporter:
         self,
         task: InspectionScheduleTask,
         include_confidential_info: bool = False,
+        include_alarms: bool = True,
+        alarm_minutes_before: Optional[List[int]] = None,
     ) -> str:
         """
         导出单个排程任务为 ICS 格式
@@ -859,11 +954,17 @@ class ICSExporter:
         Args:
             task: 排程任务
             include_confidential_info: 是否包含敏感信息（内部诊断数据等）
+            include_alarms: 是否包含VALARM提醒
+            alarm_minutes_before: 提前多少分钟提醒列表（None使用默认）
 
         Returns:
             ICS 格式字符串
         """
-        return self._build_ics_content([task], include_confidential_info)
+        return self._build_ics_content(
+            [task], include_confidential_info,
+            include_alarms=include_alarms,
+            alarm_minutes_before=alarm_minutes_before,
+        )
 
     def export_batch(
         self,
@@ -871,6 +972,8 @@ class ICSExporter:
         calendar_name: str = "检验排程",
         calendar_description: str = "",
         include_confidential_info: bool = False,
+        include_alarms: bool = True,
+        alarm_minutes_before: Optional[List[int]] = None,
     ) -> str:
         """批量导出排程任务为 ICS 格式"""
         return self._build_ics_content(
@@ -878,6 +981,8 @@ class ICSExporter:
             include_confidential_info,
             calendar_name,
             calendar_description,
+            include_alarms=include_alarms,
+            alarm_minutes_before=alarm_minutes_before,
         )
 
     def generate_calendar_subscription_url(
@@ -886,6 +991,7 @@ class ICSExporter:
         priority_filter: Optional[List[str]] = None,
         days_ahead: int = 90,
         base_url: str = "",
+        token: Optional[str] = None,
     ) -> str:
         """生成日历订阅链接（WebCal URL）"""
         params: List[str] = []
@@ -894,7 +1000,8 @@ class ICSExporter:
         if priority_filter:
             params.append(f"priorities={','.join(priority_filter)}")
         params.append(f"days={days_ahead}")
-        token = self._generate_subscription_token(team_id, priority_filter, days_ahead)
+        if token is None:
+            token = self._generate_subscription_token(team_id, priority_filter, days_ahead)
         params.append(f"token={token}")
         query_string = "&".join(params)
         webcal_base = base_url.replace('https://', 'webcal://').replace('http://', 'webcal://')
@@ -906,6 +1013,8 @@ class ICSExporter:
         include_confidential: bool,
         calendar_name: str = "检验排程",
         calendar_description: str = "",
+        include_alarms: bool = True,
+        alarm_minutes_before: Optional[List[int]] = None,
     ) -> str:
         """构建 ICS 文件内容"""
         lines: List[str] = []
@@ -920,7 +1029,11 @@ class ICSExporter:
         lines.append("X-WR-TIMEZONE:Asia/Shanghai")
 
         for task in tasks:
-            event_lines = self._build_vevent(task, include_confidential)
+            event_lines = self._build_vevent(
+                task, include_confidential,
+                include_alarms=include_alarms,
+                alarm_minutes_before=alarm_minutes_before,
+            )
             lines.extend(event_lines)
 
         lines.append("END:VCALENDAR")
@@ -930,6 +1043,8 @@ class ICSExporter:
         self,
         task: InspectionScheduleTask,
         include_confidential: bool,
+        include_alarms: bool = True,
+        alarm_minutes_before: Optional[List[int]] = None,
     ) -> List[str]:
         """构建单个 VEVENT 条目"""
         start_dt = task.scheduled_date
@@ -993,12 +1108,14 @@ class ICSExporter:
         else:
             lines.append("STATUS:CONFIRMED")
 
-        for minutes in self.default_reminder_minutes:
-            lines.append("BEGIN:VALARM")
-            lines.append("ACTION:DISPLAY")
-            lines.append(f"DESCRIPTION:提醒: {task.title}")
-            lines.append(f"TRIGGER:-PT{minutes}M")
-            lines.append("END:VALARM")
+        if include_alarms:
+            reminder_minutes = alarm_minutes_before if alarm_minutes_before else self.default_reminder_minutes
+            for minutes in reminder_minutes:
+                lines.append("BEGIN:VALARM")
+                lines.append("ACTION:DISPLAY")
+                lines.append(f"DESCRIPTION:提醒: {task.title}")
+                lines.append(f"TRIGGER:-PT{minutes}M")
+                lines.append("END:VALARM")
 
         if task.work_order_id:
             lines.append("X-WORK-ORDER-ID:" + str(task.work_order_id))
@@ -1499,6 +1616,9 @@ class InspectionScheduleService:
         end_date: Optional[datetime] = None,
         priorities: Optional[List[str]] = None,
         include_confidential: bool = False,
+        include_alarms: bool = True,
+        alarm_minutes_before: Optional[List[int]] = None,
+        calendar_name: Optional[str] = None,
     ) -> str:
         """
         导出排程为 ICS 日历文件
@@ -1509,6 +1629,9 @@ class InspectionScheduleService:
             end_date: 结束日期
             priorities: 优先级过滤
             include_confidential: 是否包含内部诊断数据
+            include_alarms: 是否包含VALARM提醒
+            alarm_minutes_before: 提前提醒分钟列表
+            calendar_name: 日历名称
 
         Returns:
             ICS 格式字符串
@@ -1523,8 +1646,10 @@ class InspectionScheduleService:
             tasks = [t for t in tasks if t.priority.lower() in [p.lower() for p in priorities]]
         return self.ics_exporter.export_batch(
             tasks=tasks,
-            calendar_name=f"检验排程_{team_id or '全部班组'}",
+            calendar_name=calendar_name or f"检验排程_{team_id or '全部班组'}",
             include_confidential_info=include_confidential,
+            include_alarms=include_alarms,
+            alarm_minutes_before=alarm_minutes_before,
         )
 
     def push_to_cmms(
@@ -1825,3 +1950,64 @@ class InspectionScheduleService:
                 logger.info("排程表 sc_inspection_schedules 创建成功")
             except Exception as e2:
                 logger.warning(f"创建排程表失败: {e2}")
+
+
+# ---------- 模块级辅助函数（供ConflictDetector等跨类调用） ----------
+
+def _row_to_schedule_task(row) -> Optional[InspectionScheduleTask]:
+    """将sc_inspection_schedules表行转换为InspectionScheduleTask对象（模块级辅助）"""
+    try:
+        def _safe_json(val):
+            if not val:
+                return None if False else []  # 占位，下面覆盖
+            try:
+                return json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                return None
+
+        def _safe_json_list(val):
+            r = _safe_json(val)
+            return r if isinstance(r, list) else []
+
+        def _safe_json_dict(val):
+            r = _safe_json(val)
+            return r if isinstance(r, dict) else {}
+
+        standard_codes = _safe_json_list(getattr(row, 'standard_codes', None))
+        prerequisites = _safe_json_list(getattr(row, 'prerequisites', None))
+        conflict_details = _safe_json_list(getattr(row, 'conflict_details', None))
+        calculation_result = _safe_json_dict(getattr(row, 'calculation_result', None)) or None
+        extra_info = _safe_json_dict(getattr(row, 'extra_info', None))
+
+        return InspectionScheduleTask(
+            schedule_id=getattr(row, 'schedule_id', ''),
+            node_id=getattr(row, 'node_id', '') or '',
+            node_type=getattr(row, 'node_type', '') or '',
+            device_name=getattr(row, 'device_name', '') or '',
+            scheduled_date=getattr(row, 'scheduled_date', datetime.now()),
+            end_date=getattr(row, 'end_date', None) or (getattr(row, 'scheduled_date', datetime.now()) + timedelta(hours=4)),
+            priority=getattr(row, 'priority', 'routine') or 'routine',
+            priority_score=float(getattr(row, 'priority_score', 0) or 0),
+            status=getattr(row, 'status', 'planned') or 'planned',
+            team_id=getattr(row, 'team_id', None),
+            team_name=getattr(row, 'team_name', None),
+            assignee_id=getattr(row, 'assignee_id', None),
+            assignee_name=getattr(row, 'assignee_name', None),
+            inspection_type=getattr(row, 'inspection_type', 'routine') or 'routine',
+            title=getattr(row, 'title', '') or '',
+            description=getattr(row, 'description', '') or '',
+            estimated_hours=float(getattr(row, 'estimated_hours', 4.0) or 4.0),
+            standard_codes=standard_codes,
+            prerequisites=prerequisites,
+            conflict_detected=bool(getattr(row, 'conflict_detected', False)),
+            conflict_details=conflict_details,
+            calculation_result=calculation_result,
+            work_order_id=getattr(row, 'work_order_id', None),
+            cmms_external_id=getattr(row, 'cmms_external_id', None),
+            extra_info=extra_info,
+            create_time=getattr(row, 'create_time', None) or datetime.now(),
+            update_time=getattr(row, 'update_time', None) or datetime.now(),
+        )
+    except Exception as e:
+        logger.debug(f"转换排程行失败(可接受): {e}")
+        return None

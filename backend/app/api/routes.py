@@ -12582,7 +12582,7 @@ async def calculate_single_schedule(request: ScheduleCalculateRequest):
 
         if request.team_capacity:
             tc = _team_capacity_schema_to_dataclass(request.team_capacity)
-            service.conflict_detector._capacity_cache[tc.team_id] = tc
+            service.conflict_detector.register_team_capacity(tc)
 
         task = service.generate_schedule_for_device(
             device_data=device_data,
@@ -12738,7 +12738,7 @@ async def detect_schedule_conflicts(request: ScheduleConflictDetectRequest):
 
         if request.team_capacity:
             tc = _team_capacity_schema_to_dataclass(request.team_capacity)
-            service.conflict_detector._capacity_cache[tc.team_id] = tc
+            service.conflict_detector.register_team_capacity(tc)
 
         team_name = request.team_name or f"班组_{request.team_id}"
         has_conflict, conflicts = service.conflict_detector.detect_conflicts(
@@ -12932,7 +12932,24 @@ async def export_schedules_to_ics(request: ICSExportRequest):
                 t = service.get_schedule(sid)
                 if t:
                     tasks.append(t)
+            alarm_list = [request.alarm_minutes_before] if request.alarm_minutes_before else None
+            ics_content = service.ics_exporter.export_batch(
+                tasks=tasks,
+                calendar_name=f"检验排程_指定任务_{len(tasks)}项",
+                include_alarms=request.include_alarms,
+                alarm_minutes_before=alarm_list,
+                include_confidential_info=False,
+            )
         else:
+            alarm_list = [request.alarm_minutes_before] if request.alarm_minutes_before else None
+            ics_content = service.export_to_ics(
+                team_id=request.team_id,
+                start_date=request.date_range_start,
+                end_date=request.date_range_end,
+                include_confidential=False,
+                include_alarms=request.include_alarms,
+                alarm_minutes_before=alarm_list,
+            )
             tasks, _ = service.list_schedules(
                 team_id=request.team_id,
                 start_date=request.date_range_start,
@@ -12940,20 +12957,12 @@ async def export_schedules_to_ics(request: ICSExportRequest):
                 limit=1000,
             )
 
-        ics_content = service.ics_exporter.export_batch(
-            tasks=tasks,
-            calendar_name=f"检验排程_{request.team_id or '全部班组'}",
-            include_alarms=request.include_alarms,
-            alarm_minutes_before=request.alarm_minutes_before,
-            include_confidential_info=False,
-        )
-
         team_id_hash = hashlib.md5((request.team_id or 'all').encode()).hexdigest()[:8]
         base_url = config.get('server.base_url', 'http://localhost:8000')
         subscription_token = f"sub_{team_id_hash}_{datetime.now().strftime('%Y%m%d')}"
         calendar_subscription_url = service.ics_exporter.generate_calendar_subscription_url(
             team_id=request.team_id or 'all',
-            base_url=base_url.replace('http://', 'webcal://').replace('https://', 'webcal://'),
+            base_url=base_url,
             token=subscription_token,
         )
 
@@ -12992,7 +13001,7 @@ async def get_calendar_subscription_url(team_id: str):
 
         webcal_url = service.ics_exporter.generate_calendar_subscription_url(
             team_id=team_id,
-            base_url=base_url.replace('http://', 'webcal://').replace('https://', 'webcal://'),
+            base_url=base_url,
             token=token,
         )
 
@@ -13046,8 +13055,12 @@ async def push_schedules_to_cmms(request: CMMSSyncRequest):
         for sid in target_ids:
             try:
                 config_id = None
-                if request.cmms_config_id and request.cmms_config_id.isdigit():
-                    config_id = int(request.cmms_config_id)
+                cfg_raw = request.cmms_config_id
+                if cfg_raw:
+                    try:
+                        config_id = int(str(cfg_raw))
+                    except (ValueError, TypeError):
+                        config_id = None
                 success, external_id, error = service.push_to_cmms(sid, config_id)
                 if success:
                     pushed_count += 1
