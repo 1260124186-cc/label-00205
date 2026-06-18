@@ -334,6 +334,11 @@ class RedisConfigSync:
         """
         触发本地配置重载（跨实例 Redis 广播同步闭环）。
 
+        幂等 & 安全保证：
+          1. 版本号去重：若 version <= 当前已处理版本，直接跳过（双层防护）
+          2. 磁盘重载幂等：ConfigManager.reload_from_disk 内部先 clear 再加载，不重复 records
+          3. 事件派发幂等：各服务 reload_config() 自身为幂等操作，重复调用无副作用
+
         完整执行链路:
           1. 调用 ConfigManager.reload_from_disk() 从磁盘加载最新 config.yaml
              （A 实例已经写入文件，B 实例通过共享存储/NFS 拿到新版本）
@@ -344,6 +349,14 @@ class RedisConfigSync:
           3. 兼容旧回调接口：_callbacks 列表逐个调用
           4. 额外派发 REDIS_CONFIG_SYNC 通用事件供其他模块监听
         """
+        # 版本号去重：双层防护（第一层在 _handle_message / _sync_initial_version，这里是兜底）
+        if version <= self._current_version:
+            logger.debug(
+                f"[redis-sync] 跳过旧版本/重复版本同步: "
+                f"requested=v{version}, current=v{self._current_version}, source={source}"
+            )
+            return
+
         self._current_version = version
 
         # 懒加载避免循环依赖

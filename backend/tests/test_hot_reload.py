@@ -1165,7 +1165,7 @@ class TestCrossInstanceRedisSync:
         # 把 fixture 覆写成 lambda 的 _load_version_meta 临时换回真实方法
         real_load_meta = ConfigManager._load_version_meta
         monkeypatch.setattr(isolated_cm, "_load_version_meta",
-                            lambda clear_existing=True: real_load_meta(isolated_cm, clear_existing=clear_existing))
+                            lambda *args, **kwargs: real_load_meta(isolated_cm, *args, **kwargs))
 
         # 构造磁盘 versions.json：版本号为 5（比内存低）
         payload = {"current_version": 5, "records": [], "updated_at": datetime.now().isoformat()}
@@ -1189,6 +1189,131 @@ class TestCrossInstanceRedisSync:
         assert isolated_cm.current_version == 12, (
             f"版本号未跟随磁盘更新: expected 12, got {isolated_cm.current_version}"
         )
+
+    def test_duplicate_redis_sync_idempotent(self, isolated_cm, tmp_path, monkeypatch):
+        """
+        回归测试：同一版本号的 Redis 广播重复收到 N 次（网络重发），
+        应保证：1) 只触发 1 次真正磁盘重载；2) records 不重复；3) 事件不多发。
+        """
+        from app.core.event_bus import event_bus, EventType
+        from app.core.redis_broadcast import RedisConfigSync
+        from app.core import config_manager as cm_module
+        from app.core import redis_broadcast as rb_module
+        from app.core.config_manager import ConfigManager
+        import json
+        import yaml
+        from datetime import datetime
+
+        # 替换模块级全局单例为隔离实例
+        monkeypatch.setattr(cm_module, "config_manager", isolated_cm)
+        monkeypatch.setattr(rb_module, "config_manager", isolated_cm, raising=False)
+
+        # 换回真实的 _load_version_meta
+        real_load_meta = ConfigManager._load_version_meta
+        monkeypatch.setattr(isolated_cm, "_load_version_meta",
+                            lambda *args, **kwargs: real_load_meta(isolated_cm, *args, **kwargs))
+
+        # 构造磁盘：config.yaml + versions.json（版本 7）
+        config_path = isolated_cm.config_path
+        new_yaml = {
+            "logging": {"level": {"default": "WARNING"}},
+            "scheduler": {"prediction_job": {"enabled": True, "cron": "*/20 * * * *"}},
+            "stream_prediction": {
+                "backpressure": {"max_concurrent_streams": 16},
+                "window": {"size": 100, "ttl_seconds": 3600, "storage_type": "memory"},
+            },
+            "warning_strategy": {"preload": {"current_threshold": 0.88}},
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(new_yaml, f, allow_unicode=True)
+
+        fake_record = {
+            "version": 7,
+            "timestamp": datetime.now().isoformat(),
+            "operator": "remote-user",
+            "description": "异地实例更新",
+            "changes": [
+                {"path": "logging.level.default", "old": "INFO", "new": "WARNING", "hot_updatable": True},
+                {"path": "scheduler.prediction_job.cron", "old": "*/30 * * * *", "new": "*/20 * * * *", "hot_updatable": True},
+            ],
+            "snapshot_before": "",
+            "snapshot_after": "",
+            "rollback_target": None,
+        }
+        with open(isolated_cm.version_meta_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "current_version": 7,
+                "records": [fake_record],
+                "updated_at": datetime.now().isoformat(),
+            }, f, ensure_ascii=False)
+
+        # 统计事件派发次数
+        event_counts = {et: 0 for et in [
+            EventType.LOG_LEVEL_CHANGED,
+            EventType.SCHEDULER_CONFIG_CHANGED,
+            EventType.REDIS_CONFIG_SYNC,
+            EventType.CONFIG_PRE_RELOAD,
+            EventType.CONFIG_POST_RELOAD,
+        ]}
+        lock = threading.Lock()
+
+        def make_counter(et):
+            def cb(e):
+                with lock:
+                    event_counts[et] += 1
+            return cb
+
+        sub_ids = [event_bus.subscribe(et, make_counter(et)) for et in event_counts]
+
+        # 构造 RedisConfigSync 实例，初始版本 = 0
+        sync = RedisConfigSync.__new__(RedisConfigSync)
+        sync._instance_id = "instance-b"
+        sync._current_version = 0
+        sync._callbacks = []
+
+        try:
+            changed_paths = [
+                "logging.level.default",
+                "scheduler.prediction_job.cron",
+            ]
+
+            # 第 1 次：新版本，应该触发完整 reload
+            sync._trigger_reload(version=7, changed_paths=changed_paths, source="redis:instance-a")
+            time.sleep(0.1)
+            first_version = sync.current_version
+            first_counts = {k: v for k, v in event_counts.items()}
+
+            # 第 2-5 次：同一版本重复收到（模拟网络重发），应该被去重跳过
+            for i in range(4):
+                sync._trigger_reload(version=7, changed_paths=changed_paths, source="redis:instance-a")
+            time.sleep(0.1)
+
+            with lock:
+                # 版本号保持 7，没有变
+                assert sync.current_version == 7
+                assert first_version == 7
+
+                # 每种事件应该只被派发 1 次（去重生效）
+                for et, cnt in event_counts.items():
+                    assert cnt == first_counts[et] == 1, (
+                        f"{et} 事件次数错误: first={first_counts[et]}, final={cnt} (应均为 1)"
+                    )
+
+                # records 数量应为 1，不重复
+                assert len(isolated_cm._version_records) == 1, (
+                    f"records 重复: {len(isolated_cm._version_records)} (应为 1)"
+                )
+
+            # 再验证：再调用 reload_from_disk 2 次，records 仍不重复
+            isolated_cm.reload_from_disk()
+            isolated_cm.reload_from_disk()
+            assert len(isolated_cm._version_records) == 1, (
+                f"reload_from_disk 导致 records 重复: {len(isolated_cm._version_records)}"
+            )
+
+        finally:
+            for sid in sub_ids:
+                event_bus.unsubscribe(sid)
 
 
 if __name__ == "__main__":
