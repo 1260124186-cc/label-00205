@@ -31,7 +31,7 @@ model:
     dropout_rate: 0.2         # Dropout率
     dense_units: 32           # 全连接层单元数
     output_classes: 5         # 输出类别数
-    
+
   # 法兰面注意力模型参数
   flange_attention:
     max_bolts: 20             # 最大螺栓数
@@ -72,12 +72,12 @@ preprocessing:
     contamination: 0.1        # 异常比例
     n_estimators: 100         # 树数量
     random_state: 42
-    
+
   # 卡尔曼滤波参数
   kalman_filter:
     process_noise: 0.01
     measurement_noise: 0.1
-    
+
   # 标准化配置
   normalization:
     method: "minmax"          # minmax 或 zscore
@@ -86,12 +86,12 @@ preprocessing:
 warning_strategy:
   # 策略类型: 1=应报尽报, 2=精准报警
   strategy_type: 1
-  
+
   # 策略一: 应报尽报
   strategy_1:
     false_positive_threshold: 0.05    # 误报率阈值
     confidence_threshold: 0.7         # 置信度阈值
-    
+
   # 策略二: 精准报警
   strategy_2:
     false_negative_threshold: 0.10    # 漏报率阈值
@@ -193,6 +193,11 @@ scheduler:
     enabled: true
     cron: "*/5 * * * *"       # 每5分钟检查一次升级
 
+  # 装置关联图更新任务
+  association_graph_update_job:
+    enabled: true
+    cron: "0 1 * * *"         # 每天凌晨1点执行
+
 # 日志配置
 logging:
   level: "INFO"
@@ -289,10 +294,10 @@ label_import:
 federated:
   # 是否启用联邦学习
   enabled: true
-  
+
   # 聚合策略: fedavg, weighted_avg, median, trimmed_mean, fedprox, fedopt
   aggregation_strategy: "weighted_avg"
-  
+
   # 聚合器配置
   aggregation_config:
     trim_ratio: 0.1           # 修剪均值比例
@@ -300,7 +305,7 @@ federated:
     server_learning_rate: 1.0 # 服务器学习率
     enable_outlier_detection: true  # 是否启用异常值检测
     outlier_threshold: 2.0    # 异常值检测阈值（标准差倍数）
-  
+
   # 隐私保护配置（全局默认，客户端可单独配置）
   privacy_config:
     mechanism: "none"         # none, dp, secagg, combined
@@ -310,41 +315,41 @@ federated:
     clip_norm: 1.0            # 梯度裁剪范数
     num_parties: 3            # 安全聚合参与方数量
     secret_share_threshold: 2 # 秘密共享阈值
-  
+
   # 轮次配置
   max_rounds: 100             # 最大轮次
   round_timeout: 3600         # 轮次超时时间（秒）
   min_clients_per_round: 2    # 每轮最少客户端数
-  
+
   # 全局模型保存路径
   save_path: "./trained_models/federated"
   max_versions: 10            # 每个模型最大保留版本数
-  
+
   # 两层架构配置
   enable_two_level_arch: true # 是否启用全局+本地微调两层架构
-  
+
   # 客户端配置
   client_config:
     # 更新类型: weights, gradients, difference
     update_type: "difference"
-    
+
     # 本地训练参数
     local_epochs: 5           # 本地训练轮数
     local_batch_size: 32      # 本地批次大小
     local_learning_rate: 0.001 # 本地学习率
-    
+
     # 本地微调参数
     fine_tune_epochs: 3       # 微调轮数
     fine_tune_layers:         # 需要微调的层名
       - "output"
       - "fc"
-    
+
     # 两层架构
     enable_two_level_arch: true
-    
+
     # 数据采样
     sample_ratio: 1.0         # 本地数据采样比例
-    
+
     # 客户端隐私配置（覆盖全局配置）
     privacy_config:
       mechanism: "none"
@@ -352,7 +357,7 @@ federated:
       delta: 1e-5
       noise_scale: 0.1
       clip_norm: 1.0
-  
+
   # 客户端选择
   enable_client_selection: false  # 是否启用客户端选择
   client_selection_ratio: 0.8     # 每轮选择的客户端比例
@@ -593,10 +598,10 @@ feature_engineering:
 stream_prediction:
   # 是否启用流式预测
   enabled: false
-  
+
   # 默认预测模式: batch | stream
   prediction_mode: batch
-  
+
   # 滑动窗口配置
   window:
     # 窗口存储类型: memory | redis
@@ -609,7 +614,7 @@ stream_prediction:
     redis_url: "redis://localhost:6379/0"
     # Redis键前缀
     key_prefix: "stream_window"
-  
+
   # 背压与限流配置
   backpressure:
     # 单节点最大并发流数
@@ -620,20 +625,20 @@ stream_prediction:
     max_queue_size: 500
     # 队列等待超时时间（秒）
     queue_timeout_seconds: 30.0
-  
+
   # 流数据源配置
   sources:
     # HTTP 流（总是可用，通过API接入）
     http:
       enabled: true
-    
+
     # Kafka 流
     kafka:
       enabled: false
       bootstrap_servers: "localhost:9092"
       topic: "bolt_data"
       group_id: "stream_prediction"
-    
+
     # MQTT 流
     mqtt:
       enabled: false
@@ -643,17 +648,17 @@ stream_prediction:
       client_id: "stream_prediction"
       username: ""
       password: ""
-  
+
   # 事件发布配置
   event_publishing:
     # 事件发布类型: in_process | kafka | mqtt
     type: in_process
-    
+
     # Kafka 发布配置
     kafka:
       bootstrap_servers: "localhost:9092"
       topic: "stream_events"
-    
+
     # MQTT 发布配置
     mqtt:
       broker: "localhost"
@@ -672,57 +677,57 @@ spare_parts:
     default: 30           # 普通阈值 - RUL低于此值生成需求建议
     urgent: 14            # 紧急阈值 - RUL低于此值标记为紧急
     critical: 7           # 特急阈值 - RUL低于此值标记为特急
-  
+
   # 库存状态阈值
   stock_thresholds:
     shortage_ratio: 0.5   # 库存不足比例（可用库存/需求数量 < 此值为缺货）
     safety_stock_warning: 1.2  # 低于安全库存的预警倍数
-  
+
   # 采购优化器默认配置
   purchase_optimizer:
     # 默认服务水平（0.90-0.999），对应Z分数:
     # 0.90=1.28, 0.95=1.645, 0.98=2.05, 0.99=2.33, 0.999=3.09
     default_service_level: 0.95
-    
+
     # 安全库存计算方法: statistical(统计法) / days_coverage(天数覆盖法)
     default_safety_stock_method: "statistical"
-    
+
     # 默认安全库存天数（days_coverage方法使用）
     default_safety_stock_days: 7
-    
+
     # 需求统计历史天数
     default_history_days: 90
-    
+
     # 单次订货成本（元/次）
     default_order_cost: 500.0
-    
+
     # 年持有成本率（%）
     default_holding_cost_rate: 0.25
-    
+
     # ABC分类阈值（按年使用价值占比）
     abc_thresholds:
       a: 0.80   # 前80%价值为A类
       b: 0.95   # 前80%-95%为B类
       # 剩余5%为C类
-    
+
     # 经济订货批量（EOQ）最小/最大值限制
     eoq_limits:
       min_quantity: 1
       max_quantity: 10000
-  
+
   # 自动扫描RUL定时任务
   auto_scan:
     enabled: true
     cron: "0 1 * * *"          # 每天凌晨1点执行
     auto_create_work_order: true  # 缺货时自动创建工单
     auto_upgrade_priority: true   # 缺货时自动升级工单优先级
-  
+
   # 需求单自动审批配置
   auto_approval:
     enabled: false         # 是否启用自动审批
     max_amount: 10000      # 单SKU金额上限（元）
     max_urgency: "normal"  # 最大紧急程度（normal/urgent/critical）
-  
+
   # 工单优先级升级配置
   work_order_upgrade:
     # 升级映射：库存状态 -> 优先级升级级别
@@ -782,3 +787,87 @@ timeseries:
     use_for_prediction: false
     # 窗口大小（数据点数）
     window_size: 100
+
+# ============================================================
+# 跨装置风险传播与聚合分析配置
+# ============================================================
+risk_propagation:
+  # 是否启用风险传播
+  enabled: true
+
+  # 关联权重配置（各维度权重总和应为1.0）
+  association_weights:
+    same_pipeline: 0.30          # 同管线权重
+    same_vibration_source: 0.25  # 同振动源权重
+    same_shift: 0.05             # 同班次权重
+    co_fault: 0.20               # 共故障权重
+    physical: 0.10               # 物理邻接权重
+    granger: 0.10                # Granger因果权重
+
+  # 风险传播算法配置
+  propagation:
+    # 最大传播深度
+    max_depth: 3
+    # 深度衰减因子（每深一层乘以该系数）
+    depth_decay: 0.6
+    # 最小关联权重阈值（低于此值不传播）
+    min_association_weight: 0.05
+    # 源风险严重性系数（风险评分越高，传播强度越大）
+    source_severity_factor: 0.5
+    # 风险上调系数上限（避免无限放大）
+    max_upregulation_coefficient: 3.0
+
+  # 风险等级阈值（与风险模型保持一致）
+  risk_levels:
+    high:
+      min: 1
+      max: 3
+    medium:
+      min: 4
+      max: 7
+    low:
+      min: 8
+      max: 10
+
+  # 共故障历史配置
+  co_fault:
+    # 历史数据时间窗口（天）
+    history_days: 90
+    # 最小共故障次数（低于此次数不计入权重）
+    min_co_fault_count: 1
+    # 最大共故障次数（用于归一化）
+    max_co_fault_count: 20
+
+  # 物理邻接配置
+  physical:
+    # 距离单位：公里（使用Haversine公式）
+    distance_unit: "km"
+    # 最大有效距离（公里）
+    max_distance: 100.0
+    # 距离衰减系数
+    distance_decay: 0.05
+
+  # 风险热力矩阵配置
+  heatmap:
+    # 是否包含对角线（装置自身）
+    include_diagonal: false
+    # 对角线值
+    diagonal_value: 1.0
+
+  # 传播路径配置
+  paths:
+    # 默认返回前K条路径
+    default_top_k: 10
+    # 路径最小总权重
+    min_path_total_weight: 0.3
+    # 路径最小平均权重
+    min_path_avg_weight: 0.2
+
+  # 数据库配置
+  database:
+    # 是否持久化关联关系到数据库
+    persist_associations: true
+    # 是否记录传播历史
+    record_propagation_history: true
+    # 传播历史保留天数
+    history_retention_days: 180

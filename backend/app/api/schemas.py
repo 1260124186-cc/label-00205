@@ -5818,3 +5818,171 @@ class DeviceFaultAlertSchema(BaseModel):
 class DeviceFaultAlertListResponse(BaseModel):
     total: int = Field(..., description="总数")
     items: List[DeviceFaultAlertSchema] = Field(default_factory=list, description="告警列表")
+
+
+# ============================================================
+# 跨装置风险传播与聚合分析 - Schema
+# ============================================================
+
+class AssociationWeightsSchema(BaseModel):
+    """关联权重Schema"""
+    same_pipeline: float = Field(..., description="同管线权重")
+    same_vibration_source: float = Field(..., description="同振动源权重")
+    same_shift: float = Field(..., description="同班次权重")
+    co_fault: float = Field(..., description="共故障权重")
+    physical: float = Field(..., description="物理邻接权重")
+
+
+class RiskUpregulationResultSchema(BaseModel):
+    """风险上调结果Schema"""
+    device_id: str = Field(..., description="装置ID")
+    device_name: Optional[str] = Field(None, description="装置名称")
+    original_risk_score: float = Field(..., description="原始风险评分")
+    adjusted_risk_score: float = Field(..., description="调整后风险评分")
+    upregulation_coefficient: float = Field(..., description="风险上调系数")
+    propagation_depth: int = Field(..., description="传播深度")
+    total_association_weight: float = Field(..., description="总关联权重")
+    association_weights: AssociationWeightsSchema = Field(..., description="各维度关联权重")
+    association_types: List[str] = Field(default_factory=list, description="关联类型列表")
+    original_risk_level: str = Field(..., description="原始风险等级")
+    adjusted_risk_level: str = Field(..., description="调整后风险等级")
+    risk_level_upgraded: bool = Field(..., description="风险等级是否升级")
+
+
+class RiskPropagationCalculateRequest(BaseModel):
+    """风险传播计算请求"""
+    source_device_id: str = Field(..., description="源装置ID")
+    source_flange_id: str = Field(..., description="源法兰ID")
+    source_risk_score: Optional[float] = Field(None, description="源装置风险评分，不填则使用当前评分")
+    current_risk_scores: Dict[str, float] = Field(..., description="当前各装置风险评分字典")
+
+
+class RiskPropagationCalculateResponse(BaseModel):
+    """风险传播计算响应"""
+    source_device_id: str = Field(..., description="源装置ID")
+    source_flange_id: str = Field(..., description="源法兰ID")
+    source_risk_score: float = Field(..., description="源装置风险评分")
+    propagation_time: str = Field(..., description="传播计算时间")
+    results: Dict[str, RiskUpregulationResultSchema] = Field(..., description="各装置风险上调结果")
+    summary: Dict[str, Any] = Field(..., description="传播汇总信息")
+
+
+class RiskHeatmapMatrixRequest(BaseModel):
+    """风险热力矩阵请求"""
+    device_ids: Optional[List[str]] = Field(None, description="装置ID列表，不填则使用所有装置")
+    risk_scores: Optional[Dict[str, float]] = Field(None, description="风险评分字典")
+    highlight_source: Optional[str] = Field(None, description="高亮的源装置ID")
+
+
+class RiskHeatmapCellSchema(BaseModel):
+    """热力矩阵单元格Schema"""
+    row_device_id: str = Field(..., description="行装置ID")
+    col_device_id: str = Field(..., description="列装置ID")
+    risk_value: float = Field(..., description="风险值")
+    association_weight: float = Field(..., description="关联权重")
+    is_highlighted: bool = Field(..., description="是否高亮")
+
+
+class RiskHeatmapMatrixResponse(BaseModel):
+    """风险热力矩阵响应"""
+    device_ids: List[str] = Field(..., description="装置ID列表")
+    device_names: List[str] = Field(..., description="装置名称列表")
+    risk_scores: List[float] = Field(..., description="各装置风险评分")
+    matrix: List[List[float]] = Field(..., description="风险热力矩阵")
+    association_matrix: List[List[float]] = Field(..., description="关联权重矩阵")
+    highlight_source: Optional[str] = Field(None, description="高亮的源装置ID")
+    highlight_mask: List[List[bool]] = Field(..., description="高亮掩码矩阵")
+    cells: List[RiskHeatmapCellSchema] = Field(default_factory=list, description="单元格列表（用于前端渲染）")
+    max_risk_value: float = Field(..., description="最大风险值")
+    min_risk_value: float = Field(..., description="最小风险值")
+
+
+class RiskPropagationPathRequest(BaseModel):
+    """传播路径查询请求"""
+    source_device_id: str = Field(..., description="源装置ID")
+    target_device_id: Optional[str] = Field(None, description="目标装置ID，不填则返回所有高权重路径")
+    top_k: int = Field(default=10, ge=1, le=100, description="返回前K条路径")
+    max_depth: Optional[int] = Field(None, description="最大传播深度")
+    current_risk_scores: Optional[Dict[str, float]] = Field(None, description="当前风险评分")
+
+
+class RiskPropagationPathSchema(BaseModel):
+    """传播路径Schema"""
+    path: List[str] = Field(..., description="路径上的装置ID列表")
+    path_names: List[str] = Field(..., description="路径上的装置名称列表")
+    total_weight: float = Field(..., description="路径总权重")
+    avg_weight: float = Field(..., description="路径平均权重")
+    min_weight: float = Field(..., description="路径最小权重")
+    depth: int = Field(..., description="路径深度")
+    edge_weights: List[float] = Field(..., description="各边权重")
+    edge_association_types: List[List[str]] = Field(default_factory=list, description="各边关联类型")
+
+
+class RiskPropagationPathListResponse(BaseModel):
+    """传播路径列表响应"""
+    source_device_id: str = Field(..., description="源装置ID")
+    target_device_id: Optional[str] = Field(None, description="目标装置ID")
+    total_paths: int = Field(..., description="总路径数")
+    paths: List[RiskPropagationPathSchema] = Field(default_factory=list, description="传播路径列表")
+
+
+class AssociationGraphUpdateRequest(BaseModel):
+    """关联图更新请求"""
+    devices: List[Dict[str, Any]] = Field(default_factory=list, description="装置列表")
+    co_fault_history: Optional[List[Dict[str, Any]]] = Field(None, description="共故障历史记录")
+
+
+class AssociationGraphUpdateResponse(BaseModel):
+    """关联图更新响应"""
+    device_count: int = Field(..., description="装置数量")
+    edge_count: int = Field(..., description="关联边数量")
+    update_count: int = Field(..., description="更新次数")
+    last_update_time: str = Field(..., description="最后更新时间")
+    weight_config: Dict[str, float] = Field(..., description="权重配置")
+
+
+class AssociationGraphDataResponse(BaseModel):
+    """关联图数据响应"""
+    nodes: List[Dict[str, Any]] = Field(default_factory=list, description="节点列表")
+    edges: List[Dict[str, Any]] = Field(default_factory=list, description="边列表")
+    node_count: int = Field(..., description="节点数量")
+    edge_count: int = Field(..., description="边数量")
+    last_update_time: Optional[str] = Field(None, description="最后更新时间")
+    weight_config: Dict[str, float] = Field(..., description="权重配置")
+
+
+class DeviceAssociationRequest(BaseModel):
+    """装置关联查询请求"""
+    device_id: str = Field(..., description="装置ID")
+    min_weight: Optional[float] = Field(None, ge=0.0, le=1.0, description="最小关联权重过滤")
+
+
+class DeviceAssociationSchema(BaseModel):
+    """装置关联Schema"""
+    device_id: str = Field(..., description="关联装置ID")
+    device_name: str = Field(..., description="关联装置名称")
+    composite_weight: float = Field(..., description="综合关联权重")
+    association_types: List[str] = Field(default_factory=list, description="关联类型列表")
+    weights: AssociationWeightsSchema = Field(..., description="各维度关联权重")
+
+
+class DeviceAssociationListResponse(BaseModel):
+    """装置关联列表响应"""
+    device_id: str = Field(..., description="查询的装置ID")
+    total: int = Field(..., description="关联装置总数")
+    associations: List[DeviceAssociationSchema] = Field(default_factory=list, description="关联装置列表")
+
+
+class RiskPropagationStatisticsResponse(BaseModel):
+    """风险传播统计信息响应"""
+    device_count: int = Field(..., description="装置数量")
+    edge_count: int = Field(..., description="关联边数量")
+    update_count: int = Field(..., description="更新次数")
+    last_update_time: Optional[str] = Field(None, description="最后更新时间")
+    weight_config: Dict[str, float] = Field(..., description="权重配置")
+
+
+class CoFaultEventRecordRequest(BaseModel):
+    """共故障事件记录请求"""
+    device_ids: List[str] = Field(..., description="同时发生故障的装置ID列表")
+    timestamp: Optional[str] = Field(None, description="故障时间戳")

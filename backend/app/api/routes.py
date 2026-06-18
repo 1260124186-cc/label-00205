@@ -203,6 +203,18 @@ from app.api.schemas import (
     SignificantChangeRequest, SignificantChangeSliceSchema, SignificantChangeListResponse,
     SignificantChangeItemSchema,
     WSMessageSchema, IncrementalUpdateSchema,
+    # 跨装置风险传播与聚合分析
+    AssociationWeightsSchema,
+    RiskUpregulationResultSchema,
+    RiskPropagationCalculateRequest, RiskPropagationCalculateResponse,
+    RiskHeatmapMatrixRequest, RiskHeatmapMatrixResponse,
+    RiskHeatmapCellSchema,
+    RiskPropagationPathRequest, RiskPropagationPathSchema, RiskPropagationPathListResponse,
+    AssociationGraphUpdateRequest, AssociationGraphUpdateResponse,
+    AssociationGraphDataResponse,
+    DeviceAssociationRequest, DeviceAssociationSchema, DeviceAssociationListResponse,
+    RiskPropagationStatisticsResponse,
+    CoFaultEventRecordRequest,
     # What-if 情景仿真
     WhatIfSimulationRequest, WhatIfSimulationResponse,
     SimulationScenarioHypothesis, SimulationThresholdsSchema,
@@ -232,6 +244,7 @@ from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
 from app.services.visualization_3d import Visualization3DService
 from app.services.risk_visualization.service import RiskVisualizationService
+from app.services.risk_visualization import RiskPropagationService
 from app.services.what_if_simulation import WhatIfSimulator
 from app.api.validators import (
     DataValidator,
@@ -255,6 +268,7 @@ prediction_service = None
 training_service = None
 visualization_3d_service = None
 risk_visualization_service = None
+risk_propagation_service = None
 what_if_simulator = None
 federated_server = None
 federated_clients: Dict[str, Any] = {}
@@ -298,6 +312,14 @@ def get_risk_visualization_service() -> RiskVisualizationService:
     if risk_visualization_service is None:
         risk_visualization_service = RiskVisualizationService()
     return risk_visualization_service
+
+
+def get_risk_propagation_service() -> RiskPropagationService:
+    """获取风险传播服务实例"""
+    global risk_propagation_service
+    if risk_propagation_service is None:
+        risk_propagation_service = RiskPropagationService()
+    return risk_propagation_service
 
 
 def get_inspection_schedule_service():
@@ -12117,6 +12139,309 @@ async def detect_significant_changes(
         raise
     except Exception as e:
         logger.error(f"检测显著变化失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 跨装置风险传播与聚合分析
+# ============================================================
+
+
+@router.post(
+    "/risk/propagation/calculate",
+    response_model=RiskPropagationCalculateResponse,
+    tags=["风险传播"],
+    summary="计算风险传播（装置预警时调用）"
+)
+async def calculate_risk_propagation(
+    request: RiskPropagationCalculateRequest,
+):
+    """
+    当装置A某法兰发生紧急预警时，评估关联装置B的螺栓风险上调系数。
+
+    **输入**:
+    - source_device_id: 源装置ID
+    - source_flange_id: 源法兰ID
+    - source_risk_score: 源装置风险评分（可选）
+    - current_risk_scores: 当前各装置风险评分字典
+
+    **输出**:
+    - 各关联装置的风险上调系数、调整后风险评分、风险等级变化
+    - 传播汇总信息（影响装置数、等级升级列表等）
+    """
+    try:
+        service = get_risk_propagation_service()
+        result = service.calculate_risk_propagation(
+            source_device_id=request.source_device_id,
+            source_flange_id=request.source_flange_id,
+            current_risk_scores=request.current_risk_scores,
+            source_risk_score=request.source_risk_score,
+        )
+
+        return RiskPropagationCalculateResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"计算风险传播失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/propagation/heatmap",
+    response_model=RiskHeatmapMatrixResponse,
+    tags=["风险传播"],
+    summary="获取装置级风险热力矩阵（大屏展示）"
+)
+async def get_risk_heatmap_matrix(
+    device_ids: Optional[str] = Query(None, description="装置ID列表，逗号分隔"),
+    highlight_source: Optional[str] = Query(None, description="高亮的源装置ID"),
+):
+    """
+    获取装置级风险热力矩阵，用于大屏展示。
+
+    **输入**:
+    - device_ids: 装置ID列表，逗号分隔（可选，不填则使用所有装置）
+    - highlight_source: 高亮的源装置ID（可选，用于传播路径高亮）
+
+    **输出**:
+    - N×N风险热力矩阵
+    - 关联权重矩阵
+    - 高亮掩码矩阵
+    - 单元格详情列表
+    """
+    try:
+        service = get_risk_propagation_service()
+
+        device_id_list = None
+        if device_ids:
+            device_id_list = [d.strip() for d in device_ids.split(',') if d.strip()]
+
+        result = service.get_risk_heatmap_matrix(
+            device_ids=device_id_list,
+            highlight_source=highlight_source,
+        )
+
+        return RiskHeatmapMatrixResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取风险热力矩阵失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/propagation/paths",
+    response_model=RiskPropagationPathListResponse,
+    tags=["风险传播"],
+    summary="获取传播路径（大屏传播路径高亮）"
+)
+async def get_propagation_paths(
+    source_device_id: str = Query(..., description="源装置ID"),
+    target_device_id: Optional[str] = Query(None, description="目标装置ID"),
+    top_k: int = Query(10, description="返回前K条路径", ge=1, le=100),
+    max_depth: Optional[int] = Query(None, description="最大传播深度"),
+):
+    """
+    查找从源装置出发的高权重传播路径，用于大屏传播路径高亮展示。
+
+    **输入**:
+    - source_device_id: 源装置ID
+    - target_device_id: 目标装置ID（可选，不填则返回所有高权重路径）
+    - top_k: 返回前K条路径
+    - max_depth: 最大传播深度（可选）
+
+    **输出**:
+    - 传播路径列表，每条路径包含：装置ID序列、名称序列、总权重、平均权重、各边权重等
+    """
+    try:
+        service = get_risk_propagation_service()
+        paths = service.get_propagation_paths(
+            source_device_id=source_device_id,
+            target_device_id=target_device_id,
+            top_k=top_k,
+            max_depth=max_depth,
+        )
+
+        return RiskPropagationPathListResponse(
+            source_device_id=source_device_id,
+            target_device_id=target_device_id,
+            total_paths=len(paths),
+            paths=paths,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取传播路径失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/risk/association-graph/update",
+    response_model=AssociationGraphUpdateResponse,
+    tags=["风险传播"],
+    summary="手动触发关联图更新"
+)
+async def update_association_graph(
+    request: AssociationGraphUpdateRequest,
+):
+    """
+    手动触发装置关联图更新。
+
+    **输入**:
+    - devices: 装置列表（可选，不填则使用数据库数据）
+    - co_fault_history: 共故障历史记录（可选）
+
+    **输出**:
+    - 更新结果统计（装置数、边数、更新次数等）
+    """
+    try:
+        service = get_risk_propagation_service()
+        result = service.update_association_graph(
+            devices=request.devices,
+            co_fault_history=request.co_fault_history,
+        )
+
+        return AssociationGraphUpdateResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新关联图失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/association-graph/data",
+    response_model=AssociationGraphDataResponse,
+    tags=["风险传播"],
+    summary="获取关联图数据（图可视化）"
+)
+async def get_association_graph_data():
+    """
+    获取完整的装置关联图数据，用于图可视化展示。
+
+    **输出**:
+    - nodes: 节点列表（包含装置信息）
+    - edges: 边列表（包含各维度权重）
+    - 统计信息
+    """
+    try:
+        service = get_risk_propagation_service()
+        result = service.get_association_graph_data()
+
+        return AssociationGraphDataResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取关联图数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/device/associations",
+    response_model=DeviceAssociationListResponse,
+    tags=["风险传播"],
+    summary="获取指定装置的关联装置列表"
+)
+async def get_device_associations(
+    device_id: str = Query(..., description="装置ID"),
+    min_weight: Optional[float] = Query(None, description="最小关联权重过滤", ge=0.0, le=1.0),
+):
+    """
+    获取指定装置的关联装置列表，按关联权重排序。
+
+    **输入**:
+    - device_id: 装置ID
+    - min_weight: 最小关联权重过滤（可选）
+
+    **输出**:
+    - 关联装置列表，包含综合权重、各维度权重、关联类型等
+    """
+    try:
+        service = get_risk_propagation_service()
+        associations = service.get_device_associations(
+            device_id=device_id,
+            min_weight=min_weight,
+        )
+
+        return DeviceAssociationListResponse(
+            device_id=device_id,
+            total=len(associations),
+            associations=associations,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取装置关联列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/risk/propagation/statistics",
+    response_model=RiskPropagationStatisticsResponse,
+    tags=["风险传播"],
+    summary="获取风险传播统计信息"
+)
+async def get_risk_propagation_statistics():
+    """
+    获取风险传播服务的统计信息。
+
+    **输出**:
+    - 装置数、关联边数、更新次数、最后更新时间、权重配置
+    """
+    try:
+        service = get_risk_propagation_service()
+        result = service.get_statistics()
+
+        return RiskPropagationStatisticsResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取风险传播统计信息失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/risk/propagation/record-co-fault",
+    tags=["风险传播"],
+    summary="记录共故障事件"
+)
+async def record_co_fault_event(
+    request: CoFaultEventRecordRequest,
+):
+    """
+    当多个装置同时发生故障时，调用此接口记录共故障事件，更新共故障关联权重。
+
+    **输入**:
+    - device_ids: 同时发生故障的装置ID列表
+    - timestamp: 故障时间戳（可选）
+
+    **输出**:
+    - 操作结果
+    """
+    try:
+        service = get_risk_propagation_service()
+        service.record_co_fault_event(
+            device_ids=request.device_ids,
+            timestamp=request.timestamp,
+        )
+
+        return {
+            "success": True,
+            "message": "共故障事件已记录",
+            "device_count": len(request.device_ids),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"记录共故障事件失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

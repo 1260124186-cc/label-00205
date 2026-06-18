@@ -99,6 +99,7 @@ class TaskScheduler:
             'monthly_prediction_job': 'prediction',
             'alert_upgrade_job': 'alert',
             'audit_cleanup_job': 'maintenance',
+            'association_graph_update_job': 'association_graph',
         }
 
         self.leader_required = config.get('scheduler.leader_election.required', False)
@@ -113,6 +114,7 @@ class TaskScheduler:
             'monthly_prediction_job',
             'alert_upgrade_job',
             'audit_cleanup_job',
+            'association_graph_update_job',
         ]
 
         event_bus.subscribe(
@@ -218,6 +220,18 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"审计清理任务已添加: {cron}")
+
+        association_graph_config = self.config.get('association_graph_update_job', {})
+        if association_graph_config.get('enabled', True):
+            cron = association_graph_config.get('cron', '0 1 * * *')
+            self.scheduler.add_job(
+                self._association_graph_update_job,
+                CronTrigger.from_crontab(cron),
+                id='association_graph_update_job',
+                name='装置关联图更新任务',
+                replace_existing=True
+            )
+            logger.info(f"关联图更新任务已添加: {cron}")
 
     def _acquire_leadership_if_needed(self, job_name: str) -> bool:
         """
@@ -519,6 +533,176 @@ class TaskScheduler:
 
         except Exception as e:
             logger.error(f"审计清理任务失败: {e}")
+
+    def _association_graph_update_job(self) -> None:
+        """
+        装置关联图更新任务
+
+        定期更新装置关联图，包括同管线、同振动源、同班次、共故障、物理邻接等关联权重。
+        """
+        job_name = 'association_graph_update_job'
+        logger.info("开始执行装置关联图更新任务")
+
+        try:
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.risk_visualization import RiskPropagationService
+                from app.utils.database import get_db
+                from sqlalchemy import text
+
+                propagation_service = RiskPropagationService()
+
+                devices = []
+                try:
+                    with get_db() as db:
+                        result = db.execute(text("""
+                            SELECT
+                                id,
+                                node_code,
+                                node_name,
+                                node_type,
+                                pipeline_id,
+                                vibration_source,
+                                shifts,
+                                latitude,
+                                longitude,
+                                extra_info
+                            FROM sc_org_nodes
+                            WHERE node_type = 'unit'
+                              AND status = 'active'
+                        """))
+                        for row in result:
+                            device = {
+                                'id': str(row[0]),
+                                'device_id': str(row[0]),
+                                'node_code': row[1],
+                                'name': row[2] or str(row[0]),
+                                'node_type': row[3],
+                                'pipeline_id': row[4],
+                                'vibration_source': row[5],
+                                'shifts': self._parse_json_field(row[6], []),
+                                'latitude': row[7],
+                                'longitude': row[8],
+                                'extra_info': self._parse_json_field(row[9], {}),
+                            }
+                            devices.append(device)
+                except Exception as e:
+                    logger.warning(f"从数据库读取装置信息失败，将使用内存缓存: {e}")
+
+                co_fault_history = []
+                try:
+                    with get_db() as db:
+                        result = db.execute(text("""
+                            SELECT
+                                GROUP_CONCAT(DISTINCT node_id ORDER BY node_id) as device_ids,
+                                DATE_FORMAT(create_time, '%Y-%m-%d %H:00:00') as fault_time
+                            FROM sci_abnormal_prediction
+                            WHERE pw_type IN ('紧急级预警', '故障')
+                              AND node_type = 'unit'
+                              AND create_time >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+                            GROUP BY fault_time
+                            HAVING COUNT(DISTINCT node_id) >= 2
+                            ORDER BY fault_time DESC
+                            LIMIT 1000
+                        """))
+                        for row in result:
+                            device_ids = row[0].split(',') if row[0] else []
+                            if len(device_ids) >= 2:
+                                co_fault_history.append({
+                                    'device_ids': device_ids,
+                                    'timestamp': row[1],
+                                })
+                except Exception as e:
+                    logger.warning(f"从数据库读取共故障历史失败: {e}")
+
+                update_result = propagation_service.update_association_graph(
+                    devices=devices,
+                    co_fault_history=co_fault_history,
+                )
+
+                ctx.total_nodes = update_result.get('device_count', 0)
+                ctx.success_count = update_result.get('edge_count', 0)
+
+                try:
+                    self._save_associations_to_db(propagation_service)
+                except Exception as e:
+                    logger.error(f"保存关联关系到数据库失败: {e}")
+
+                logger.info(
+                    f"装置关联图更新任务完成: "
+                    f"装置数={update_result.get('device_count', 0)}, "
+                    f"边数={update_result.get('edge_count', 0)}, "
+                    f"更新次数={update_result.get('update_count', 0)}"
+                )
+
+        except Exception as e:
+            logger.error(f"装置关联图更新任务失败: {e}")
+
+    def _parse_json_field(self, value: Any, default: Any) -> Any:
+        """解析JSON字段"""
+        if not value:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            import json
+            return json.loads(value)
+        except Exception:
+            return default
+
+    def _save_associations_to_db(self, propagation_service: RiskPropagationService) -> None:
+        """保存关联关系到数据库"""
+        from app.utils.database import get_db
+        from sqlalchemy import text
+        import json
+
+        graph_data = propagation_service.get_association_graph_data()
+        edges = graph_data.get('edges', [])
+
+        with get_db() as db:
+            for edge in edges:
+                db.execute(text("""
+                    INSERT INTO sc_device_associations
+                    (tenant_id, device_a_id, device_b_id,
+                     same_pipeline_weight, same_vibration_weight, same_shift_weight,
+                     co_fault_weight, physical_weight, composite_weight,
+                     association_types, co_fault_count, extra_info, status)
+                    VALUES (:tenant_id, :device_a_id, :device_b_id,
+                            :same_pipeline_weight, :same_vibration_weight, :same_shift_weight,
+                            :co_fault_weight, :physical_weight, :composite_weight,
+                            :association_types, :co_fault_count, :extra_info, 'active')
+                    ON DUPLICATE KEY UPDATE
+                        same_pipeline_weight = VALUES(same_pipeline_weight),
+                        same_vibration_weight = VALUES(same_vibration_weight),
+                        same_shift_weight = VALUES(same_shift_weight),
+                        co_fault_weight = VALUES(co_fault_weight),
+                        physical_weight = VALUES(physical_weight),
+                        composite_weight = VALUES(composite_weight),
+                        association_types = VALUES(association_types),
+                        co_fault_count = VALUES(co_fault_count),
+                        extra_info = VALUES(extra_info),
+                        update_time = CURRENT_TIMESTAMP
+                """), {
+                    'tenant_id': 0,
+                    'device_a_id': edge['source'],
+                    'device_b_id': edge['target'],
+                    'same_pipeline_weight': edge['weights']['same_pipeline'],
+                    'same_vibration_weight': edge['weights']['same_vibration_source'],
+                    'same_shift_weight': edge['weights']['same_shift'],
+                    'co_fault_weight': edge['weights']['co_fault'],
+                    'physical_weight': edge['weights']['physical'],
+                    'composite_weight': edge['weight'],
+                    'association_types': json.dumps(edge['association_types']),
+                    'co_fault_count': edge.get('co_fault_count', 0),
+                    'extra_info': json.dumps({}),
+                })
+            db.commit()
+
+        logger.info(f"关联关系已保存到数据库，共 {len(edges)} 条")
 
     def get_jobs(self) -> list:
         """

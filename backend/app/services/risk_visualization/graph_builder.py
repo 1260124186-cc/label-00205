@@ -7,13 +7,17 @@
 1. 历史共故障权重（co_fault）：基于历史故障数据的共现频率
 2. 物理邻接权重（physical）：基于组织结构/地理位置的相邻关系
 3. Granger因果权重（granger）：基于时间序列的格兰杰因果检验
+4. 同管线权重（same_pipeline）：基于同一条输送管线的关联关系
+5. 同振动源权重（same_vibration）：基于同一振动源的关联关系
+6. 同班次权重（same_shift）：基于同一运行班次的关联关系
 """
 
 import numpy as np
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
 from enum import Enum
 from loguru import logger
+from collections import defaultdict
 
 
 class EdgeWeightType(str, Enum):
@@ -21,6 +25,9 @@ class EdgeWeightType(str, Enum):
     CO_FAULT = "co_fault"
     PHYSICAL = "physical"
     GRANGER = "granger"
+    SAME_PIPELINE = "same_pipeline"
+    SAME_VIBRATION = "same_vibration"
+    SAME_SHIFT = "same_shift"
     COMPOSITE = "composite"
 
 
@@ -84,9 +91,13 @@ class GraphEdge:
     co_fault_weight: float = 0.0
     physical_weight: float = 0.0
     granger_weight: float = 0.0
+    same_pipeline_weight: float = 0.0
+    same_vibration_weight: float = 0.0
+    same_shift_weight: float = 0.0
     granger_p_value: Optional[float] = None
     granger_lag: Optional[int] = None
     co_fault_count: int = 0
+    association_types: List[str] = field(default_factory=list)
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -98,9 +109,13 @@ class GraphEdge:
             'co_fault_weight': self.co_fault_weight,
             'physical_weight': self.physical_weight,
             'granger_weight': self.granger_weight,
+            'same_pipeline_weight': self.same_pipeline_weight,
+            'same_vibration_weight': self.same_vibration_weight,
+            'same_shift_weight': self.same_shift_weight,
             'granger_p_value': self.granger_p_value,
             'granger_lag': self.granger_lag,
             'co_fault_count': self.co_fault_count,
+            'association_types': self.association_types,
             'extra_info': self.extra_info,
         }
 
@@ -114,9 +129,13 @@ class GraphEdge:
             co_fault_weight=data.get('co_fault_weight', 0.0),
             physical_weight=data.get('physical_weight', 0.0),
             granger_weight=data.get('granger_weight', 0.0),
+            same_pipeline_weight=data.get('same_pipeline_weight', 0.0),
+            same_vibration_weight=data.get('same_vibration_weight', 0.0),
+            same_shift_weight=data.get('same_shift_weight', 0.0),
             granger_p_value=data.get('granger_p_value'),
             granger_lag=data.get('granger_lag'),
             co_fault_count=data.get('co_fault_count', 0),
+            association_types=data.get('association_types', []),
             extra_info=data.get('extra_info', {}),
         )
 
@@ -153,9 +172,12 @@ class PropagationGraphBuilder:
 
     def __init__(
         self,
-        co_fault_weight: float = 0.4,
-        physical_weight: float = 0.3,
-        granger_weight: float = 0.3,
+        co_fault_weight: float = 0.20,
+        physical_weight: float = 0.10,
+        granger_weight: float = 0.10,
+        same_pipeline_weight: float = 0.30,
+        same_vibration_weight: float = 0.25,
+        same_shift_weight: float = 0.05,
         max_granger_lag: int = 5,
         granger_significance: float = 0.05,
     ):
@@ -166,24 +188,55 @@ class PropagationGraphBuilder:
             co_fault_weight: 共故障权重在综合权重中的占比
             physical_weight: 物理邻接权重在综合权重中的占比
             granger_weight: Granger因果权重在综合权重中的占比
+            same_pipeline_weight: 同管线权重在综合权重中的占比
+            same_vibration_weight: 同振动源权重在综合权重中的占比
+            same_shift_weight: 同班次权重在综合权重中的占比
             max_granger_lag: Granger因果检验的最大滞后阶数
             granger_significance: Granger因果检验的显著性水平
         """
         self.co_fault_alpha = co_fault_weight
         self.physical_alpha = physical_weight
         self.granger_alpha = granger_weight
+        self.same_pipeline_alpha = same_pipeline_weight
+        self.same_vibration_alpha = same_vibration_weight
+        self.same_shift_alpha = same_shift_weight
         self.max_granger_lag = max_granger_lag
         self.granger_significance = granger_significance
 
         self._co_fault_history: Dict[str, Dict[str, int]] = {}
         self._physical_adjacency: Dict[str, List[str]] = {}
+        self._pipeline_map: Dict[str, Set[str]] = defaultdict(set)
+        self._vibration_map: Dict[str, Set[str]] = defaultdict(set)
+        self._shift_map: Dict[str, Set[str]] = defaultdict(set)
+        self._node_info_cache: Dict[str, Dict[str, Any]] = {}
+
+        total = (co_fault_weight + physical_weight + granger_weight +
+                 same_pipeline_weight + same_vibration_weight + same_shift_weight)
+        if abs(total - 1.0) > 1e-6:
+            logger.warning(f"边权重总和={total:.4f}≠1.0，将自动归一化")
+            self._normalize_weights()
 
         logger.info(
             f"传播图构建器初始化完成: "
             f"co_fault={co_fault_weight}, "
             f"physical={physical_weight}, "
-            f"granger={granger_weight}"
+            f"granger={granger_weight}, "
+            f"same_pipeline={same_pipeline_weight}, "
+            f"same_vibration={same_vibration_weight}, "
+            f"same_shift={same_shift_weight}"
         )
+
+    def _normalize_weights(self) -> None:
+        """归一化权重"""
+        total = (self.co_fault_alpha + self.physical_alpha + self.granger_alpha +
+                 self.same_pipeline_alpha + self.same_vibration_alpha + self.same_shift_alpha)
+        if total > 0:
+            self.co_fault_alpha /= total
+            self.physical_alpha /= total
+            self.granger_alpha /= total
+            self.same_pipeline_alpha /= total
+            self.same_vibration_alpha /= total
+            self.same_shift_alpha /= total
 
     def build_graph(
         self,
@@ -221,6 +274,9 @@ class PropagationGraphBuilder:
                     'co_fault': self.co_fault_alpha,
                     'physical': self.physical_alpha,
                     'granger': self.granger_alpha,
+                    'same_pipeline': self.same_pipeline_alpha,
+                    'same_vibration': self.same_vibration_alpha,
+                    'same_shift': self.same_shift_alpha,
                 }
             }
         )
@@ -233,6 +289,10 @@ class PropagationGraphBuilder:
     ) -> List[GraphNode]:
         """构建节点列表"""
         nodes = []
+        self._pipeline_map.clear()
+        self._vibration_map.clear()
+        self._shift_map.clear()
+        self._node_info_cache.clear()
 
         for org_node in org_nodes:
             node_type = org_node.get('node_type', '')
@@ -261,6 +321,30 @@ class PropagationGraphBuilder:
                     'x': float(extra_info['x']),
                     'y': float(extra_info['y']),
                 }
+
+            node_info = {
+                'node_type': node_type,
+                'level': org_node.get('level', 0),
+                'parent_id': org_node.get('parent_id'),
+                'position': position,
+                'pipeline_id': extra_info.get('pipeline_id'),
+                'vibration_source': extra_info.get('vibration_source'),
+                'shifts': extra_info.get('shifts', []),
+                'extra_info': extra_info,
+            }
+            self._node_info_cache[node_id] = node_info
+
+            pipeline_id = extra_info.get('pipeline_id')
+            if pipeline_id:
+                self._pipeline_map[pipeline_id].add(node_id)
+
+            vibration_source = extra_info.get('vibration_source')
+            if vibration_source:
+                self._vibration_map[vibration_source].add(node_id)
+
+            shifts = extra_info.get('shifts', [])
+            for shift in shifts:
+                self._shift_map[shift].add(node_id)
 
             node = GraphNode(
                 id=node_id,
@@ -309,9 +393,19 @@ class PropagationGraphBuilder:
                 granger_w, p_value, lag = self._calculate_granger_weight(
                     source_node.id, target_node.id
                 )
+                same_pipeline_w = self._calculate_same_pipeline_weight(
+                    source_node.id, target_node.id
+                )
+                same_vibration_w = self._calculate_same_vibration_weight(
+                    source_node.id, target_node.id
+                )
+                same_shift_w = self._calculate_same_shift_weight(
+                    source_node.id, target_node.id
+                )
 
-                composite_w = self._composite_weight(
-                    co_fault_w, physical_w, granger_w
+                composite_w, association_types = self._composite_weight(
+                    co_fault_w, physical_w, granger_w,
+                    same_pipeline_w, same_vibration_w, same_shift_w
                 )
 
                 if composite_w <= 0:
@@ -325,17 +419,61 @@ class PropagationGraphBuilder:
                     co_fault_weight=co_fault_w,
                     physical_weight=physical_w,
                     granger_weight=granger_w,
+                    same_pipeline_weight=same_pipeline_w,
+                    same_vibration_weight=same_vibration_w,
+                    same_shift_weight=same_shift_w,
                     granger_p_value=p_value,
                     granger_lag=lag,
                     co_fault_count=self._get_co_fault_count(
                         source_node.id, target_node.id
                     ),
+                    association_types=association_types,
                 )
                 edges.append(edge)
 
         edges.sort(key=lambda e: e.weight, reverse=True)
         logger.info(f"构建边完成，共 {len(edges)} 条边")
         return edges
+
+    def _calculate_same_pipeline_weight(self, node_a: str, node_b: str) -> float:
+        """计算同管线权重"""
+        info_a = self._node_info_cache.get(node_a, {})
+        info_b = self._node_info_cache.get(node_b, {})
+        pipeline_a = info_a.get('pipeline_id')
+        pipeline_b = info_b.get('pipeline_id')
+        if pipeline_a and pipeline_b and pipeline_a == pipeline_b:
+            return 1.0
+        return 0.0
+
+    def _calculate_same_vibration_weight(self, node_a: str, node_b: str) -> float:
+        """计算同振动源权重"""
+        info_a = self._node_info_cache.get(node_a, {})
+        info_b = self._node_info_cache.get(node_b, {})
+        vibration_a = info_a.get('vibration_source')
+        vibration_b = info_b.get('vibration_source')
+        if vibration_a and vibration_b:
+            if vibration_a == vibration_b:
+                return 1.0
+            if isinstance(vibration_a, list):
+                vb_list = vibration_b if isinstance(vibration_b, list) else [vibration_b]
+                common = set(vibration_a) & set(vb_list)
+                if common:
+                    return 0.8
+        return 0.0
+
+    def _calculate_same_shift_weight(self, node_a: str, node_b: str) -> float:
+        """计算同班次权重（Jaccard相似度"""
+        info_a = self._node_info_cache.get(node_a, {})
+        info_b = self._node_info_cache.get(node_b, {})
+        shifts_a = set(info_a.get('shifts', []))
+        shifts_b = set(info_b.get('shifts', []))
+        if not shifts_a or not shifts_b:
+            return 0.0
+        intersection = shifts_a & shifts_b
+        union = shifts_a | shifts_b
+        if not union:
+            return 0.0
+        return len(intersection) / len(union)
 
     def _calculate_co_fault_weight(
         self, node_a: str, node_b: str
@@ -493,23 +631,46 @@ class PropagationGraphBuilder:
         co_fault: float,
         physical: float,
         granger: float,
-    ) -> float:
-        """计算综合权重"""
+        same_pipeline: float = 0.0,
+        same_vibration: float = 0.0,
+        same_shift: float = 0.0,
+    ) -> Tuple[float, List[str]]:
+        """计算综合权重及关联类型"""
         total_alpha = (
             self.co_fault_alpha +
             self.physical_alpha +
-            self.granger_alpha
+            self.granger_alpha +
+            self.same_pipeline_alpha +
+            self.same_vibration_alpha +
+            self.same_shift_alpha
         )
         if total_alpha <= 0:
-            return 0.0
+            return 0.0, []
 
         composite = (
             self.co_fault_alpha * co_fault +
             self.physical_alpha * physical +
-            self.granger_alpha * granger
+            self.granger_alpha * granger +
+            self.same_pipeline_alpha * same_pipeline +
+            self.same_vibration_alpha * same_vibration +
+            self.same_shift_alpha * same_shift
         ) / total_alpha
 
-        return float(composite)
+        association_types = []
+        if co_fault > 0:
+            association_types.append('co_fault')
+        if physical > 0:
+            association_types.append('physical')
+        if granger > 0:
+            association_types.append('granger')
+        if same_pipeline > 0:
+            association_types.append('same_pipeline')
+        if same_vibration > 0:
+            association_types.append('same_vibration')
+        if same_shift > 0:
+            association_types.append('same_shift')
+
+        return float(composite), association_types
 
     def update_co_fault_history(
         self,

@@ -9,6 +9,7 @@ from .graph_builder import PropagationGraphBuilder
 from .geojson_generator import GeoJSONGenerator
 from .time_slicer import TimeSliceService
 from .websocket_manager import RiskHeatmapWebSocketManager
+from .risk_propagation_service import RiskPropagationService
 
 __all__ = [
     'RiskVisualizationService',
@@ -16,4 +17,5 @@ __all__ = [
     'GeoJSONGenerator',
     'TimeSliceService',
     'RiskHeatmapWebSocketManager',
+    'RiskPropagationService',
 ]

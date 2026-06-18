@@ -1911,3 +1911,181 @@ CREATE TABLE IF NOT EXISTS sc_device_fault_alerts (
 -- 显示设备健康监控模块新增的表
 SHOW TABLES LIKE '%heartbeat%';
 SHOW TABLES LIKE '%device_fault%';
+
+-- ============================================================
+-- 跨装置风险传播与聚合分析模块
+-- ============================================================
+
+-- ============================================================
+-- 扩展 sc_org_nodes 表 - 增加装置关联属性字段
+-- ============================================================
+
+-- 检查并添加 pipeline_id 字段
+SET @dbname = DATABASE();
+SET @tablename = 'sc_org_nodes';
+SET @columnname = 'pipeline_id';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(100) COMMENT ''管线ID''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 vibration_source 字段
+SET @columnname = 'vibration_source';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' VARCHAR(100) COMMENT ''振动源标识''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 shifts 字段
+SET @columnname = 'shifts';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' TEXT COMMENT ''运行班次列表 JSON''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 latitude 字段
+SET @columnname = 'latitude';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DOUBLE COMMENT ''纬度''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- 检查并添加 longitude 字段
+SET @columnname = 'longitude';
+SET @preparedStatement = (SELECT IF(
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE table_name = @tablename
+     AND table_schema = @dbname
+     AND column_name = @columnname) > 0,
+  'SELECT 1',
+  CONCAT('ALTER TABLE ', @tablename, ' ADD COLUMN ', @columnname, ' DOUBLE COMMENT ''经度''')
+));
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
+
+-- ============================================================
+-- 装置关联关系表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_device_associations (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT COMMENT '租户ID',
+    device_a_id VARCHAR(100) NOT NULL COMMENT '装置A ID',
+    device_b_id VARCHAR(100) NOT NULL COMMENT '装置B ID',
+
+    same_pipeline_weight DOUBLE DEFAULT 0.0 COMMENT '同管线权重 0-1',
+    same_vibration_weight DOUBLE DEFAULT 0.0 COMMENT '同振动源权重 0-1',
+    same_shift_weight DOUBLE DEFAULT 0.0 COMMENT '同班次权重 0-1',
+    co_fault_weight DOUBLE DEFAULT 0.0 COMMENT '共故障权重 0-1',
+    physical_weight DOUBLE DEFAULT 0.0 COMMENT '物理邻接权重 0-1',
+    composite_weight DOUBLE DEFAULT 0.0 COMMENT '综合权重 0-1',
+
+    association_types TEXT COMMENT '关联类型列表 JSON',
+    co_fault_count INT DEFAULT 0 COMMENT '共故障次数',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+
+    status VARCHAR(20) DEFAULT 'active' COMMENT '状态 active/inactive',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE KEY uk_device_pair (device_a_id, device_b_id, tenant_id),
+    INDEX idx_device_a (device_a_id),
+    INDEX idx_device_b (device_b_id),
+    INDEX idx_composite_weight (composite_weight),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_update_time (update_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='装置关联关系表';
+
+-- ============================================================
+-- 风险传播历史表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_risk_propagation_history (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT COMMENT '租户ID',
+
+    source_device_id VARCHAR(100) NOT NULL COMMENT '源装置ID',
+    source_flange_id VARCHAR(100) COMMENT '源法兰ID',
+    source_risk_score DOUBLE COMMENT '源装置风险评分',
+    source_risk_level VARCHAR(20) COMMENT '源装置风险等级',
+
+    propagation_time DATETIME NOT NULL COMMENT '传播发生时间',
+    propagation_depth INT COMMENT '传播深度',
+    total_weight_sum DOUBLE COMMENT '传播权重总和',
+
+    affected_device_count INT COMMENT '影响装置数量',
+
+    propagation_result TEXT COMMENT '传播结果 JSON（各装置上调系数）',
+    propagation_paths TEXT COMMENT '传播路径 JSON',
+
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+
+    INDEX idx_source_device (source_device_id),
+    INDEX idx_propagation_time (propagation_time),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_create_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='风险传播历史表';
+
+-- ============================================================
+-- 关联图更新任务日志表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_association_graph_update_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT COMMENT '租户ID',
+
+    job_name VARCHAR(100) NOT NULL COMMENT '任务名称',
+    trigger_type VARCHAR(20) DEFAULT 'scheduled' COMMENT '触发类型 scheduled/manual',
+    status VARCHAR(20) DEFAULT 'running' COMMENT '状态 running/completed/failed',
+
+    start_time DATETIME NOT NULL COMMENT '开始时间',
+    end_time DATETIME COMMENT '结束时间',
+    duration_seconds INT COMMENT '执行时长（秒）',
+
+    device_count INT DEFAULT 0 COMMENT '处理装置数',
+    edge_count INT DEFAULT 0 COMMENT '生成关联边数',
+    updated_edge_count INT DEFAULT 0 COMMENT '更新关联边数',
+
+    error_message TEXT COMMENT '错误信息',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+
+    INDEX idx_job_name (job_name),
+    INDEX idx_status (status),
+    INDEX idx_start_time (start_time),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='关联图更新任务日志表';
+
+-- 显示风险传播模块新增的表
+SHOW TABLES LIKE '%device_association%';
+SHOW TABLES LIKE '%risk_propagation%';
+SHOW TABLES LIKE '%association_graph%';
+SHOW COLUMNS FROM sc_org_nodes LIKE '%pipeline%';
+SHOW COLUMNS FROM sc_org_nodes LIKE '%vibration%';
