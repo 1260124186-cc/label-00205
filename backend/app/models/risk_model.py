@@ -27,6 +27,7 @@
 """
 
 import numpy as np
+from scipy import stats
 from typing import Tuple, Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
@@ -694,3 +695,264 @@ class BayesianRiskModel:
             results.append(assessment)
 
         return results
+
+    def compute_shap_values(
+        self,
+        data: np.ndarray,
+        lstm_probs: Optional[np.ndarray] = None,
+        lstm_class: Optional[int] = None,
+        num_samples: int = 200,
+        node_type: Optional[str] = None,
+        node_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        计算风险模型各因子的 SHAP 值
+
+        使用基于采样的 SHAP 方法，计算每个风险因子对最终风险评分的贡献。
+        与现有的加权贡献度进行对比校验。
+
+        Args:
+            data: 预紧力数据
+            lstm_probs: LSTM 概率分布，可选
+            lstm_class: LSTM 预测类别，可选
+            num_samples: 采样次数
+            node_type: 节点类型
+            node_id: 节点ID
+
+        Returns:
+            Dict: 包含:
+                - shap_values: 各因子 SHAP 值字典
+                - base_value: 基线风险值
+                - prediction_value: 当前输入风险值
+                - shap_sum_check: SHAP 值求和校验
+                - factor_contributions: 原加权方法的因子贡献
+                - alignment: SHAP 与加权贡献的对齐校验
+                    - pearson_correlation: 皮尔逊相关系数
+                    - spearman_correlation: 斯皮尔曼秩相关系数
+                    - mean_absolute_difference: 平均绝对差
+                    - ranking_agreement: 排序一致性比例
+                    - is_aligned: 是否对齐（相关系数 > 0.8）
+        """
+        effective_weights = self.get_effective_weights(node_type, node_id)
+        effective_thresholds = self.get_effective_thresholds(node_type, node_id)
+
+        factor_names = list(effective_weights.keys())
+        n_factors = len(factor_names)
+
+        current_scores = {}
+        for name in factor_names:
+            if name == 'mean_deviation':
+                current_scores[name] = self.calculate_deviation_score(data)
+            elif name == 'volatility':
+                current_scores[name] = self.calculate_volatility_score(data)
+            elif name == 'trend':
+                current_scores[name] = self.calculate_trend_score(data)
+            elif name == 'extreme_values':
+                current_scores[name] = self.calculate_extreme_score(data)
+            elif name == 'lstm_prediction':
+                current_scores[name] = self.calculate_lstm_score(lstm_probs)
+            else:
+                current_scores[name] = 0.5
+
+        baseline_scores = {}
+        for name in factor_names:
+            baseline_scores[name] = 0.5
+
+        def _compute_weighted_score(scores_dict):
+            return sum(
+                effective_weights.get(k, 0) * v for k, v in scores_dict.items()
+            )
+
+        base_weighted = _compute_weighted_score(baseline_scores)
+        current_weighted = _compute_weighted_score(current_scores)
+
+        shap_values = {}
+        for factor_name in factor_names:
+            marginal_contribs = []
+            factor_idx = factor_names.index(factor_name)
+
+            for _ in range(num_samples):
+                perm = np.random.permutation(n_factors)
+                f_idx = np.where(perm == factor_idx)[0][0]
+
+                before_indices = perm[:f_idx]
+                after_indices = perm[f_idx + 1:]
+
+                scores_with = dict(baseline_scores)
+                scores_without = dict(baseline_scores)
+
+                for idx in before_indices:
+                    fname = factor_names[idx]
+                    scores_with[fname] = current_scores[fname]
+                    scores_without[fname] = current_scores[fname]
+
+                scores_with[factor_name] = current_scores[factor_name]
+
+                v_with = _compute_weighted_score(scores_with)
+                v_without = _compute_weighted_score(scores_without)
+                marginal_contribs.append(v_with - v_without)
+
+            shap_values[factor_name] = float(np.mean(marginal_contribs))
+
+        shap_sum = sum(shap_values.values())
+        actual_diff = current_weighted - base_weighted
+        shap_sum_check = abs(shap_sum - actual_diff) / (abs(actual_diff) + 1e-12)
+
+        mean_score = float(np.mean(list(current_scores.values())))
+        factor_contribs = self._compute_factor_contributions(
+            current_scores, effective_weights, current_weighted, mean_score
+        )
+
+        weighted_contribs_dict = {}
+        for fc in factor_contribs:
+            weighted_contribs_dict[fc.name] = fc.weighted_score - (effective_weights.get(fc.name, 0) * mean_score)
+
+        shap_list = [shap_values[name] for name in factor_names]
+        weighted_list = [weighted_contribs_dict.get(name, 0) for name in factor_names]
+
+        if len(shap_list) >= 2 and np.std(shap_list) > 0 and np.std(weighted_list) > 0:
+            pearson_corr = float(np.corrcoef(shap_list, weighted_list)[0, 1])
+            spearman_corr = float(
+                stats.spearmanr(shap_list, weighted_list).correlation
+                if hasattr(stats, 'spearmanr')
+                else np.corrcoef(np.argsort(shap_list), np.argsort(weighted_list))[0, 1]
+            )
+        else:
+            pearson_corr = 1.0
+            spearman_corr = 1.0
+
+        abs_diffs = [abs(s - w) for s, w in zip(shap_list, weighted_list)]
+        mean_abs_diff = float(np.mean(abs_diffs)) if abs_diffs else 0.0
+
+        shap_rank = np.argsort(shap_list)[::-1]
+        weighted_rank = np.argsort(weighted_list)[::-1]
+        top_k = min(3, len(factor_names))
+        shap_top = set(shap_rank[:top_k].tolist())
+        weighted_top = set(weighted_rank[:top_k].tolist())
+        ranking_agreement = float(len(shap_top & weighted_top) / top_k) if top_k > 0 else 1.0
+
+        is_aligned = pearson_corr > 0.8
+
+        return {
+            'shap_values': shap_values,
+            'base_value': float(base_weighted),
+            'prediction_value': float(current_weighted),
+            'shap_sum_check': float(shap_sum_check),
+            'factor_contributions_raw': {
+                fc.name: {
+                    'raw_score': fc.raw_score,
+                    'weight': fc.weight,
+                    'weighted_score': fc.weighted_score,
+                    'contribution_ratio': fc.contribution_ratio,
+                    'direction': fc.direction,
+                }
+                for fc in factor_contribs
+            },
+            'alignment': {
+                'pearson_correlation': pearson_corr,
+                'spearman_correlation': spearman_corr,
+                'mean_absolute_difference': mean_abs_diff,
+                'ranking_agreement_top3': ranking_agreement,
+                'is_aligned': is_aligned,
+                'alignment_status': 'aligned' if is_aligned else 'misaligned',
+            },
+            'factor_names': factor_names,
+        }
+
+    def shap_validate_factor_contributions(
+        self,
+        data: np.ndarray,
+        lstm_probs: Optional[np.ndarray] = None,
+        lstm_class: Optional[int] = None,
+        node_type: Optional[str] = None,
+        node_id: Optional[str] = None,
+        num_samples: int = 200,
+    ) -> Dict[str, Any]:
+        """
+        风险模型因子贡献与 SHAP 值对齐校验
+
+        对比加权贡献度与 SHAP 值的一致性，校验风险模型的可解释性可靠性。
+
+        Args:
+            data: 预紧力数据
+            lstm_probs: LSTM 概率分布，可选
+            lstm_class: LSTM 预测类别，可选
+            node_type: 节点类型
+            node_id: 节点ID
+            num_samples: SHAP 采样次数
+
+        Returns:
+            Dict: 校验结果，包含:
+                - validation_passed: 校验是否通过
+                - alignment_metrics: 对齐度量
+                - shap_ranking: SHAP 排名
+                - weighted_ranking: 加权排名
+                - discrepancies: 差异项列表
+                - recommendations: 校准建议
+        """
+        shap_result = self.compute_shap_values(
+            data, lstm_probs, lstm_class, num_samples, node_type, node_id
+        )
+
+        alignment = shap_result['alignment']
+        shap_values = shap_result['shap_values']
+        factor_contribs_raw = shap_result['factor_contributions_raw']
+
+        factor_names = shap_result['factor_names']
+
+        shap_sorted = sorted(shap_values.items(), key=lambda x: abs(x[1]), reverse=True)
+        shap_ranking = [name for name, _ in shap_sorted]
+
+        weighted_sorted = sorted(
+            factor_contribs_raw.items(),
+            key=lambda x: abs(x[1]['weighted_score'] - x[1]['weight'] * 0.5),
+            reverse=True
+        )
+        weighted_ranking = [name for name, _ in weighted_sorted]
+
+        discrepancies = []
+        for name in factor_names:
+            shap_val = shap_values.get(name, 0)
+            w_contrib = factor_contribs_raw.get(name, {}).get('weighted_score', 0) - \
+                       factor_contribs_raw.get(name, {}).get('weight', 0) * 0.5
+
+            rel_diff = abs(shap_val - w_contrib) / (abs(w_contrib) + 1e-12)
+            if rel_diff > 0.3:
+                discrepancies.append({
+                    'factor': name,
+                    'shap_value': round(shap_val, 6),
+                    'weighted_contribution': round(w_contrib, 6),
+                    'relative_diff': round(rel_diff, 4),
+                    'severity': 'high' if rel_diff > 0.5 else 'medium',
+                })
+
+        validation_passed = alignment['is_aligned'] and len(discrepancies) <= 1
+
+        recommendations = []
+        if not validation_passed:
+            if alignment['pearson_correlation'] < 0.8:
+                recommendations.append(
+                    "加权贡献与SHAP值相关性较低，建议重新评估各因子权重设置"
+                )
+            if len(discrepancies) > 1:
+                high_severity = [d for d in discrepancies if d['severity'] == 'high']
+                if high_severity:
+                    factors_str = ', '.join(d['factor'] for d in high_severity)
+                    recommendations.append(
+                        f"因子 {factors_str} 的贡献度存在显著偏差，建议校准权重"
+                    )
+        else:
+            recommendations.append("风险因子贡献度与SHAP值对齐良好，可解释性可靠")
+
+        return {
+            'validation_passed': validation_passed,
+            'alignment_metrics': alignment,
+            'shap_ranking': shap_ranking,
+            'weighted_ranking': weighted_ranking,
+            'discrepancies': discrepancies,
+            'recommendations': recommendations,
+            'shap_values': shap_values,
+            'base_value': shap_result['base_value'],
+            'prediction_value': shap_result['prediction_value'],
+            'shap_sum_check': shap_result['shap_sum_check'],
+        }

@@ -1922,6 +1922,7 @@ class ExplainabilityReportResponse(BaseModel):
     risk_factor_decomposition: Optional[Dict[str, Any]] = None
     rule_hits: Optional[List[Dict[str, Any]]] = None
     strategy_adjustment: Optional[Dict[str, Any]] = None
+    feature_attributions: Optional[List[Dict[str, Any]]] = None
 
 
 # ============================================================

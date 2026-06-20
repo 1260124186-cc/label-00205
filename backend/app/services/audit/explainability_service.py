@@ -58,6 +58,12 @@ class ExplainabilityService:
         Returns:
             可解释性报告字典
         """
+        feature_attributions = self.generate_feature_attributions(
+            data=data,
+            risk_assessment=risk_assessment,
+            probs=probs,
+        )
+
         report = {
             'attention_weights': self._extract_attention_weights(
                 data, model_output
@@ -88,6 +94,7 @@ class ExplainabilityService:
             'probability_distribution': (
                 probs.tolist() if probs is not None else None
             ),
+            'feature_attributions': feature_attributions,
         }
         return report
 
@@ -147,6 +154,12 @@ class ExplainabilityService:
         else:
             ranked_bolts = list(range(len(multi_bolt_data)))
 
+        feature_attributions = self.generate_feature_attributions(
+            data=np.concatenate(multi_bolt_data) if multi_bolt_data else None,
+            risk_assessment=risk_assessment,
+            attention_weights=attention_weights,
+        )
+
         report = {
             'attention_weights': (
                 attention_weights.tolist()
@@ -169,6 +182,7 @@ class ExplainabilityService:
                     else self.warning_policy.strategy_2_threshold
                 ),
             },
+            'feature_attributions': feature_attributions,
         }
         return report
 
@@ -441,6 +455,252 @@ class ExplainabilityService:
             })
 
         return rules
+
+    def generate_feature_attributions(
+        self,
+        data: Optional[np.ndarray] = None,
+        risk_assessment: Optional[RiskAssessment] = None,
+        integrated_gradients: Optional[Dict[str, Any]] = None,
+        shap_values: Optional[Dict[str, Any]] = None,
+        attention_weights: Optional[np.ndarray] = None,
+        node_type: Optional[str] = None,
+        node_id: Optional[str] = None,
+        probs: Optional[np.ndarray] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        生成统一的 feature_attributions 数组
+
+        将各模型的特征贡献度统一格式，便于前端渲染和审计追溯。
+
+        Args:
+            data: 输入数据（用于风险因子计算）
+            risk_assessment: 风险评估结果
+            integrated_gradients: LSTM 积分梯度结果
+            shap_values: SHAP 值结果
+            attention_weights: 注意力权重
+            node_type: 节点类型
+            node_id: 节点ID
+            probs: LSTM 概率分布
+
+        Returns:
+            List[Dict]: 特征归因数组，每项包含:
+                - name: 特征名称
+                - value: 贡献值（归一化）
+                - direction: 贡献方向 ('positive' | 'negative')
+                - method: 计算方法
+                - category: 类别 ('risk_factor' | 'temporal' | 'attention' | 'bolt')
+                - rank: 重要性排名
+                - description: 中文描述
+        """
+        attributions = []
+
+        if data is not None and risk_assessment is not None:
+            risk_factors = self._get_risk_factor_attributions(
+                data, risk_assessment, probs
+            )
+            attributions.extend(risk_factors)
+
+        if integrated_gradients is not None:
+            ig_attributions = self._get_ig_attributions(integrated_gradients)
+            attributions.extend(ig_attributions)
+
+        if shap_values is not None:
+            shap_attributions = self._get_shap_attributions(shap_values)
+            attributions.extend(shap_attributions)
+
+        if attention_weights is not None:
+            attn_attributions = self._get_attention_attributions(attention_weights)
+            attributions.extend(attn_attributions)
+
+        attributions.sort(key=lambda x: abs(x['value']), reverse=True)
+
+        for i, attr in enumerate(attributions):
+            attr['rank'] = i + 1
+
+        return attributions
+
+    def _get_risk_factor_attributions(
+        self,
+        data: np.ndarray,
+        risk_assessment: RiskAssessment,
+        probs: Optional[np.ndarray] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        获取风险因子的特征归因
+        """
+        attributions = []
+
+        factor_contribs = getattr(risk_assessment, 'factor_contributions', None)
+        if factor_contribs:
+            descriptions = {
+                'mean_deviation': '预紧力均值偏离正常范围的程度',
+                'volatility': '预紧力数据的波动性',
+                'trend': '预紧力变化趋势的稳定性',
+                'extreme_values': '极端预紧力值的存在',
+                'lstm_prediction': 'LSTM模型预测异常概率',
+            }
+
+            for factor in factor_contribs:
+                name = factor.name
+                raw_val = getattr(factor, 'raw_score', 0.5)
+                weighted_val = getattr(factor, 'weighted_score', 0)
+                direction = 'positive' if raw_val >= 0.5 else 'negative'
+
+                attributions.append({
+                    'name': name,
+                    'value': float(weighted_val),
+                    'direction': direction,
+                    'method': 'weighted_contribution',
+                    'category': 'risk_factor',
+                    'rank': 0,
+                    'description': descriptions.get(name, name),
+                    'raw_score': float(raw_val),
+                    'weight': float(getattr(factor, 'weight', 0)),
+                    'contribution_ratio': float(getattr(factor, 'contribution_ratio', 0)),
+                })
+
+        return attributions
+
+    def _get_ig_attributions(
+        self,
+        ig_result: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        从 Integrated Gradients 结果生成特征归因
+        """
+        attributions = []
+
+        if 'feature_importance' in ig_result:
+            feat_imp = ig_result['feature_importance']
+            for feat_name, imp_val in feat_imp.items():
+                attributions.append({
+                    'name': f'feature_{feat_name}',
+                    'value': float(imp_val),
+                    'direction': 'positive' if imp_val >= 0 else 'negative',
+                    'method': 'integrated_gradients',
+                    'category': 'feature',
+                    'rank': 0,
+                    'description': f'特征 {feat_name} 的积分梯度贡献',
+                })
+
+        if 'time_step_importance' in ig_result:
+            ts_imp = ig_result['time_step_importance']
+            if isinstance(ts_imp, (list, np.ndarray)) and len(ts_imp) > 0:
+                top_k_ts = ig_result.get('top_k_timesteps', list(range(min(5, len(ts_imp)))))
+                for idx in top_k_ts:
+                    idx_val = int(idx) if idx < len(ts_imp) else 0
+                    imp_val = float(ts_imp[idx_val]) if idx_val < len(ts_imp) else 0.0
+                    attributions.append({
+                        'name': f'timestep_{idx_val}',
+                        'value': imp_val,
+                        'direction': 'positive',
+                        'method': 'integrated_gradients',
+                        'category': 'temporal',
+                        'rank': 0,
+                        'description': f'时间步 {idx_val} 的积分梯度重要性',
+                        'timestep_index': idx_val,
+                    })
+
+        if 'bolt_importance_scores' in ig_result:
+            bolt_imp = ig_result['bolt_importance_scores']
+            if isinstance(bolt_imp, (list, np.ndarray)):
+                top_k_bolts = ig_result.get('top_k_bolts', list(range(min(3, len(bolt_imp)))))
+                for idx in top_k_bolts:
+                    idx_val = int(idx)
+                    imp_val = float(bolt_imp[idx_val]) if idx_val < len(bolt_imp) else 0.0
+                    attributions.append({
+                        'name': f'bolt_{idx_val}',
+                        'value': imp_val,
+                        'direction': 'positive',
+                        'method': 'integrated_gradients',
+                        'category': 'bolt',
+                        'rank': 0,
+                        'description': f'螺栓 {idx_val} 的积分梯度重要性',
+                        'bolt_index': idx_val,
+                    })
+
+        return attributions
+
+    def _get_shap_attributions(
+        self,
+        shap_result: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        从 SHAP 结果生成特征归因
+        """
+        attributions = []
+
+        if 'shap_values' in shap_result:
+            shap_vals = shap_result['shap_values']
+            if isinstance(shap_vals, dict):
+                descriptions = {
+                    'mean_deviation': '预紧力均值偏离的SHAP贡献',
+                    'volatility': '波动性的SHAP贡献',
+                    'trend': '变化趋势的SHAP贡献',
+                    'extreme_values': '极端值的SHAP贡献',
+                    'lstm_prediction': 'LSTM预测的SHAP贡献',
+                }
+                for name, val in shap_vals.items():
+                    attributions.append({
+                        'name': name,
+                        'value': float(val),
+                        'direction': 'positive' if val >= 0 else 'negative',
+                        'method': 'shap',
+                        'category': 'risk_factor',
+                        'rank': 0,
+                        'description': descriptions.get(name, f'{name} 的SHAP贡献'),
+                    })
+
+        if 'time_step_shap' in shap_result:
+            ts_shap = shap_result['time_step_shap']
+            if isinstance(ts_shap, (list, np.ndarray)) and len(ts_shap) > 0:
+                abs_ts = np.abs(np.array(ts_shap))
+                top_indices = np.argsort(abs_ts)[-5:][::-1].tolist()
+                for idx in top_indices:
+                    idx_val = int(idx)
+                    val = float(ts_shap[idx_val]) if idx_val < len(ts_shap) else 0.0
+                    attributions.append({
+                        'name': f'timestep_shap_{idx_val}',
+                        'value': val,
+                        'direction': 'positive' if val >= 0 else 'negative',
+                        'method': 'shap_time_series',
+                        'category': 'temporal',
+                        'rank': 0,
+                        'description': f'时间步 {idx_val} 的SHAP贡献',
+                        'timestep_index': idx_val,
+                    })
+
+        return attributions
+
+    def _get_attention_attributions(
+        self,
+        attention_weights: np.ndarray,
+    ) -> List[Dict[str, Any]]:
+        """
+        从注意力权重生成特征归因
+        """
+        attributions = []
+
+        weights = np.array(attention_weights)
+        if weights.ndim == 1:
+            top_k = min(5, len(weights))
+            top_indices = np.argsort(weights)[-top_k:][::-1].tolist()
+
+            for idx in top_indices:
+                idx_val = int(idx)
+                w_val = float(weights[idx_val])
+                attributions.append({
+                    'name': f'attention_weight_{idx_val}',
+                    'value': w_val,
+                    'direction': 'positive',
+                    'method': 'attention',
+                    'category': 'temporal',
+                    'rank': 0,
+                    'description': f'时间步 {idx_val} 的注意力权重',
+                    'timestep_index': idx_val,
+                })
+
+        return attributions
 
     def get_explainability_for_audit(
         self, audit_record,

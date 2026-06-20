@@ -1070,3 +1070,228 @@ class BoltLSTMModel:
         logger.info(f"创建新的螺栓模型: {bolt_id}, feature_dim={feature_dim}")
 
         return model
+
+    def compute_integrated_gradients(
+        self,
+        data: np.ndarray,
+        target_class: Optional[int] = None,
+        features: Optional[np.ndarray] = None,
+        num_steps: int = 50,
+        baseline: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        """
+        计算 Integrated Gradients（积分梯度）可解释性分析
+
+        通过在基线输入与实际输入之间进行线性插值，计算路径积分梯度，
+        量化每个时间步对预测结果的贡献。
+
+        Args:
+            data: 输入数据，形状为 (sequence_length, input_dim) 或 (sequence_length,)
+            target_class: 目标类别，None 则使用预测类别
+            features: 辅助特征向量 (feature_dim,)，可选
+            num_steps: 积分步数，默认 50
+            baseline: 基线输入，None 则使用零基线
+
+        Returns:
+            Dict: 包含:
+                - integrated_gradients: 积分梯度 (sequence_length, input_dim)
+                - time_step_importance: 时间步重要性 (sequence_length,)
+                - top_k_timesteps: 最具影响力的前K个时间步索引
+                - target_class: 目标类别
+                - prediction_class: 预测类别
+                - prediction_confidence: 预测置信度
+                - convergence_delta: IG 收敛性误差
+        """
+        self.model.eval()
+
+        sequence_length = self.model_config.get('sequence_length', 100)
+        (X, feat), _ = self.prepare_data(
+            data, sequence_length=sequence_length, features=features
+        )
+
+        if target_class is None:
+            with torch.no_grad():
+                outputs = self.model(X, feat)
+                probs = torch.softmax(outputs, dim=1)
+                target_class = int(torch.argmax(probs, dim=1).item())
+                pred_confidence = float(probs[0, target_class].item())
+        else:
+            with torch.no_grad():
+                outputs = self.model(X, feat)
+                probs = torch.softmax(outputs, dim=1)
+                pred_confidence = float(probs[0, target_class].item())
+
+        if baseline is None:
+            baseline_tensor = torch.zeros_like(X)
+            baseline_feat = None
+            if feat is not None:
+                baseline_feat = torch.zeros_like(feat)
+        else:
+            (baseline_tensor, baseline_feat), _ = self.prepare_data(
+                baseline, sequence_length=sequence_length, features=None
+            )
+
+        X.requires_grad_(True)
+        if feat is not None:
+            feat.requires_grad_(True)
+
+        integrated_gradients = torch.zeros_like(X)
+        feat_integrated_gradients = None
+        if feat is not None:
+            feat_integrated_gradients = torch.zeros_like(feat)
+
+        for step in range(num_steps + 1):
+            alpha = step / num_steps
+
+            interpolated_X = baseline_tensor + alpha * (X - baseline_tensor)
+            interpolated_feat = None
+            if feat is not None and baseline_feat is not None:
+                interpolated_feat = baseline_feat + alpha * (feat - baseline_feat)
+            elif feat is not None:
+                interpolated_feat = alpha * feat
+
+            outputs = self.model(interpolated_X, interpolated_feat)
+            target_score = outputs[0, target_class]
+
+            self.model.zero_grad()
+            target_score.backward(retain_graph=True)
+
+            if X.grad is not None:
+                integrated_gradients += X.grad.clone()
+            if feat is not None and feat.grad is not None and feat_integrated_gradients is not None:
+                feat_integrated_gradients += feat.grad.clone()
+
+            if X.grad is not None:
+                X.grad.zero_()
+            if feat is not None and feat.grad is not None:
+                feat.grad.zero_()
+
+        integrated_gradients = integrated_gradients / (num_steps + 1)
+        integrated_gradients = integrated_gradients * (X - baseline_tensor)
+
+        if feat_integrated_gradients is not None and feat is not None:
+            feat_integrated_gradients = feat_integrated_gradients / (num_steps + 1)
+            if baseline_feat is not None:
+                feat_integrated_gradients = feat_integrated_gradients * (feat - baseline_feat)
+            else:
+                feat_integrated_gradients = feat_integrated_gradients * feat
+
+        ig_np = integrated_gradients.detach().cpu().numpy()[0]
+        time_step_importance = np.sum(np.abs(ig_np), axis=1)
+        time_step_importance = time_step_importance / (np.sum(time_step_importance) + 1e-12)
+
+        top_k = min(10, len(time_step_importance))
+        top_k_indices = np.argsort(time_step_importance)[-top_k:][::-1].tolist()
+
+        with torch.no_grad():
+            baseline_output = self.model(baseline_tensor, baseline_feat)
+            baseline_score = float(baseline_output[0, target_class].item())
+            input_score = float(outputs[0, target_class].item())
+
+        ig_sum = float(np.sum(integrated_gradients.detach().cpu().numpy()))
+        actual_diff = input_score - baseline_score
+        convergence_delta = abs(ig_sum - actual_diff) / (abs(actual_diff) + 1e-12)
+
+        result = {
+            'integrated_gradients': ig_np.tolist(),
+            'time_step_importance': time_step_importance.tolist(),
+            'top_k_timesteps': top_k_indices,
+            'target_class': target_class,
+            'prediction_class': target_class,
+            'prediction_confidence': pred_confidence,
+            'convergence_delta': float(convergence_delta),
+        }
+
+        if feat_integrated_gradients is not None:
+            feat_ig_np = feat_integrated_gradients.detach().cpu().numpy()[0]
+            result['feature_importance'] = feat_ig_np.tolist()
+
+        return result
+
+    def compute_shap_time_series(
+        self,
+        data: np.ndarray,
+        features: Optional[np.ndarray] = None,
+        num_samples: int = 100,
+    ) -> Dict[str, Any]:
+        """
+        计算时序 SHAP 值（时间步对预测的贡献度）
+
+        使用基于采样的 SHAP 近似方法，评估每个时间步对预测的影响。
+
+        Args:
+            data: 输入数据，形状为 (sequence_length, input_dim) 或 (sequence_length,)
+            features: 辅助特征向量，可选
+            num_samples: 采样数量，默认 100
+
+        Returns:
+            Dict: 包含:
+                - shap_values: 各时间步 SHAP 值 (sequence_length,)
+                - base_value: 基线预测值
+                - prediction_value: 当前输入预测值
+                - shap_sum_check: SHAP值求和与预测差异校验
+        """
+        self.model.eval()
+
+        sequence_length = self.model_config.get('sequence_length', 100)
+        (X, feat), _ = self.prepare_data(
+            data, sequence_length=sequence_length, features=features
+        )
+
+        with torch.no_grad():
+            outputs = self.model(X, feat)
+            probs = torch.softmax(outputs, dim=1)
+            pred_class = int(torch.argmax(probs, dim=1).item())
+            pred_value = float(outputs[0, pred_class].item())
+
+        seq_len = X.size(1)
+        shap_values = np.zeros(seq_len)
+
+        baseline_X = torch.zeros_like(X)
+        baseline_feat = None
+        if feat is not None:
+            baseline_feat = torch.zeros_like(feat)
+
+        with torch.no_grad():
+            baseline_output = self.model(baseline_X, baseline_feat)
+            base_value = float(baseline_output[0, pred_class].item())
+
+        for t in range(seq_len):
+            marginal_contribs = []
+            for _ in range(num_samples):
+                perm = np.random.permutation(seq_len)
+                t_idx = np.where(perm == t)[0][0]
+
+                before_indices = perm[:t_idx]
+                after_indices = perm[t_idx:]
+
+                X_with = baseline_X.clone()
+                X_without = baseline_X.clone()
+
+                for idx in before_indices:
+                    X_with[0, idx, :] = X[0, idx, :]
+                    X_without[0, idx, :] = X[0, idx, :]
+
+                X_with[0, t, :] = X[0, t, :]
+
+                with torch.no_grad():
+                    output_with = self.model(X_with, feat)
+                    output_without = self.model(X_without, feat)
+
+                v_with = float(output_with[0, pred_class].item())
+                v_without = float(output_without[0, pred_class].item())
+                marginal_contribs.append(v_with - v_without)
+
+            shap_values[t] = np.mean(marginal_contribs)
+
+        shap_sum = np.sum(shap_values)
+        actual_diff = pred_value - base_value
+        sum_check = abs(shap_sum - actual_diff) / (abs(actual_diff) + 1e-12)
+
+        return {
+            'shap_values': shap_values.tolist(),
+            'base_value': base_value,
+            'prediction_value': pred_value,
+            'prediction_class': pred_class,
+            'shap_sum_check': float(sum_check),
+        }

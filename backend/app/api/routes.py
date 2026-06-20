@@ -4894,6 +4894,7 @@ async def get_explainability_report(audit_id: int):
             ),
             'rule_hits': report.get('rule_hits'),
             'strategy_adjustment': report.get('strategy_adjustment'),
+            'feature_attributions': report.get('feature_attributions'),
         }
     except HTTPException:
         raise

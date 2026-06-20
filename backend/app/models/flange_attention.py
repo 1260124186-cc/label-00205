@@ -2281,3 +2281,270 @@ class FlangeAttentionModel:
         )
 
         return model
+
+    def get_attention_heatmap(
+        self,
+        multi_bolt_data: List[np.ndarray],
+        bolt_features: Optional[List[np.ndarray]] = None,
+        global_features: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        """
+        导出真实 Attention Weight 热力图数据（非近似）
+
+        返回螺栓级多头自注意力的完整权重矩阵，以及每螺栓内部的
+        跨通道注意力权重，用于可解释性热力图可视化。
+
+        Args:
+            multi_bolt_data: 多螺栓数据列表
+            bolt_features: 每螺栓特征列表，可选
+            global_features: 全局特征，可选
+
+        Returns:
+            Dict: 包含:
+                - bolt_level_attention: 螺栓级注意力热力图数据
+                    - num_heads: 注意力头数
+                    - per_head_weights: 每头的注意力矩阵 [head, num_bolts, num_bolts]
+                    - averaged_weights: 多头平均注意力矩阵 [num_bolts, num_bolts]
+                    - bolt_importance: 螺栓重要性（基于注意力出度）
+                    - most_attended_to: 最受关注的螺栓排名
+                    - most_attending: 最关注他人的螺栓排名
+                - per_bolt_channel_attention: 每螺栓内部跨通道注意力
+                    - bolt_index -> [seq_len,] 时间步注意力权重
+                - channel_attention_summary: 通道注意力汇总
+                    - per_bolt_mean_attention: 每螺栓平均通道注意力
+                    - global_channel_attention: 全局通道注意力模式
+                - prediction: 预测结果
+                    - class_id: 预测类别
+                    - confidence: 置信度
+                    - probabilities: 概率分布
+        """
+        self.model.eval()
+
+        sequence_length = self.model_config.get('sequence_length', 100)
+        max_bolts = self.model_config.get('max_bolts', 20)
+        num_bolts = min(len(multi_bolt_data), max_bolts)
+
+        X, _, mask, bolt_feat_tensor, global_feat_tensor = self.prepare_data(
+            multi_bolt_data,
+            sequence_length=sequence_length,
+            bolt_features_list=bolt_features,
+            global_features=global_features
+        )
+
+        with torch.no_grad():
+            outputs, attention_weights = self.model(
+                X,
+                bolt_features=bolt_feat_tensor,
+                global_features=global_feat_tensor
+            )
+            probabilities = torch.softmax(outputs, dim=1)
+            prob_np = probabilities[0].cpu().numpy()
+            predicted_class = int(torch.argmax(probabilities[0]).item())
+            confidence = float(prob_np[predicted_class])
+
+        attn_weights = attention_weights.cpu().numpy()[0]
+        num_heads = attn_weights.shape[0]
+
+        valid_bolt_mask = np.ones(num_bolts, dtype=bool)
+        if num_bolts < max_bolts:
+            valid_bolt_mask = np.concatenate([
+                np.ones(num_bolts, dtype=bool),
+                np.zeros(max_bolts - num_bolts, dtype=bool)
+            ])
+
+        per_head_valid = []
+        for h in range(num_heads):
+            head_mat = attn_weights[h]
+            head_valid = head_mat[:num_bolts, :num_bolts]
+            row_sums = head_valid.sum(axis=1, keepdims=True)
+            row_sums[row_sums == 0] = 1.0
+            head_normalized = head_valid / row_sums
+            per_head_valid.append(head_normalized)
+
+        per_head_weights = np.array(per_head_valid)
+
+        averaged_weights = np.mean(per_head_weights, axis=0)
+
+        bolt_out_degree = np.sum(averaged_weights, axis=1)
+        bolt_in_degree = np.sum(averaged_weights, axis=0)
+        bolt_importance = (bolt_out_degree + bolt_in_degree) / 2
+        bolt_importance = bolt_importance / (np.sum(bolt_importance) + 1e-12)
+
+        most_attended_to = np.argsort(bolt_in_degree)[::-1].tolist()
+        most_attending = np.argsort(bolt_out_degree)[::-1].tolist()
+
+        per_bolt_channel_attn = []
+        if hasattr(self.model, '_last_per_bolt_channel_attn'):
+            channel_attn = self.model._last_per_bolt_channel_attn
+            if channel_attn is not None:
+                for i in range(min(num_bolts, len(channel_attn))):
+                    attn = channel_attn[i]
+                    if attn is not None and len(attn) > 0:
+                        attn_norm = attn / (np.sum(attn) + 1e-12)
+                        per_bolt_channel_attn.append(attn_norm.tolist())
+                    else:
+                        per_bolt_channel_attn.append([])
+            else:
+                for i in range(num_bolts):
+                    per_bolt_channel_attn.append([])
+        else:
+            for i in range(num_bolts):
+                per_bolt_channel_attn.append([])
+
+        per_bolt_mean_attn = []
+        for attn in per_bolt_channel_attn:
+            if len(attn) > 0:
+                per_bolt_mean_attn.append(float(np.mean(attn)))
+            else:
+                per_bolt_mean_attn.append(0.0)
+
+        if len(per_bolt_channel_attn) > 0 and all(len(a) > 0 for a in per_bolt_channel_attn if len(a) > 0):
+            valid_attns = [np.array(a) for a in per_bolt_channel_attn if len(a) > 0]
+            if len(valid_attns) > 0:
+                min_len = min(len(a) for a in valid_attns)
+                aligned = [a[:min_len] for a in valid_attns]
+                global_channel_attn = np.mean(aligned, axis=0)
+                global_channel_attn = global_channel_attn / (np.sum(global_channel_attn) + 1e-12)
+                global_channel_attn_list = global_channel_attn.tolist()
+            else:
+                global_channel_attn_list = []
+        else:
+            global_channel_attn_list = []
+
+        return {
+            'bolt_level_attention': {
+                'num_heads': int(num_heads),
+                'num_bolts': num_bolts,
+                'per_head_weights': per_head_weights.tolist(),
+                'averaged_weights': averaged_weights.tolist(),
+                'bolt_importance': bolt_importance.tolist(),
+                'bolt_in_degree': bolt_in_degree.tolist(),
+                'bolt_out_degree': bolt_out_degree.tolist(),
+                'most_attended_to': most_attended_to,
+                'most_attending': most_attending,
+            },
+            'per_bolt_channel_attention': per_bolt_channel_attn,
+            'channel_attention_summary': {
+                'per_bolt_mean_attention': per_bolt_mean_attn,
+                'global_channel_attention': global_channel_attn_list,
+                'has_channel_attention': any(len(a) > 0 for a in per_bolt_channel_attn),
+            },
+            'prediction': {
+                'class_id': predicted_class,
+                'confidence': confidence,
+                'probabilities': prob_np.tolist(),
+            },
+        }
+
+    def compute_integrated_gradients(
+        self,
+        multi_bolt_data: List[np.ndarray],
+        target_class: Optional[int] = None,
+        bolt_features: Optional[List[np.ndarray]] = None,
+        global_features: Optional[np.ndarray] = None,
+        num_steps: int = 30,
+    ) -> Dict[str, Any]:
+        """
+        计算法兰面模型的 Integrated Gradients
+
+        对多螺栓输入计算积分梯度，定位哪几个螺栓/时间点的预紧力变化
+        对预警结果贡献最大。
+
+        Args:
+            multi_bolt_data: 多螺栓数据列表
+            target_class: 目标类别，None 则使用预测类别
+            bolt_features: 每螺栓特征列表，可选
+            global_features: 全局特征，可选
+            num_steps: 积分步数，默认 30
+
+        Returns:
+            Dict: 包含:
+                - bolt_integrated_gradients: 每螺栓积分梯度 [num_bolts, seq_len, input_dim]
+                - bolt_importance_scores: 螺栓重要性评分 [num_bolts]
+                - timestep_importance: 时间步重要性 [seq_len]
+                - top_k_bolts: 最具影响力的螺栓索引
+                - top_k_timesteps: 最具影响力的时间步索引
+                - target_class: 目标类别
+                - convergence_delta: 收敛性校验
+        """
+        self.model.eval()
+
+        sequence_length = self.model_config.get('sequence_length', 100)
+        max_bolts = self.model_config.get('max_bolts', 20)
+        num_bolts = min(len(multi_bolt_data), max_bolts)
+
+        X, _, mask, bolt_feat_tensor, global_feat_tensor = self.prepare_data(
+            multi_bolt_data,
+            sequence_length=sequence_length,
+            bolt_features_list=bolt_features,
+            global_features=global_features
+        )
+
+        if target_class is None:
+            with torch.no_grad():
+                outputs, _ = self.model(X, bolt_feat_tensor, global_feat_tensor)
+                probs = torch.softmax(outputs, dim=1)
+                target_class = int(torch.argmax(probs, dim=1).item())
+
+        baseline_X = torch.zeros_like(X)
+        baseline_bolt_feat = None
+        baseline_global_feat = None
+        if bolt_feat_tensor is not None:
+            baseline_bolt_feat = torch.zeros_like(bolt_feat_tensor)
+        if global_feat_tensor is not None:
+            baseline_global_feat = torch.zeros_like(global_feat_tensor)
+
+        X.requires_grad_(True)
+
+        integrated_gradients = torch.zeros_like(X)
+
+        for step in range(num_steps + 1):
+            alpha = step / num_steps
+            interpolated_X = baseline_X + alpha * (X - baseline_X)
+
+            outputs, _ = self.model(interpolated_X, bolt_feat_tensor, global_feat_tensor)
+            target_score = outputs[0, target_class]
+
+            self.model.zero_grad()
+            target_score.backward(retain_graph=True)
+
+            if X.grad is not None:
+                integrated_gradients += X.grad.clone()
+                X.grad.zero_()
+
+        integrated_gradients = integrated_gradients / (num_steps + 1)
+        integrated_gradients = integrated_gradients * (X - baseline_X)
+
+        ig_np = integrated_gradients.detach().cpu().numpy()[0]
+        ig_valid = ig_np[:num_bolts]
+
+        bolt_importance = np.sum(np.abs(ig_valid), axis=(1, 2))
+        bolt_importance = bolt_importance / (np.sum(bolt_importance) + 1e-12)
+
+        timestep_importance = np.sum(np.abs(ig_valid), axis=(0, 2))
+        timestep_importance = timestep_importance / (np.sum(timestep_importance) + 1e-12)
+
+        top_k_bolts = min(5, len(bolt_importance))
+        top_k_bolt_indices = np.argsort(bolt_importance)[-top_k_bolts:][::-1].tolist()
+
+        top_k_steps = min(10, len(timestep_importance))
+        top_k_step_indices = np.argsort(timestep_importance)[-top_k_steps:][::-1].tolist()
+
+        with torch.no_grad():
+            baseline_output, _ = self.model(baseline_X, baseline_bolt_feat, baseline_global_feat)
+            baseline_score = float(baseline_output[0, target_class].item())
+            input_score = float(outputs[0, target_class].item())
+
+        ig_sum = float(np.sum(integrated_gradients.detach().cpu().numpy()))
+        actual_diff = input_score - baseline_score
+        convergence_delta = abs(ig_sum - actual_diff) / (abs(actual_diff) + 1e-12)
+
+        return {
+            'bolt_integrated_gradients': ig_valid.tolist(),
+            'bolt_importance_scores': bolt_importance.tolist(),
+            'timestep_importance': timestep_importance.tolist(),
+            'top_k_bolts': top_k_bolt_indices,
+            'top_k_timesteps': top_k_step_indices,
+            'target_class': target_class,
+            'convergence_delta': float(convergence_delta),
+        }
