@@ -9,6 +9,9 @@
 3. 月度预测任务 - 每月执行
 4. 告警升级任务 - 每5分钟执行
 5. 审计清理任务 - 每天执行
+6. 月度归档任务 - 每月1号凌晨执行（冷热数据归档）
+7. 冷数据过期清理 - 每月1号凌晨执行（保留策略清理）
+8. 分区维护任务 - 每日凌晨执行（预创建分区键 + 行数统计）
 
 新增功能:
 - Leader选举: 大集群场景下避免重复执行预测任务
@@ -101,12 +104,21 @@ class TaskScheduler:
             'audit_cleanup_job': 'maintenance',
             'association_graph_update_job': 'association_graph',
             'device_health_check_job': 'device_health',
+            'monthly_archive_job': 'archive',
+            'purge_expired_job': 'archive',
+            'partition_maintenance_job': 'maintenance',
         }
 
         self.leader_required = config.get('scheduler.leader_election.required', False)
         self.leader_jobs = config.get(
             'scheduler.leader_election.jobs',
-            ['prediction_job', 'monthly_prediction_job']
+            [
+                'prediction_job',
+                'monthly_prediction_job',
+                'monthly_archive_job',
+                'purge_expired_job',
+                'partition_maintenance_job',
+            ]
         )
 
         self._job_ids = [
@@ -117,6 +129,9 @@ class TaskScheduler:
             'audit_cleanup_job',
             'association_graph_update_job',
             'device_health_check_job',
+            'monthly_archive_job',
+            'purge_expired_job',
+            'partition_maintenance_job',
         ]
 
         event_bus.subscribe(
@@ -246,6 +261,45 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"设备健康检查任务已添加: {cron}")
+
+        archive_config = config.get('archive', {})
+        archive_scheduler_cfg = archive_config.get('scheduler', {}) if archive_config else {}
+
+        monthly_archive_cfg = archive_scheduler_cfg.get('monthly_archive', {})
+        if monthly_archive_cfg.get('enabled', True) and archive_config.get('enabled', True):
+            cron = monthly_archive_cfg.get('cron', '0 3 1 * *')
+            self.scheduler.add_job(
+                self._monthly_archive_job,
+                CronTrigger.from_crontab(cron),
+                id='monthly_archive_job',
+                name='时序数据冷热归档任务',
+                replace_existing=True
+            )
+            logger.info(f"月度归档任务已添加: {cron}")
+
+        purge_expired_cfg = archive_scheduler_cfg.get('purge_expired', {})
+        if purge_expired_cfg.get('enabled', True) and archive_config.get('enabled', True):
+            cron = purge_expired_cfg.get('cron', '0 4 1 * *')
+            self.scheduler.add_job(
+                self._purge_expired_job,
+                CronTrigger.from_crontab(cron),
+                id='purge_expired_job',
+                name='冷数据过期清理任务',
+                replace_existing=True
+            )
+            logger.info(f"冷数据过期清理任务已添加: {cron}")
+
+        partition_maint_cfg = archive_scheduler_cfg.get('partition_maintenance', {})
+        if partition_maint_cfg.get('enabled', True) and archive_config.get('enabled', True):
+            cron = partition_maint_cfg.get('cron', '30 2 * * *')
+            self.scheduler.add_job(
+                self._partition_maintenance_job,
+                CronTrigger.from_crontab(cron),
+                id='partition_maintenance_job',
+                name='分区键维护任务',
+                replace_existing=True
+            )
+            logger.info(f"分区维护任务已添加: {cron}")
 
     def _acquire_leadership_if_needed(self, job_name: str) -> bool:
         """
@@ -688,6 +742,266 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"设备健康检查任务失败: {e}")
 
+    def _get_all_tenant_ids(self) -> List[int]:
+        """获取所有活跃租户ID列表"""
+        try:
+            from app.utils.database import get_db
+            from sqlalchemy import text
+
+            with get_db() as db:
+                result = db.execute(text(
+                    "SELECT DISTINCT tenant_id FROM sc_org_nodes "
+                    "WHERE status = 'active' AND tenant_id IS NOT NULL "
+                    "UNION SELECT DISTINCT tenant_id FROM sc_bolt_data "
+                    "WHERE tenant_id IS NOT NULL "
+                    "LIMIT 1000"
+                ))
+                tenant_ids = sorted({int(row[0]) for row in result if row[0] is not None})
+                if not tenant_ids:
+                    tenant_ids = [1]
+                return tenant_ids
+        except Exception as e:
+            logger.warning(f"获取租户ID列表失败，使用默认租户: {e}")
+            return [1]
+
+    def _monthly_archive_job(self) -> None:
+        """
+        月度时序数据归档任务（支持Leader选举）
+
+        遍历所有活跃租户，按保留策略将超过热阈值的月份数据
+        导出为Parquet写入冷存储，并更新元数据索引。
+        """
+        job_name = 'monthly_archive_job'
+
+        if not self._acquire_leadership_if_needed(job_name):
+            return
+
+        try:
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.archive_service import ArchiveService
+
+                archive_service = ArchiveService()
+                archive_cfg = config.get('archive', {}) or {}
+                scheduler_cfg = archive_cfg.get('scheduler', {}) or {}
+                monthly_cfg = scheduler_cfg.get('monthly_archive', {})
+
+                default_hot_threshold = (
+                    archive_cfg.get('default_policy', {})
+                    .get('hot_retention_days', 90)
+                )
+                delete_from_hot = monthly_cfg.get('delete_from_hot', True)
+
+                tenant_ids = self._get_all_tenant_ids()
+                ctx.total_nodes = len(tenant_ids)
+
+                logger.info(
+                    f"开始执行月度归档任务: 租户 {len(tenant_ids)} 个, "
+                    f"默认热阈值={default_hot_threshold}天, "
+                    f"删除热数据={delete_from_hot}"
+                )
+
+                tables_to_archive = ['sc_bolt_data', 'sc_flange_data', 'sc_vibration_data']
+
+                for tenant_id in tenant_ids:
+                    try:
+                        tenant_success = True
+                        for table_name in tables_to_archive:
+                            try:
+                                result = archive_service.run_monthly_archive(
+                                    tenant_id=tenant_id,
+                                    table_name=table_name,
+                                    hot_threshold_days=default_hot_threshold,
+                                    trigger_type='scheduled',
+                                    operator='system:scheduler',
+                                )
+                                if not result.success:
+                                    logger.warning(
+                                        f"租户[{tenant_id}] 表[{table_name}] 归档部分失败: "
+                                        f"{result.message}"
+                                    )
+                                    tenant_success = False
+                            except Exception as e:
+                                logger.error(
+                                    f"租户[{tenant_id}] 表[{table_name}] 归档异常: {e}"
+                                )
+                                tenant_success = False
+
+                        if tenant_success:
+                            ctx.record_success(str(tenant_id))
+                        else:
+                            ctx.record_failure(str(tenant_id), "部分表归档失败", "PartialFailure")
+
+                    except Exception as e:
+                        logger.error(f"租户[{tenant_id}] 归档处理异常: {e}")
+                        ctx.record_failure(str(tenant_id), str(e), type(e).__name__)
+
+                logger.info(
+                    f"月度归档任务完成: 租户 {ctx.success_count}/{len(tenant_ids)} 成功"
+                )
+
+        except Exception as e:
+            logger.error(f"月度归档任务失败: {e}")
+        finally:
+            self._release_leadership_if_needed(job_name)
+
+    def _purge_expired_job(self) -> None:
+        """
+        冷数据过期清理任务（支持Leader选举）
+
+        根据租户保留策略，清理超过冷保留期或合规保留期的归档数据。
+        """
+        job_name = 'purge_expired_job'
+
+        if not self._acquire_leadership_if_needed(job_name):
+            return
+
+        try:
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.archive_service import ArchiveService
+
+                archive_service = ArchiveService()
+                archive_cfg = config.get('archive', {}) or {}
+                scheduler_cfg = archive_cfg.get('scheduler', {}) or {}
+                purge_cfg = scheduler_cfg.get('purge_expired', {})
+                permanent_delete = purge_cfg.get('permanent_delete', False)
+
+                tenant_ids = self._get_all_tenant_ids()
+                ctx.total_nodes = len(tenant_ids)
+
+                logger.info(
+                    f"开始执行冷数据过期清理: 租户 {len(tenant_ids)} 个, "
+                    f"永久删除={permanent_delete}"
+                )
+
+                for tenant_id in tenant_ids:
+                    try:
+                        result = archive_service.purge_expired_cold_data(
+                            tenant_id=tenant_id,
+                            permanent_delete=permanent_delete,
+                        )
+                        if result.success:
+                            ctx.record_success(str(tenant_id))
+                            logger.info(
+                                f"租户[{tenant_id}] 清理完成: "
+                                f"清理分区={result.archived_partitions or 0}, "
+                                f"释放空间={(result.total_bytes or 0) / 1024 / 1024:.2f}MB"
+                            )
+                        else:
+                            ctx.record_failure(
+                                str(tenant_id),
+                                result.message or "未知失败",
+                                "PurgeFailure",
+                            )
+                    except Exception as e:
+                        logger.error(f"租户[{tenant_id}] 清理异常: {e}")
+                        ctx.record_failure(str(tenant_id), str(e), type(e).__name__)
+
+                logger.info(
+                    f"冷数据清理任务完成: {ctx.success_count}/{len(tenant_ids)} 成功"
+                )
+
+        except Exception as e:
+            logger.error(f"冷数据清理任务失败: {e}")
+        finally:
+            self._release_leadership_if_needed(job_name)
+
+    def _partition_maintenance_job(self) -> None:
+        """
+        分区键维护任务（支持Leader选举）
+
+        - 预创建未来 N 个月的分区键记录（避免首次写入慢）
+        - 更新已有分区键的 row_count / data_size_bytes 统计
+        """
+        job_name = 'partition_maintenance_job'
+
+        if not self._acquire_leadership_if_needed(job_name):
+            return
+
+        try:
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.archive_service import ArchiveService
+                from datetime import datetime, timedelta
+                import calendar
+
+                archive_service = ArchiveService()
+                archive_cfg = config.get('archive', {}) or {}
+                scheduler_cfg = archive_cfg.get('scheduler', {}) or {}
+                maint_cfg = scheduler_cfg.get('partition_maintenance', {})
+                precreate_months = maint_cfg.get('precreate_months', 2)
+
+                tenant_ids = self._get_all_tenant_ids()
+                tables = ['sc_bolt_data', 'sc_flange_data', 'sc_vibration_data']
+                ctx.total_nodes = len(tenant_ids) * len(tables)
+
+                today = datetime.now()
+                end_cursor = today
+                if precreate_months > 0:
+                    year = today.year
+                    month = today.month
+                    for _ in range(precreate_months):
+                        month += 1
+                        if month > 12:
+                            month = 1
+                            year += 1
+                    last_day = calendar.monthrange(year, month)[1]
+                    end_cursor = datetime(year, month, last_day, 23, 59, 59)
+
+                start_cursor = today - timedelta(days=365 * 3)
+
+                logger.info(
+                    f"开始分区维护: 租户 {len(tenant_ids)} 个, 表 {len(tables)} 个, "
+                    f"预创建未来 {precreate_months} 个月, 时间范围 {start_cursor.date()} ~ {end_cursor.date()}"
+                )
+
+                total_created = 0
+                total_updated = 0
+                for tenant_id in tenant_ids:
+                    for table_name in tables:
+                        try:
+                            partitions = archive_service.ensure_partition_keys(
+                                tenant_id=tenant_id,
+                                table_name=table_name,
+                                start_date=start_cursor,
+                                end_date=end_cursor,
+                            )
+                            total_created += sum(1 for p in partitions if p.row_count == 0)
+                            total_updated += len(partitions)
+                            ctx.record_success(f"{tenant_id}:{table_name}")
+                        except Exception as e:
+                            logger.error(
+                                f"租户[{tenant_id}] 表[{table_name}] 分区维护异常: {e}"
+                            )
+                            ctx.record_failure(
+                                f"{tenant_id}:{table_name}",
+                                str(e),
+                                type(e).__name__,
+                            )
+
+                logger.info(
+                    f"分区维护任务完成: 分区记录 {total_updated} 条 "
+                    f"(新增 {total_created} 条)"
+                )
+
+        except Exception as e:
+            logger.error(f"分区维护任务失败: {e}")
+        finally:
+            self._release_leadership_if_needed(job_name)
+
     def _parse_json_field(self, value: Any, default: Any) -> Any:
         """解析JSON字段"""
         if not value:
@@ -916,6 +1230,18 @@ class TaskScheduler:
                     self.config.get('device_health_check_job', {}),
                     self._device_health_check_job,
                 ),
+                'monthly_archive_job': (
+                    self._get_archive_job_config('monthly_archive', '0 3 1 * *'),
+                    self._monthly_archive_job,
+                ),
+                'purge_expired_job': (
+                    self._get_archive_job_config('purge_expired', '0 4 1 * *'),
+                    self._purge_expired_job,
+                ),
+                'partition_maintenance_job': (
+                    self._get_archive_job_config('partition_maintenance', '30 2 * * *'),
+                    self._partition_maintenance_job,
+                ),
             }
 
             for job_id, (job_cfg, job_func) in job_configs.items():
@@ -953,6 +1279,31 @@ class TaskScheduler:
         cron = f'0 4 */{max(1, cleanup_hours // 24)} * *'
         return {
             'enabled': cleanup_enabled,
+            'cron': cron,
+        }
+
+    def _get_archive_job_config(
+        self, job_key: str, default_cron: str
+    ) -> Dict[str, Any]:
+        """
+        获取归档类任务的配置（从 archive.scheduler.{job_key} 读取）
+
+        Args:
+            job_key: monthly_archive / purge_expired / partition_maintenance
+            default_cron: 默认 cron 表达式
+
+        Returns:
+            {'enabled': bool, 'cron': str}
+        """
+        archive_cfg = config_manager.get('archive', {})
+        archive_enabled = archive_cfg.get('enabled', True)
+        scheduler_cfg = archive_cfg.get('scheduler', {}) if archive_cfg else {}
+        job_cfg = scheduler_cfg.get(job_key, {})
+
+        enabled = archive_enabled and job_cfg.get('enabled', True)
+        cron = job_cfg.get('cron', default_cron)
+        return {
+            'enabled': enabled,
             'cron': cron,
         }
 

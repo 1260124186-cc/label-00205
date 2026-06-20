@@ -210,3 +210,304 @@ class TimeSeriesSensorListResponse(BaseModel):
     """传感器列表响应"""
     sensors: List[str] = Field(default_factory=list)
     total: int = 0
+
+
+# ==================== 归档管理 - 保留策略 ====================
+
+class RetentionPolicyCreate(BaseModel):
+    """创建租户保留策略请求"""
+    policy_name: str = Field(..., max_length=100, description="策略名称")
+    policy_type: str = Field(
+        "operations",
+        description="策略类型: compliance(合规7年)/operations(运营1年)/custom(自定义)")
+    is_default: bool = Field(True, description="是否为默认策略")
+    scope_table: Optional[str] = Field(None, description="适用表名，不指定则全部表")
+    scope_sensor_ids: Optional[List[str]] = Field(None, description="适用传感器ID列表")
+    scope_aggregation_level: Optional[str] = Field(None, description="适用聚合级别")
+    hot_retention_days: int = Field(90, ge=1, le=3650, description="热数据保留天数（MySQL）")
+    cold_retention_days: int = Field(365, ge=30, le=36500, description="冷数据保留天数")
+    compliance_retention_years: Optional[int] = Field(
+        None, ge=1, le=50, description="合规保留年限（仅compliance类型有效）")
+    archive_cron: Optional[str] = Field(
+        None, description="归档任务cron表达式，不指定则使用全局默认")
+    purge_cron: Optional[str] = Field(
+        None, description="清理任务cron表达式，不指定则使用全局默认")
+    auto_delete_hot: bool = Field(True, description="归档成功后是否自动删除热数据")
+    lazy_load_enabled: bool = Field(True, description="是否启用冷数据懒加载")
+    storage_class: Optional[str] = Field(
+        None, description="冷存储类别: standard/infrequent/archive/deep_archive")
+    compression_algo: Optional[str] = Field(
+        None, description="压缩算法: snappy/gzip/zstd/brotli/none")
+    encryption_enabled: bool = Field(False, description="是否启用服务端加密")
+    effective_from: Optional[datetime] = Field(None, description="生效起始时间")
+    effective_to: Optional[datetime] = Field(None, description="生效结束时间")
+    change_reason: Optional[str] = Field(
+        None, max_length=500, description="策略变更原因")
+    created_by: Optional[str] = Field(
+        None, max_length=100, description="创建人/操作人")
+    approved_by: Optional[str] = Field(
+        None, max_length=100, description="审批人")
+
+
+class RetentionPolicyUpdate(BaseModel):
+    """更新租户保留策略请求（字段均可选，未指定则保持原值）"""
+    policy_name: Optional[str] = Field(None, max_length=100)
+    policy_type: Optional[str] = Field(None)
+    is_default: Optional[bool] = None
+    scope_table: Optional[str] = None
+    scope_sensor_ids: Optional[List[str]] = None
+    scope_aggregation_level: Optional[str] = None
+    hot_retention_days: Optional[int] = Field(None, ge=1, le=3650)
+    cold_retention_days: Optional[int] = Field(None, ge=30, le=36500)
+    compliance_retention_years: Optional[int] = Field(None, ge=1, le=50)
+    archive_cron: Optional[str] = None
+    purge_cron: Optional[str] = None
+    auto_delete_hot: Optional[bool] = None
+    lazy_load_enabled: Optional[bool] = None
+    storage_class: Optional[str] = None
+    compression_algo: Optional[str] = None
+    encryption_enabled: Optional[bool] = None
+    effective_from: Optional[datetime] = None
+    effective_to: Optional[datetime] = None
+    change_reason: Optional[str] = Field(None, max_length=500)
+    approved_by: Optional[str] = Field(None, max_length=100)
+
+
+class RetentionPolicyResponse(BaseModel):
+    """租户保留策略响应"""
+    tenant_id: int
+    policy_name: str
+    policy_type: str
+    is_default: bool
+    is_active: bool
+    priority: int
+    scope_table: Optional[str] = None
+    scope_sensor_ids: Optional[List[str]] = None
+    scope_aggregation_level: Optional[str] = None
+    hot_retention_days: int
+    cold_retention_days: int
+    compliance_retention_years: Optional[int] = None
+    archive_cron: Optional[str] = None
+    purge_cron: Optional[str] = None
+    auto_delete_hot: bool
+    lazy_load_enabled: bool
+    storage_class: Optional[str] = None
+    compression_algo: Optional[str] = None
+    encryption_enabled: bool
+    effective_from: Optional[datetime] = None
+    effective_to: Optional[datetime] = None
+    version: int = 1
+    change_reason: Optional[str] = None
+    created_by: Optional[str] = None
+    approved_by: Optional[str] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+
+# ==================== 归档管理 - 任务与统计 ====================
+
+class ArchiveJobResponse(BaseModel):
+    """归档任务执行记录响应"""
+    job_id: str
+    tenant_id: int
+    job_name: Optional[str] = None
+    job_type: Optional[str] = None
+    trigger_type: Optional[str] = None
+    source_table: Optional[str] = None
+    target_storage: Optional[str] = None
+    partition_key: Optional[str] = None
+    hot_threshold_days: Optional[int] = None
+    retention_days: Optional[int] = None
+    delete_from_hot: Optional[bool] = None
+    status: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    duration_seconds: Optional[float] = None
+    total_partitions: Optional[int] = None
+    processed_partitions: Optional[int] = None
+    total_rows: Optional[int] = None
+    archived_rows: Optional[int] = None
+    failed_rows: Optional[int] = None
+    deleted_rows: Optional[int] = None
+    archive_size_bytes: Optional[int] = None
+    archive_file_count: Optional[int] = None
+    error_count: Optional[int] = None
+    error_summary: Optional[str] = None
+    cron_expression: Optional[str] = None
+    operator: Optional[str] = None
+    create_time: Optional[datetime] = None
+
+
+class ArchivePartitionStat(BaseModel):
+    """分区状态统计"""
+    status: str
+    partition_count: int
+    total_rows: int
+    total_bytes: int
+
+
+class ArchiveStatisticsResponse(BaseModel):
+    """归档统计响应"""
+    tenant_id: int
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    partitions: List[ArchivePartitionStat] = Field(default_factory=list)
+    recent_jobs: List[ArchiveJobResponse] = Field(default_factory=list)
+    cold_storage_used_bytes: int = 0
+    hot_storage_used_bytes: int = 0
+    total_archive_files: int = 0
+    hot_retention_days: int = 90
+    cold_retention_days: int = 365
+
+
+# ==================== 归档管理 - 手动触发 ====================
+
+class ManualArchiveRequest(BaseModel):
+    """手动触发归档请求"""
+    table_name: Optional[str] = Field(None, description="指定表名，不指定则所有时序表")
+    hot_threshold_days: Optional[int] = Field(
+        None, ge=1, description="覆盖策略中的热阈值天数")
+    target_partition_keys: Optional[List[str]] = Field(
+        None, description="指定归档的分区键列表(YYYY-MM)，不指定则自动计算")
+    delete_from_hot: Optional[bool] = Field(
+        None, description="归档成功后是否删除热数据，不指定则使用策略")
+    verify_after_write: bool = Field(True, description="写入后是否校验校验和")
+    operator: Optional[str] = Field(
+        "api_user", max_length=100, description="操作人标识")
+
+
+class ManualArchiveResponse(BaseModel):
+    """手动触发归档响应"""
+    success: bool
+    job_id: Optional[str] = None
+    message: str
+    tenant_id: int
+    processed_partitions: int = 0
+    archived_rows: int = 0
+    failed_partitions: int = 0
+    total_bytes: int = 0
+    duration_seconds: Optional[float] = None
+
+
+class ManualPurgeResponse(BaseModel):
+    """手动触发清理响应"""
+    success: bool
+    message: str
+    tenant_id: int
+    purged_partitions: int = 0
+    purged_files: int = 0
+    released_bytes: int = 0
+    duration_seconds: Optional[float] = None
+
+
+# ==================== 冷数据懒加载 ====================
+
+class LazyLoadStatusResponse(BaseModel):
+    """冷数据懒加载请求状态响应"""
+    request_id: str
+    tenant_id: int
+    user_id: Optional[str] = None
+    user_type: Optional[str] = None
+    api_endpoint: Optional[str] = None
+    source_table: Optional[str] = None
+    sensor_ids: Optional[List[str]] = None
+    query_start_time: Optional[datetime] = None
+    query_end_time: Optional[datetime] = None
+    aggregation_level: Optional[str] = None
+    status: str
+    priority: Optional[str] = None
+    async_mode: bool = True
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    duration_seconds: Optional[float] = None
+    hot_row_count: int = 0
+    cold_row_count: int = 0
+    total_row_count: int = 0
+    cold_file_count: int = 0
+    cold_bytes_loaded: int = 0
+    restore_to_hot: bool = False
+    restore_expire_hours: int = 72
+    cache_hit: bool = False
+    error_message: Optional[str] = None
+    cold_data_ranges: Optional[List[Dict[str, Any]]] = None
+    archive_ids: Optional[List[str]] = None
+    partition_keys: Optional[List[str]] = None
+    create_time: Optional[datetime] = None
+
+
+# ==================== 透明分层查询 ====================
+
+class TieredQueryRequest(BaseModel):
+    """分层时序查询请求（自动路由热/冷数据）"""
+    tenant_id: int = Field(..., description="租户ID")
+    table_name: str = Field("sc_bolt_data", description="时序表名")
+    start_time: datetime = Field(..., description="查询起始时间")
+    end_time: datetime = Field(..., description="查询结束时间")
+    sensor_ids: Optional[List[str]] = Field(
+        None, description="传感器ID列表，不指定则全部")
+    scenario: str = Field(
+        "custom",
+        description="业务场景: training/prediction/analysis/compliance/"
+                    "reporting/visualization/data_export/custom")
+    read_tier: str = Field(
+        "auto",
+        description="读取层级: hot_only/hot_warm/all/auto。auto=按场景默认+自动升级")
+    aggregation_level: str = Field(
+        "raw", description="聚合级别: raw/minute/hour")
+    async_load: bool = Field(
+        True,
+        description="冷数据异步加载模式: True=返回request_id后后台加载; False=同步等待")
+    load_priority: str = Field(
+        "normal", description="加载优先级: low/normal/high/critical")
+    restore_to_hot: bool = Field(
+        False, description="是否将冷数据恢复到热存储缓存")
+    restore_expire_hours: int = Field(
+        72, description="恢复到热存储的过期小时数")
+    auto_upgrade_tier: Optional[bool] = Field(
+        None, description="是否允许自动升级读取层级，不指定则使用配置默认")
+    user_id: Optional[str] = Field(None, max_length=100, description="调用方用户ID")
+    api_endpoint: Optional[str] = Field(
+        None, max_length=200, description="调用方API标识")
+    limit: Optional[int] = Field(None, description="返回数据点上限")
+    order: str = Field("asc", description="排序方向: asc/desc")
+
+
+class TieredQueryResponse(BaseModel):
+    """分层时序查询响应"""
+    success: bool
+    message: Optional[str] = None
+    tenant_id: int
+    effective_read_tier: str
+    tier_upgraded: bool = False
+    tier_upgrade_reason: Optional[str] = None
+    hot_row_count: int = 0
+    cold_row_count: int = 0
+    total_row_count: int = 0
+    cold_files_read: int = 0
+    cold_bytes_read: int = 0
+    duration_ms: float = 0
+    lazy_load_request_id: Optional[str] = None
+    lazy_load_status: Optional[str] = None
+    points: List[Dict[str, Any]] = Field(default_factory=list)
+    columns: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    statistics: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ==================== 时间范围建议 ====================
+
+class SuggestedTimeRangeResponse(BaseModel):
+    """时间范围与层级建议响应"""
+    tenant_id: int
+    scenario: str
+    requested_start_time: datetime
+    requested_end_time: datetime
+    suggested_start_time: datetime
+    suggested_end_time: datetime
+    suggested_read_tier: str
+    required_read_tier: str
+    hot_cutoff_time: datetime
+    warm_cutoff_time: Optional[datetime] = None
+    hot_retention_days: int
+    cold_retention_days: int
+    warning: Optional[str] = None
+    tier_upgrade_will_happen: bool = False
