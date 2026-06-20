@@ -1,0 +1,232 @@
+name: Model Regression Gate
+
+on:
+  pull_request:
+    paths:
+      - "backend/app/models/**"
+      - "backend/app/services/prediction/**"
+      - "backend/app/services/training_service.py"
+      - "backend/app/services/golden_samples.py"
+      - "backend/app/services/regression_service.py"
+      - "backend/data_factory.py"
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - "backend/app/models/**"
+      - "backend/app/services/prediction/**"
+      - "backend/app/services/training_service.py"
+      - "backend/app/services/golden_samples.py"
+      - "backend/app/services/regression_service.py"
+      - "backend/data_factory.py"
+  workflow_dispatch:
+    inputs:
+      gate_threshold:
+        description: "门禁阈值（相对下降比例，0.02 = 2%）"
+        required: false
+        default: "0.02"
+      golden_sample_version:
+        description: "使用的金样本版本（留空=基线）"
+        required: false
+        default: ""
+      model_type:
+        description: "模型类型 bolt/flange"
+        required: false
+        default: "bolt"
+      node_id:
+        description: "节点 ID"
+        required: false
+        default: "default"
+
+env:
+  PYTHON_VERSION: "3.10"
+  GATE_THRESHOLD_DEFAULT: 0.02
+
+jobs:
+  regression-gate:
+    name: Run Regression Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          fi
+          pip install pytest httpx pyyaml
+
+      - name: Prepare golden sample data cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            backend/data/golden_samples
+            backend/data/regression_reports
+          key: ${{ runner.os }}-golden-samples-${{ hashFiles('backend/app/services/golden_samples.py', 'backend/data_factory.py') }}
+          restore-keys: |
+            ${{ runner.os }}-golden-samples-
+
+      - name: Run python syntax sanity check
+        working-directory: backend
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, '.')
+          from app.services.golden_samples import get_golden_samples_service
+          from app.services.regression_service import get_regression_service
+          gs = get_golden_samples_service()
+          print('[OK] golden_samples_service imported OK')
+          reg = get_regression_service()
+          print('[OK] regression_service imported OK')
+          "
+
+      - name: Ensure baseline golden sample exists
+        working-directory: backend
+        env:
+          SEED: 20260620
+          BOLTS: 24
+          DAYS: 14
+          FREQ_MIN: 30
+        run: |
+          python -c "
+          import sys, os
+          sys.path.insert(0, '.')
+          from app.services.golden_samples import get_golden_samples_service
+          gs = get_golden_samples_service()
+          versions, baseline = gs.list_versions()
+          if baseline is None:
+              print('[INFO] No baseline golden sample found, registering default...')
+              v = gs.register_version(
+                  scenario='all',
+                  bolts=${{ env.BOLTS }},
+                  days=${{ env.DAYS }},
+                  frequency_minutes=${{ env.FREQ_MIN }},
+                  seed=${{ env.SEED }},
+                  window_size=100,
+                  stride=50,
+                  description='CI default baseline',
+                  created_by='github-ci',
+              )
+              gs.set_baseline_version(version=v.version)
+              print(f'[OK] Registered baseline version: {v.version}')
+          else:
+              print(f'[INFO] Existing baseline version: {baseline}')
+          "
+
+      - name: Execute regression evaluation and gate
+        working-directory: backend
+        id: regression
+        env:
+          GATE_THRESHOLD: ${{ github.event.inputs.gate_threshold || '0.02' }}
+          GOLDEN_VERSION: ${{ github.event.inputs.golden_sample_version || '' }}
+          MODEL_TYPE: ${{ github.event.inputs.model_type || 'bolt' }}
+          NODE_ID: ${{ github.event.inputs.node_id || 'default' }}
+        run: |
+          set +e
+          python -c "
+          import sys, os, json
+          sys.path.insert(0, '.')
+          from app.services.regression_service import get_regression_service
+
+          reg = get_regression_service()
+          threshold = float(os.environ.get('GATE_THRESHOLD', '0.02'))
+          golden_ver = os.environ.get('GOLDEN_VERSION') or None
+
+          print('=' * 60)
+          print('MODEL REGRESSION GATE')
+          print('=' * 60)
+          print(f'- threshold: {threshold} ({threshold * 100:.1f}%)')
+          print(f'- model_type: {os.environ.get(\"MODEL_TYPE\", \"bolt\")}')
+          print(f'- node_id: {os.environ.get(\"NODE_ID\", \"default\")}')
+          print(f'- golden_sample_version: {golden_ver or \"(baseline)\"}')
+
+          result = reg.model_activate_gate(
+              model_type=os.environ.get('MODEL_TYPE', 'bolt'),
+              node_id=os.environ.get('NODE_ID', 'default'),
+              target_model_version=None,
+              gate_threshold=threshold,
+              skip_gate=False,
+          )
+
+          reg_raw = result.get('regression') or {}
+          gate_raw = result.get('gate') or {}
+
+          print()
+          print('--- REGRESSION EVALUATION ---')
+          print(f'  accuracy          : {reg_raw.get(\"accuracy\", 0):.4f}')
+          print(f'  macro_f1          : {reg_raw.get(\"macro_f1\", 0):.4f}')
+          print(f'  weighted_f1       : {reg_raw.get(\"weighted_f1\", 0):.4f}')
+          print(f'  total_samples     : {reg_raw.get(\"total_samples\", 0)}')
+          print(f'  model_version     : {reg_raw.get(\"model_version_used\", \"\")}')
+          print(f'  golden_version    : {reg_raw.get(\"golden_sample_version\", \"\")}')
+          print(f'  evaluation(s)     : {reg_raw.get(\"evaluation_time_seconds\", 0):.2f}s')
+          per_class = reg_raw.get('per_class_metrics') or {}
+          for cls, m in per_class.items():
+              print(f'  class={cls}  P={m.get(\"precision\",0):.3f}  R={m.get(\"recall\",0):.3f}  F1={m.get(\"f1\",0):.3f}  N={m.get(\"support\",0)}')
+
+          print()
+          print('--- GATE RESULT ---')
+          if gate_raw:
+              print(f'  baseline_version  : {gate_raw.get(\"baseline_version\")}')
+              print(f'  target_version    : {gate_raw.get(\"target_version\")}')
+              print(f'  delta_accuracy    : {gate_raw.get(\"delta_accuracy\", 0):+.4f}  '
+                    f'({gate_raw.get(\"baseline_accuracy\", 0):.4f} -> {gate_raw.get(\"target_accuracy\", 0):.4f})')
+              print(f'  delta_macro_f1    : {gate_raw.get(\"delta_macro_f1\", 0):+.4f}  '
+                    f'({gate_raw.get(\"baseline_macro_f1\", 0):.4f} -> {gate_raw.get(\"target_macro_f1\", 0):.4f})')
+              print(f'  delta_weighted_f1 : {gate_raw.get(\"delta_weighted_f1\", 0):+.4f}  '
+                    f'({gate_raw.get(\"baseline_weighted_f1\", 0):.4f} -> {gate_raw.get(\"target_weighted_f1\", 0):.4f})')
+          print(f'  gate_passed       : {result.get(\"gate_passed\")}')
+          print(f'  can_activate      : {result.get(\"can_activate\")}')
+          print(f'  blocked_reason    : {result.get(\"blocked_reason\", \"\")}')
+          print('=' * 60)
+
+          report_dir = os.path.join('data', 'regression_reports')
+          os.makedirs(report_dir, exist_ok=True)
+          report_path = os.path.join(report_dir, f'regression_report_{os.environ.get(\"MODEL_TYPE\",\"bolt\")}_{os.environ.get(\"NODE_ID\",\"default\")}.json')
+          with open(report_path, 'w', encoding='utf-8') as f:
+              json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+          print(f'[INFO] 回归报告已保存到: {report_path}')
+
+          exit(0 if result.get('can_activate') else 2)
+          "
+          RET_CODE=$?
+          echo "regression_exit_code=$RET_CODE" >> "$GITHUB_OUTPUT"
+          if [ $RET_CODE -eq 2 ]; then
+              echo "::error::MODEL REGRESSION GATE FAILED: 模型指标相对基线下降超过阈值 (${{ env.GATE_THRESHOLD_DEFAULT }})"
+              exit 2
+          fi
+          if [ $RET_CODE -ne 0 ]; then
+              echo "::error::MODEL REGRESSION GATE ERROR: 执行失败 (exit=$RET_CODE)"
+              exit $RET_CODE
+          fi
+
+      - name: Upload regression report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-report
+          path: backend/data/regression_reports/*.json
+          retention-days: 30
+
+      - name: Upload golden samples artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-samples-data
+          path: backend/data/golden_samples/
+          retention-days: 30

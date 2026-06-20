@@ -239,6 +239,19 @@ from app.api.schemas import (
     DeviceHealthQueryRequest, DeviceHeartbeatSchema, DeviceHealthListResponse,
     DeviceFaultAlertHandleRequest, DeviceFaultAlertQueryRequest,
     DeviceFaultAlertSchema, DeviceFaultAlertListResponse,
+    # ============================================================
+    # 数据工厂 / 金样本 / 回归测试 Schema
+    # ============================================================
+    SimulationGenerateRequest, SimulationGenerateResponse,
+    SimulationGenerateScenarioCountItem,
+    GoldenSampleSpecSchema, GoldenSampleMetricsSchema,
+    GoldenSampleVersionSchema, GoldenSampleVersionListResponse,
+    GoldenSampleRegisterRequest, GoldenSampleBaselineSetRequest,
+    ScenarioParameterDocResponse,
+    RegressionEvaluateRequest, RegressionEvaluateResponse,
+    RegressionPerClassMetricsSchema,
+    RegressionGateSchema, RegressionGateResponse,
+    ModelVersionActivateGateRequest,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -320,6 +333,18 @@ def get_risk_propagation_service() -> RiskPropagationService:
     if risk_propagation_service is None:
         risk_propagation_service = RiskPropagationService()
     return risk_propagation_service
+
+
+def get_golden_samples_service():
+    """获取金样本服务实例"""
+    from app.services.golden_samples import get_golden_samples_service
+    return get_golden_samples_service()
+
+
+def get_regression_service():
+    """获取回归测试服务实例"""
+    from app.services.regression_service import get_regression_service
+    return get_regression_service()
 
 
 def get_inspection_schedule_service():
@@ -1613,13 +1638,20 @@ async def list_model_versions(model_type: str, node_id: str):
 
 @router.post(
     "/model/activate",
-    response_model=ModelVersionSchema,
     tags=["模型管理"],
-    summary="激活指定模型版本"
+    summary="激活指定模型版本（含 CI 回归门禁）",
 )
-async def activate_model_version(request: ModelVersionActivateRequest):
+async def activate_model_version(
+    request: ModelVersionActivateGateRequest,
+):
     """
     激活指定的模型版本（切换活动版本）
+
+    **集成 CI 回归门禁逻辑**：
+    - 先在金样本集上跑回归评估，计算 accuracy / macro-F1 / weighted-F1
+    - 与当前基线版本对比，若任一指标相对下降 >2%（或自定义阈值）
+    - 则返回 `can_activate=false` 并给出阻断原因，不执行激活
+    - 可通过 `skip_regression_gate=true` 由管理员绕过（审计日志记录）
 
     通过 model_type、node_id 和 version 切换当前活动版本。
     激活后，后续预测将使用该版本的模型。
@@ -1627,11 +1659,142 @@ async def activate_model_version(request: ModelVersionActivateRequest):
     try:
         from app.services.model_version_service import get_model_version_service
 
+        # ---------- 1) 运行回归门禁 ----------
+        gate_threshold = request.gate_threshold
+        if gate_threshold is None:
+            gate_threshold = 0.02
+        skip_gate = bool(getattr(request, "skip_regression_gate", False))
+
+        regression_gate_result = None
+        can_activate = True
+        blocked_reason = ""
+        if not skip_gate:
+            try:
+                reg_service = get_regression_service()
+                regression_gate_result = reg_service.model_activate_gate(
+                    model_type=request.model_type,
+                    node_id=request.node_id,
+                    target_model_version=request.version,
+                    gate_threshold=gate_threshold,
+                    skip_gate=False,
+                )
+                can_activate = bool(regression_gate_result.get("can_activate", True))
+                blocked_reason = str(regression_gate_result.get("blocked_reason", ""))
+                if not can_activate:
+                    logger.warning(
+                        f"[CI-GATE] 模型激活被门禁阻断: "
+                        f"{request.model_type}/{request.node_id}/{request.version}, "
+                        f"原因={blocked_reason}, "
+                        f"threshold={gate_threshold}"
+                    )
+                    if audit_logger:
+                        try:
+                            audit_logger.log_event(
+                                event_type="model_activate_blocked",
+                                detail={
+                                    "model_type": request.model_type,
+                                    "node_id": request.node_id,
+                                    "version": request.version,
+                                    "blocked_reason": blocked_reason,
+                                    "threshold": gate_threshold,
+                                    "gate_result": regression_gate_result,
+                                },
+                            )
+                        except Exception as _ae:
+                            logger.warning(f"记录门禁审计日志失败: {_ae}")
+            except Exception as _ge:
+                can_activate = False
+                blocked_reason = f"REGRESSION_GATE_EXECUTION_ERROR: {_ge}"
+                logger.error(f"[CI-GATE] 回归门禁执行异常: {_ge}")
+        else:
+            blocked_reason = "SKIP_GATE_BY_ADMIN_OVERRIDE"
+            logger.warning(
+                f"[CI-GATE] 管理员显式绕过门禁: "
+                f"{request.model_type}/{request.node_id}/{request.version}"
+            )
+            if audit_logger:
+                try:
+                    audit_logger.log_event(
+                        event_type="model_activate_skip_gate",
+                        detail={
+                            "model_type": request.model_type,
+                            "node_id": request.node_id,
+                            "version": request.version,
+                            "override_user": getattr(request, "created_by", "unknown"),
+                        },
+                    )
+                except Exception as _ae:
+                    logger.warning(f"记录跳过门禁审计日志失败: {_ae}")
+
+        # ---------- 2) 若门禁失败则直接返回，不执行激活 ----------
+        if not can_activate:
+            # 把 gate 和 regression 信息解析为 schema 兼容结构
+            reg_eval = None
+            gate_info = None
+            if regression_gate_result:
+                reg_raw = regression_gate_result.get("regression") or {}
+                gate_raw = regression_gate_result.get("gate") or {}
+                if reg_raw:
+                    per_class = {}
+                    for k, v in (reg_raw.get("per_class_metrics") or {}).items():
+                        per_class[str(k)] = RegressionPerClassMetricsSchema(
+                            precision=float(v.get("precision", 0)),
+                            recall=float(v.get("recall", 0)),
+                            f1=float(v.get("f1", 0)),
+                            support=int(v.get("support", 0)),
+                        )
+                    reg_eval = RegressionEvaluateResponse(
+                        version=reg_raw.get("version", ""),
+                        golden_sample_version=reg_raw.get("golden_sample_version", ""),
+                        model_version_used=reg_raw.get("model_version_used", ""),
+                        accuracy=float(reg_raw.get("accuracy", 0)),
+                        macro_f1=float(reg_raw.get("macro_f1", 0)),
+                        weighted_f1=float(reg_raw.get("weighted_f1", 0)),
+                        per_class_metrics=per_class,
+                        confusion_matrix=reg_raw.get("confusion_matrix") or [],
+                        total_samples=int(reg_raw.get("total_samples", 0)),
+                        evaluation_time_seconds=float(reg_raw.get("evaluation_time_seconds", 0)),
+                        evaluated_at=reg_raw.get("evaluated_at", ""),
+                    )
+                if gate_raw:
+                    gate_info = RegressionGateSchema(
+                        gate_passed=bool(gate_raw.get("gate_passed", False)),
+                        threshold=float(gate_raw.get("threshold", 0)),
+                        baseline_version=gate_raw.get("baseline_version"),
+                        target_version=str(gate_raw.get("target_version", "")),
+                        baseline_accuracy=float(gate_raw.get("baseline_accuracy", 0)),
+                        target_accuracy=float(gate_raw.get("target_accuracy", 0)),
+                        delta_accuracy=float(gate_raw.get("delta_accuracy", 0)),
+                        baseline_macro_f1=float(gate_raw.get("baseline_macro_f1", 0)),
+                        target_macro_f1=float(gate_raw.get("target_macro_f1", 0)),
+                        delta_macro_f1=float(gate_raw.get("delta_macro_f1", 0)),
+                        baseline_weighted_f1=float(gate_raw.get("baseline_weighted_f1", 0)),
+                        target_weighted_f1=float(gate_raw.get("target_weighted_f1", 0)),
+                        delta_weighted_f1=float(gate_raw.get("delta_weighted_f1", 0)),
+                        blocked_reason=str(gate_raw.get("blocked_reason", "")),
+                        per_class_delta=gate_raw.get("per_class_delta"),
+                    )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "MODEL_ACTIVATE_BLOCKED_BY_REGRESSION_GATE",
+                    "message": blocked_reason,
+                    "gate_passed": can_activate,
+                    "can_activate": False,
+                    "skip_gate": skip_gate,
+                    "threshold": gate_threshold,
+                    "blocked_reason": blocked_reason,
+                    "gate": gate_info.dict() if gate_info else None,
+                    "regression": reg_eval.dict() if reg_eval else None,
+                },
+            )
+
+        # ---------- 3) 门禁通过，执行原有激活流程 ----------
         service = get_model_version_service()
         result = service.activate_version(
             model_type=request.model_type,
             node_id=request.node_id,
-            version=request.version
+            version=request.version,
         )
 
         try:
@@ -1643,6 +1806,22 @@ async def activate_model_version(request: ModelVersionActivateRequest):
             logger.info(f"已清除模型缓存: {request.model_type}/{request.node_id}")
         except Exception as e:
             logger.warning(f"清除模型缓存失败: {e}")
+
+        if audit_logger:
+            try:
+                audit_logger.log_event(
+                    event_type="model_activate_success",
+                    detail={
+                        "model_type": request.model_type,
+                        "node_id": request.node_id,
+                        "version": request.version,
+                        "gate_passed": True,
+                        "skip_gate": skip_gate,
+                        "threshold": gate_threshold,
+                    },
+                )
+            except Exception as _ae:
+                logger.warning(f"记录激活审计日志失败: {_ae}")
 
         return ModelVersionSchema(
             version=result['version'],
@@ -1657,7 +1836,7 @@ async def activate_model_version(request: ModelVersionActivateRequest):
             training_duration_seconds=result.get('training_duration_seconds'),
             parent_version=result.get('parent_version'),
             training_session_id=result.get('training_session_id'),
-            metrics=result.get('metrics')
+            metrics=result.get('metrics'),
         )
 
     except ValueError as e:
@@ -13795,4 +13974,752 @@ async def handle_device_fault_alert(request: DeviceFaultAlertHandleRequest):
         raise
     except Exception as e:
         logger.error(f"处理设备故障告警失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================================
+# 数据工厂服务化、金样本、回归测试、压测模式 API
+# =====================================================================
+
+
+@router.post(
+    "/simulation/generate",
+    tags=["数据工厂 & 仿真"],
+    summary="参数化生成仿真时序数据（支持 CSV / DB / 流式压测 多种输出）",
+    response_model=SimulationGenerateResponse,
+)
+async def simulation_generate(
+    request: SimulationGenerateRequest,
+):
+    """
+    **参数化时序数据生成服务**（data_factory 的 REST 封装 + 压测模式）
+
+    ### 场景（scenario）
+    `normal | loosening | overload | sudden_overload | fracture | temperature_coupling | all`
+
+    ### 输出目标（output_target）
+    - **csv**：导出 CSV 文件到指定 `csv_path`
+    - **db**：批量注入 MySQL（需提供 db_host/port/user/password/name）
+    - **both**：同时 csv + db
+    - **stream_stress**：生成数据后进入压测模式，批量喂给 `/stream/ingest/batch`
+
+    ### 压测模式（stress_test=true 或 output_target=stream_stress）
+    - 开启 `stress_test` 或选择 `stream_stress` 会自动：
+      1. 生成所需规模的时序数据
+      2. 按目标 QPS（`stress_qps`）批量调用 `/stream/ingest/batch`
+      3. 持续 `stress_duration_seconds` 秒
+      4. 返回最终 QPS / 延迟 / 成功率 指标
+    """
+    import time
+    import hashlib
+    import math
+
+    t0 = time.time()
+
+    scenario = (request.scenario or "all").strip().lower()
+    bolts = int(request.bolts)
+    days = int(request.days)
+    freq = int(request.frequency_minutes)
+    seed = int(request.seed) if request.seed is not None else 20260620
+    output_target = (request.output_target or "csv").strip().lower()
+
+    # 允许：output_target=stream_stress 等同于默认开启 stress_test
+    stress_enabled = bool(request.stress_test) or (output_target == "stream_stress")
+
+    try:
+        # ---------- 1) 调用数据工厂 ----------
+        sys_path_fix = False
+        backend_root = Path(__file__).resolve().parent.parent.parent
+        if str(backend_root) not in os.sys.path:
+            os.sys.path.insert(0, str(backend_root))
+            sys_path_fix = True
+        try:
+            from data_factory import (
+                DataFactory,
+                ScenarioConfig,
+                SCENARIO_GENERATORS,
+                FactoryResult,
+                export_csv,
+                MySQLInjector,
+            )
+        except Exception as _imp:
+            raise HTTPException(
+                status_code=500,
+                detail=f"无法加载数据工厂模块 data_factory: {_imp}",
+            )
+
+        cfg = ScenarioConfig()
+        if isinstance(request.scenario_config_override, dict):
+            for k, v in request.scenario_config_override.items():
+                if hasattr(cfg, k):
+                    setattr(cfg, k, type(getattr(cfg, k))(v))
+
+        factory = DataFactory(cfg=cfg, seed=seed)
+
+        result: FactoryResult = factory.generate(
+            scenario=scenario,
+            bolts=bolts,
+            days=days,
+            frequency_minutes=freq,
+        )
+        all_rows = result.total_rows
+
+        # 把 records 转为 DataFrame（便于后续 MD5 / 压测用）
+        from dataclasses import asdict as _asdict
+        df = pd.DataFrame([_asdict(r) for r in result.records])
+
+        scenario_distribution = []
+        if result.scenarios:
+            for s, c in result.scenarios.items():
+                scenario_distribution.append(
+                    SimulationGenerateScenarioCountItem(scenario=s, point_count=int(c))
+                )
+        else:
+            scenario_distribution.append(
+                SimulationGenerateScenarioCountItem(scenario=scenario, point_count=all_rows)
+            )
+
+        # MD5 数据完整性校验
+        data_hash = hashlib.md5(
+            pd.util.hash_pandas_object(df).values.tobytes()
+        ).hexdigest()
+
+        # ---------- 2) 输出：CSV ----------
+        csv_file = None
+        csv_size_mb = None
+        if output_target in ("csv", "both"):
+            out_path = (
+                request.csv_path
+                or f"simulation_output_{scenario}_{bolts}bolts_{days}d_seed{seed}.csv"
+            )
+            try:
+                export_csv(result, out_path)
+                csv_file = out_path
+                csv_size_mb = round(os.path.getsize(out_path) / (1024 * 1024), 3)
+            except Exception as _ce:
+                raise HTTPException(
+                    status_code=500, detail=f"导出 CSV 失败: {_ce}"
+                )
+
+        # ---------- 3) 输出：MySQL ----------
+        db_inserted = 0
+        db_elapsed = None
+        if output_target in ("db", "both") and request.db_host:
+            tdb0 = time.time()
+            try:
+                injector = MySQLInjector(
+                    host=request.db_host or "127.0.0.1",
+                    port=int(request.db_port or 3306),
+                    user=request.db_user or "root",
+                    password=request.db_password or "",
+                    database=request.db_name or "bolt_monitor",
+                    batch_size=int(request.db_batch_size or 5000),
+                )
+                db_inserted, _ = injector.inject(result)
+            except Exception as _de:
+                raise HTTPException(
+                    status_code=500, detail=f"MySQL 注入失败: {_de}"
+                )
+            db_elapsed = round(time.time() - tdb0, 3)
+
+        # ---------- 4) 压测模式：高 QPS 喂给 /stream/ingest/batch ----------
+        stress_result = None
+        if stress_enabled:
+            try:
+                stress_result = _run_stream_stress_test(
+                    df=df,
+                    qps=int(request.stress_qps),
+                    duration_seconds=int(request.stress_duration_seconds),
+                    auto_switch_mode=bool(request.stress_stream_mode_switch),
+                )
+            except Exception as _se:
+                logger.warning(f"压测模式执行异常: {_se}")
+                stress_result = {
+                    "error": str(_se),
+                    "success": False,
+                }
+
+        elapsed = round(time.time() - t0, 3)
+        return SimulationGenerateResponse(
+            success=True,
+            message=(
+                f"生成 {all_rows} 行（{bolts} 螺栓 x {days} 天，频率 {freq}min），"
+                f"seed={seed}，耗时 {elapsed}s。"
+                f" CSV={csv_file}，MySQL={'OK' if db_inserted else 'N/A'}，"
+                f"压测={'启用' if stress_enabled else '未启用'}"
+            ),
+            scenario=scenario,
+            bolts=bolts,
+            days=days,
+            frequency_minutes=freq,
+            seed=seed,
+            total_rows=all_rows,
+            elapsed_seconds=elapsed,
+            scenario_distribution=scenario_distribution,
+            output_target=output_target,
+            csv_file=csv_file,
+            csv_size_mb=csv_size_mb,
+            db_inserted_rows=db_inserted if db_inserted else None,
+            db_elapsed_seconds=db_elapsed,
+            stress_test_result=stress_result,
+            data_hash=data_hash,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"/simulation/generate 执行失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _run_stream_stress_test(
+    df: pd.DataFrame,
+    qps: int = 500,
+    duration_seconds: int = 60,
+    auto_switch_mode: bool = True,
+) -> Dict[str, Any]:
+    """
+    内部压测工具函数：
+    - 把 DataFrame 打包为 StreamBatchIngestRequest
+    - 按目标 QPS 调用 /stream/ingest/batch
+    - 统计成功率、平均延迟、峰值延迟、实际 QPS
+    """
+    import asyncio
+    import time
+    import statistics
+
+    from app.streaming.engine import get_stream_prediction_engine
+
+    engine = get_stream_prediction_engine()
+    if auto_switch_mode:
+        try:
+            engine.set_mode("stream")
+        except Exception:
+            pass
+        if not engine.running:
+            try:
+                engine.start()
+            except Exception:
+                pass
+
+    total_messages = max(1, int(qps * max(1, duration_seconds)))
+    cols = [c.lower() for c in df.columns]
+
+    def _row_to_dict(row) -> Dict[str, Any]:
+        item = {}
+        for i, col in enumerate(cols):
+            v = row[i]
+            if isinstance(v, (pd.Timestamp, datetime)):
+                v = v.isoformat() if hasattr(v, "isoformat") else str(v)
+            elif v is None or (isinstance(v, float) and math.isnan(v)):
+                v = None
+            else:
+                try:
+                    if isinstance(v, (np.integer,)):
+                        v = int(v)
+                    elif isinstance(v, (np.floating,)):
+                        v = float(v)
+                except Exception:
+                    pass
+            item[col] = v
+        return item
+
+    # 循环复用 df
+    rows = df.to_numpy().tolist()
+    n_rows = len(rows)
+    if n_rows == 0:
+        return {
+            "success": False,
+            "error": "数据为空，无法执行压测",
+        }
+
+    batch_size = max(1, min(qps, 2000))
+    latencies = []
+    success_count = 0
+    error_count = 0
+    start_ts = time.time()
+    end_deadline = start_ts + max(1, duration_seconds)
+    idx = 0
+    sent_total = 0
+
+    # 同步包装：用 event_loop 调用 async ingest_batch
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    def _sync_call(coro):
+        try:
+            return loop.run_until_complete(coro)
+        except Exception as _e:
+            return _e
+
+    while (time.time() < end_deadline) and (sent_total < total_messages):
+        this_batch = []
+        for _ in range(batch_size):
+            if sent_total >= total_messages:
+                break
+            if time.time() >= end_deadline:
+                break
+            r = rows[idx % n_rows]
+            this_batch.append(_row_to_dict(r))
+            idx += 1
+            sent_total += 1
+        if not this_batch:
+            break
+        try:
+            from app.api.schemas import StreamDataIngestItem
+            batch_items = []
+            for it in this_batch:
+                try:
+                    batch_items.append(StreamDataIngestItem(**it))
+                except Exception:
+                    # 字段不完全匹配也允许透传
+                    batch_items.append(it)
+            t1 = time.time()
+            # 调用 engine 直接 ingest_batch（不经过 HTTP 层开销更大）
+            try:
+                resp = engine.ingest_batch(batch_items)
+                ok = True
+            except Exception as _ee:
+                resp = str(_ee)
+                ok = False
+            lat = (time.time() - t1) * 1000
+            latencies.append(lat)
+            if ok:
+                success_count += len(this_batch)
+            else:
+                error_count += len(this_batch)
+        except Exception as _be:
+            error_count += len(this_batch)
+            logger.warning(f"压测单批次异常: {_be}")
+
+        # QPS 节流：已用时间，期望速率 qps，睡眠补足
+        elapsed_so_far = time.time() - start_ts
+        target_elapsed = sent_total / max(1, qps)
+        need_sleep = target_elapsed - elapsed_so_far
+        if need_sleep > 0:
+            time.sleep(need_sleep)
+
+    actual_elapsed = max(0.001, time.time() - start_ts)
+    actual_qps = round(sent_total / actual_elapsed, 2)
+    total_attempted = success_count + error_count
+    success_rate = (
+        round(success_count / total_attempted * 100, 2) if total_attempted else 0.0
+    )
+    avg_latency = round(statistics.mean(latencies), 2) if latencies else 0.0
+    p95_latency = (
+        round(sorted(latencies)[int(0.95 * (len(latencies) - 1))], 2)
+        if latencies else 0.0
+    )
+    p99_latency = (
+        round(sorted(latencies)[int(0.99 * (len(latencies) - 1))], 2)
+        if latencies else 0.0
+    )
+    peak_latency = round(max(latencies), 2) if latencies else 0.0
+
+    engine_stats = {}
+    try:
+        st = engine.get_stats()
+        engine_stats = {
+            "running": st.running if hasattr(st, "running") else None,
+            "current_qps": getattr(st, "current_qps", None),
+            "processed": getattr(st, "processed", None),
+            "errors": getattr(st, "errors", None),
+            "active_windows": getattr(st, "active_windows", None),
+            "predictions": getattr(st, "predictions", None),
+        }
+    except Exception as _e:
+        engine_stats["error"] = str(_e)
+
+    return {
+        "success": True,
+        "target_qps": qps,
+        "actual_qps": actual_qps,
+        "duration_seconds": round(actual_elapsed, 2),
+        "total_messages_sent": sent_total,
+        "success_count": success_count,
+        "error_count": error_count,
+        "success_rate_percent": success_rate,
+        "avg_latency_ms": avg_latency,
+        "p95_latency_ms": p95_latency,
+        "p99_latency_ms": p99_latency,
+        "peak_latency_ms": peak_latency,
+        "engine_stats": engine_stats,
+    }
+
+
+# =====================================================================
+# 金样本集管理 API
+# =====================================================================
+
+
+@router.get(
+    "/golden-samples/versions",
+    tags=["金样本 & 回归测试"],
+    summary="列出所有金样本版本",
+    response_model=GoldenSampleVersionListResponse,
+)
+async def list_golden_sample_versions(
+    model_type: str = Query("bolt", description="模型类型 bolt/flange"),
+    node_id: str = Query("default", description="节点 ID"),
+):
+    try:
+        gs = get_golden_samples_service()
+        versions, baseline = gs.list_versions(model_type=model_type, node_id=node_id)
+
+        items = []
+        for v in versions:
+            spec = v.spec
+            metrics = v.metrics
+            items.append(GoldenSampleVersionSchema(
+                version=str(v.version),
+                spec=GoldenSampleSpecSchema(
+                    scenario=str(spec.scenario),
+                    bolts=int(spec.bolts),
+                    days=int(spec.days),
+                    frequency_minutes=int(spec.frequency_minutes),
+                    seed=int(spec.seed),
+                    scenario_config=spec.scenario_config,
+                ),
+                metrics=GoldenSampleMetricsSchema(
+                    accuracy=float(metrics.accuracy),
+                    macro_f1=float(metrics.macro_f1),
+                    weighted_f1=float(metrics.weighted_f1),
+                    per_class_f1={str(k): float(v) for k, v in (metrics.per_class_f1 or {}).items()},
+                    per_class_precision={str(k): float(v) for k, v in (metrics.per_class_precision or {}).items()},
+                    per_class_recall={str(k): float(v) for k, v in (metrics.per_class_recall or {}).items()},
+                    confusion_matrix=metrics.confusion_matrix or [],
+                    total_samples=int(metrics.total_samples),
+                    evaluation_model_version=str(metrics.evaluation_model_version),
+                    evaluation_timestamp=str(metrics.evaluation_timestamp),
+                ),
+                data_hash=str(v.data_hash),
+                data_path=str(v.data_path),
+                labels_path=str(v.labels_path),
+                created_at=str(v.created_at),
+                created_by=str(v.created_by),
+                description=str(v.description or ""),
+                is_baseline=bool(v.is_baseline),
+            ))
+        return GoldenSampleVersionListResponse(
+            total=len(items),
+            items=items,
+            baseline_version=str(baseline) if baseline else None,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"列出金样本版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/golden-samples/versions",
+    tags=["金样本 & 回归测试"],
+    summary="注册 / 生成 新的金样本版本",
+    response_model=GoldenSampleVersionSchema,
+)
+async def register_golden_sample_version(request: GoldenSampleRegisterRequest):
+    try:
+        gs = get_golden_samples_service()
+        scenario_cfg_override = request.scenario_config_override
+        version = gs.register_version(
+            scenario=request.scenario,
+            bolts=int(request.bolts),
+            days=int(request.days),
+            frequency_minutes=int(request.frequency_minutes),
+            seed=int(request.seed),
+            scenario_config_override=scenario_cfg_override,
+            window_size=int(request.window_size),
+            stride=int(request.stride),
+            description=request.description,
+            created_by=request.created_by,
+        )
+        if request.set_as_baseline:
+            gs.set_baseline_version(version=version.version)
+            version.is_baseline = True
+        spec = version.spec
+        metrics = version.metrics
+        return GoldenSampleVersionSchema(
+            version=str(version.version),
+            spec=GoldenSampleSpecSchema(
+                scenario=str(spec.scenario),
+                bolts=int(spec.bolts),
+                days=int(spec.days),
+                frequency_minutes=int(spec.frequency_minutes),
+                seed=int(spec.seed),
+                scenario_config=spec.scenario_config,
+            ),
+            metrics=GoldenSampleMetricsSchema(
+                accuracy=float(metrics.accuracy),
+                macro_f1=float(metrics.macro_f1),
+                weighted_f1=float(metrics.weighted_f1),
+                per_class_f1={str(k): float(v) for k, v in (metrics.per_class_f1 or {}).items()},
+                per_class_precision={str(k): float(v) for k, v in (metrics.per_class_precision or {}).items()},
+                per_class_recall={str(k): float(v) for k, v in (metrics.per_class_recall or {}).items()},
+                confusion_matrix=metrics.confusion_matrix or [],
+                total_samples=int(metrics.total_samples),
+                evaluation_model_version=str(metrics.evaluation_model_version),
+                evaluation_timestamp=str(metrics.evaluation_timestamp),
+            ),
+            data_hash=str(version.data_hash),
+            data_path=str(version.data_path),
+            labels_path=str(version.labels_path),
+            created_at=str(version.created_at),
+            created_by=str(version.created_by),
+            description=str(version.description or ""),
+            is_baseline=bool(version.is_baseline),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"注册金样本版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/golden-samples/versions/baseline",
+    tags=["金样本 & 回归测试"],
+    summary="设置/切换 基线版本",
+)
+async def set_golden_sample_baseline(request: GoldenSampleBaselineSetRequest):
+    try:
+        gs = get_golden_samples_service()
+        gs.set_baseline_version(version=request.version)
+        return {"success": True, "baseline_version": request.version}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"设置基线版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/golden-samples/versions/baseline",
+    tags=["金样本 & 回归测试"],
+    summary="获取当前基线版本",
+)
+async def get_golden_sample_baseline(
+    model_type: str = Query("bolt"),
+    node_id: str = Query("default"),
+):
+    try:
+        gs = get_golden_samples_service()
+        base = gs.get_baseline_version(model_type=model_type, node_id=node_id)
+        if base is None:
+            raise HTTPException(status_code=404, detail="未找到基线版本")
+        spec = base.spec
+        metrics = base.metrics
+        return GoldenSampleVersionSchema(
+            version=str(base.version),
+            spec=GoldenSampleSpecSchema(
+                scenario=str(spec.scenario),
+                bolts=int(spec.bolts),
+                days=int(spec.days),
+                frequency_minutes=int(spec.frequency_minutes),
+                seed=int(spec.seed),
+                scenario_config=spec.scenario_config,
+            ),
+            metrics=GoldenSampleMetricsSchema(
+                accuracy=float(metrics.accuracy),
+                macro_f1=float(metrics.macro_f1),
+                weighted_f1=float(metrics.weighted_f1),
+                per_class_f1={str(k): float(v) for k, v in (metrics.per_class_f1 or {}).items()},
+                per_class_precision={str(k): float(v) for k, v in (metrics.per_class_precision or {}).items()},
+                per_class_recall={str(k): float(v) for k, v in (metrics.per_class_recall or {}).items()},
+                confusion_matrix=metrics.confusion_matrix or [],
+                total_samples=int(metrics.total_samples),
+                evaluation_model_version=str(metrics.evaluation_model_version),
+                evaluation_timestamp=str(metrics.evaluation_timestamp),
+            ),
+            data_hash=str(base.data_hash),
+            data_path=str(base.data_path),
+            labels_path=str(base.labels_path),
+            created_at=str(base.created_at),
+            created_by=str(base.created_by),
+            description=str(base.description or ""),
+            is_baseline=bool(base.is_baseline),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取基线版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================================
+# 回归评估 API
+# =====================================================================
+
+
+@router.post(
+    "/regression/evaluate",
+    tags=["金样本 & 回归测试"],
+    summary="在金样本集上评估模型精度 / F1 / 混淆矩阵",
+    response_model=RegressionEvaluateResponse,
+)
+async def regression_evaluate(request: RegressionEvaluateRequest):
+    try:
+        reg = get_regression_service()
+        result = reg.evaluate_model(
+            model_type=request.model_type,
+            node_id=request.node_id_override or "default",
+            golden_sample_version=request.golden_sample_version,
+            model_version=request.model_version,
+            max_samples=request.max_samples,
+        )
+        per_class = {}
+        for k, v in (result.get("per_class_metrics") or {}).items():
+            per_class[str(k)] = RegressionPerClassMetricsSchema(
+                precision=float(v.get("precision", 0)),
+                recall=float(v.get("recall", 0)),
+                f1=float(v.get("f1", 0)),
+                support=int(v.get("support", 0)),
+            )
+        return RegressionEvaluateResponse(
+            version=str(result.get("version", "")),
+            golden_sample_version=str(result.get("golden_sample_version", "")),
+            model_version_used=str(result.get("model_version_used", "")),
+            accuracy=float(result.get("accuracy", 0)),
+            macro_f1=float(result.get("macro_f1", 0)),
+            weighted_f1=float(result.get("weighted_f1", 0)),
+            per_class_metrics=per_class,
+            confusion_matrix=result.get("confusion_matrix") or [],
+            total_samples=int(result.get("total_samples", 0)),
+            evaluation_time_seconds=float(result.get("evaluation_time_seconds", 0)),
+            evaluated_at=str(result.get("evaluated_at", "")),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"回归评估失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/regression/gate",
+    tags=["金样本 & 回归测试"],
+    summary="执行回归门禁：与基线对比，判断指标下降是否 > 阈值（默认 2%）",
+    response_model=RegressionGateResponse,
+)
+async def regression_gate(request: RegressionEvaluateRequest):
+    try:
+        reg = get_regression_service()
+        result = reg.model_activate_gate(
+            model_type=request.model_type,
+            node_id=request.node_id_override or "default",
+            target_model_version=request.model_version,
+            skip_gate=False,
+        )
+        reg_raw = result.get("regression") or {}
+        gate_raw = result.get("gate") or {}
+
+        reg_eval = None
+        if reg_raw:
+            per_class = {}
+            for k, v in (reg_raw.get("per_class_metrics") or {}).items():
+                per_class[str(k)] = RegressionPerClassMetricsSchema(
+                    precision=float(v.get("precision", 0)),
+                    recall=float(v.get("recall", 0)),
+                    f1=float(v.get("f1", 0)),
+                    support=int(v.get("support", 0)),
+                )
+            reg_eval = RegressionEvaluateResponse(
+                version=str(reg_raw.get("version", "")),
+                golden_sample_version=str(reg_raw.get("golden_sample_version", "")),
+                model_version_used=str(reg_raw.get("model_version_used", "")),
+                accuracy=float(reg_raw.get("accuracy", 0)),
+                macro_f1=float(reg_raw.get("macro_f1", 0)),
+                weighted_f1=float(reg_raw.get("weighted_f1", 0)),
+                per_class_metrics=per_class,
+                confusion_matrix=reg_raw.get("confusion_matrix") or [],
+                total_samples=int(reg_raw.get("total_samples", 0)),
+                evaluation_time_seconds=float(reg_raw.get("evaluation_time_seconds", 0)),
+                evaluated_at=str(reg_raw.get("evaluated_at", "")),
+            )
+        gate_info = None
+        if gate_raw:
+            gate_info = RegressionGateSchema(
+                gate_passed=bool(gate_raw.get("gate_passed", False)),
+                threshold=float(gate_raw.get("threshold", 0)),
+                baseline_version=gate_raw.get("baseline_version"),
+                target_version=str(gate_raw.get("target_version", "")),
+                baseline_accuracy=float(gate_raw.get("baseline_accuracy", 0)),
+                target_accuracy=float(gate_raw.get("target_accuracy", 0)),
+                delta_accuracy=float(gate_raw.get("delta_accuracy", 0)),
+                baseline_macro_f1=float(gate_raw.get("baseline_macro_f1", 0)),
+                target_macro_f1=float(gate_raw.get("target_macro_f1", 0)),
+                delta_macro_f1=float(gate_raw.get("delta_macro_f1", 0)),
+                baseline_weighted_f1=float(gate_raw.get("baseline_weighted_f1", 0)),
+                target_weighted_f1=float(gate_raw.get("target_weighted_f1", 0)),
+                delta_weighted_f1=float(gate_raw.get("delta_weighted_f1", 0)),
+                blocked_reason=str(gate_raw.get("blocked_reason", "")),
+                per_class_delta=gate_raw.get("per_class_delta"),
+            )
+        return RegressionGateResponse(
+            gate_passed=bool(result.get("gate_passed", False)),
+            can_activate=bool(result.get("can_activate", False)),
+            skip_gate=bool(result.get("skip_gate", False)),
+            threshold=float(result.get("threshold", 0)),
+            blocked_reason=str(result.get("blocked_reason", "")),
+            regression=reg_eval,
+            gate=gate_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"回归门禁失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================================
+# data_factory 场景参数文档化
+# =====================================================================
+
+
+@router.get(
+    "/simulation/scenario-docs",
+    tags=["数据工厂 & 仿真"],
+    summary="获取 data_factory 所有场景 / ScenarioConfig / 状态标签 参数文档",
+    response_model=ScenarioParameterDocResponse,
+)
+async def get_scenario_parameter_docs():
+    try:
+        gs = get_golden_samples_service()
+        docs = gs.get_scenario_parameter_docs()
+        scenarios = {}
+        for k, v in (docs.get("scenarios") or {}).items():
+            scenarios[k] = ScenarioDocItem(
+                description=str(v.get("description", "")),
+                parameters_used=v.get("parameters_used"),
+                label_distribution=str(v.get("label_distribution", "")),
+            )
+        cfg_fields = []
+        for f in (docs.get("scenario_config_fields") or []):
+            cfg_fields.append(ScenarioParameterDocField(
+                field=str(f.get("field", "")),
+                default=f.get("default"),
+                type=str(f.get("type", "")),
+            ))
+        statuses = []
+        for s in (docs.get("status_labels") or []):
+            statuses.append(StatusLabelDoc(
+                code=int(s.get("code", 0)),
+                name=str(s.get("name", "")),
+            ))
+        return ScenarioParameterDocResponse(
+            scenarios=scenarios,
+            scenario_config_fields=cfg_fields,
+            status_labels=statuses,
+            recommended_seed=int(docs.get("recommended_seed", 20260620)),
+            recommended_bolts=int(docs.get("recommended_bolts", 24)),
+            recommended_days=int(docs.get("recommended_days", 14)),
+            recommended_frequency_minutes=int(docs.get("recommended_frequency_minutes", 30)),
+            available_scenarios=[str(x) for x in (docs.get("available_scenarios") or [])],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取场景参数文档失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -5992,3 +5992,267 @@ class CoFaultEventRecordRequest(BaseModel):
     """共故障事件记录请求"""
     device_ids: List[str] = Field(..., description="同时发生故障的装置ID列表")
     timestamp: Optional[str] = Field(None, description="故障时间戳")
+
+
+# ============================================================
+# 数据工厂 / 金样本 / 回归测试 Schema
+# ============================================================
+
+SCENARIO_CHOICES = [
+    "normal", "loosening", "overload", "sudden_overload",
+    "fracture", "temperature_coupling", "all",
+]
+OUTPUT_TARGET_CHOICES = ["csv", "db", "both", "stream_stress"]
+
+
+class SimulationGenerateRequest(BaseModel):
+    """仿真数据生成请求（POST /simulation/generate）"""
+    scenario: str = Field(
+        "all",
+        description=f"数据场景: {', '.join(SCENARIO_CHOICES)}",
+    )
+    bolts: int = Field(24, ge=1, le=10000, description="螺栓数量")
+    days: int = Field(14, ge=1, le=3650, description="时间跨度（天）")
+    frequency_minutes: int = Field(30, ge=1, le=1440, description="采样频率（分钟）")
+    output_target: str = Field(
+        "csv",
+        description=f"输出目标: {', '.join(OUTPUT_TARGET_CHOICES)}。"
+                    f" stream_stress = 生成高QPS流式数据批量喂给 /stream/ingest/batch",
+    )
+    csv_path: Optional[str] = Field(None, description="CSV 输出路径（仅 csv/both 时生效）")
+    db_host: Optional[str] = Field(None, description="MySQL 主机（仅 db/both 时）")
+    db_port: Optional[int] = Field(None, description="MySQL 端口")
+    db_user: Optional[str] = Field(None, description="MySQL 用户名")
+    db_password: Optional[str] = Field(None, description="MySQL 密码")
+    db_name: Optional[str] = Field(None, description="MySQL 数据库名")
+    db_batch_size: int = Field(5000, ge=1, le=100000, description="MySQL 批量插入大小")
+    seed: Optional[int] = Field(20260620, description="随机种子，不传则用默认值保证可复现")
+    scenario_config_override: Optional[Dict[str, Any]] = Field(
+        None,
+        description="可选，覆盖 ScenarioConfig 默认参数（normal_mean/loosening_decline_rate 等）",
+    )
+    # ---------- 压测模式参数 ----------
+    stress_test: bool = Field(
+        False,
+        description="是否启用压测模式：生成数据后批量调用 /stream/ingest/batch",
+    )
+    stress_qps: int = Field(
+        500, ge=1, le=50000,
+        description="压测目标 QPS（每秒消息数），仅 stress_test=true 时生效",
+    )
+    stress_duration_seconds: int = Field(
+        60, ge=1, le=3600,
+        description="压测持续时间（秒），仅 stress_test=true 时生效",
+    )
+    stress_stream_mode_switch: bool = Field(
+        True,
+        description="压测前自动将流式引擎切换到 stream 模式并启动",
+    )
+
+
+class SimulationGenerateScenarioCountItem(BaseModel):
+    """单个场景生成的点数"""
+    scenario: str
+    point_count: int
+
+
+class SimulationGenerateResponse(BaseModel):
+    """仿真数据生成响应"""
+    success: bool
+    message: str
+    scenario: str
+    bolts: int
+    days: int
+    frequency_minutes: int
+    seed: int
+    total_rows: int
+    elapsed_seconds: float
+    scenario_distribution: List[SimulationGenerateScenarioCountItem]
+    output_target: str
+    csv_file: Optional[str] = Field(None, description="CSV 文件路径（若 output_target=csv/both）")
+    csv_size_mb: Optional[float] = Field(None, description="CSV 文件大小（MB）")
+    db_inserted_rows: Optional[int] = Field(None, description="MySQL 插入行数（若 output_target=db/both）")
+    db_elapsed_seconds: Optional[float] = Field(None)
+    stress_test_result: Optional[Dict[str, Any]] = Field(
+        None, description="压测模式的结果（若启用）",
+    )
+    data_hash: Optional[str] = Field(None, description="数据 MD5（完整性校验）")
+
+
+class GoldenSampleSpecSchema(BaseModel):
+    """金样本规格"""
+    scenario: str
+    bolts: int
+    days: int
+    frequency_minutes: int
+    seed: int
+    scenario_config: Optional[Dict[str, Any]] = None
+
+
+class GoldenSampleMetricsSchema(BaseModel):
+    """基线模型指标快照"""
+    accuracy: float
+    macro_f1: float
+    weighted_f1: float
+    per_class_f1: Dict[str, float]
+    per_class_precision: Dict[str, float]
+    per_class_recall: Dict[str, float]
+    confusion_matrix: List[List[int]]
+    total_samples: int
+    evaluation_model_version: str
+    evaluation_timestamp: str
+
+
+class GoldenSampleVersionSchema(BaseModel):
+    """金样本版本元数据"""
+    version: str
+    spec: GoldenSampleSpecSchema
+    metrics: GoldenSampleMetricsSchema
+    data_hash: str
+    data_path: str
+    labels_path: str
+    created_at: str
+    created_by: str
+    description: str = ""
+    is_baseline: bool = False
+
+
+class GoldenSampleVersionListResponse(BaseModel):
+    """金样本版本列表响应"""
+    total: int
+    items: List[GoldenSampleVersionSchema]
+    baseline_version: Optional[str] = Field(None)
+
+
+class GoldenSampleRegisterRequest(BaseModel):
+    """注册新金样本版本请求"""
+    scenario: str = Field("all", description="场景")
+    bolts: int = Field(24, ge=1, le=10000)
+    days: int = Field(14, ge=1, le=3650)
+    frequency_minutes: int = Field(30, ge=1, le=1440)
+    seed: int = Field(20260620, description="随机种子")
+    scenario_config_override: Optional[Dict[str, Any]] = None
+    window_size: int = Field(100, ge=10, le=500, description="生成 golden labels 的窗口大小")
+    stride: int = Field(50, ge=1, le=500, description="生成 golden labels 的步长")
+    description: str = ""
+    created_by: str = "system"
+    set_as_baseline: bool = Field(False, description="注册后是否立即设为基线")
+
+
+class GoldenSampleBaselineSetRequest(BaseModel):
+    """设置/切换基线版本请求"""
+    version: str = Field(..., description="目标版本号")
+
+
+class ScenarioParameterDocField(BaseModel):
+    """ScenarioConfig 单字段说明"""
+    field: str
+    default: Any
+    type: str
+
+
+class StatusLabelDoc(BaseModel):
+    """状态码含义"""
+    code: int
+    name: str
+
+
+class ScenarioDocItem(BaseModel):
+    """单场景参数文档"""
+    description: str
+    parameters_used: Any
+    label_distribution: str
+
+
+class ScenarioParameterDocResponse(BaseModel):
+    """data_factory 场景参数文档响应"""
+    scenarios: Dict[str, ScenarioDocItem]
+    scenario_config_fields: List[ScenarioParameterDocField]
+    status_labels: List[StatusLabelDoc]
+    recommended_seed: int
+    recommended_bolts: int
+    recommended_days: int
+    recommended_frequency_minutes: int
+    available_scenarios: List[str]
+
+
+class RegressionEvaluateRequest(BaseModel):
+    """回归评估请求"""
+    golden_sample_version: Optional[str] = Field(
+        None, description="金样本版本（不传则用当前基线）",
+    )
+    model_version: Optional[str] = Field(
+        None, description="评估的模型版本号（不传则用活动版本）",
+    )
+    model_type: str = Field("bolt", description="模型类型 bolt/flange")
+    node_id_override: Optional[str] = None
+    max_samples: Optional[int] = Field(
+        None, description="限制最多评估窗口数（调试用）",
+    )
+
+
+class RegressionPerClassMetricsSchema(BaseModel):
+    precision: float
+    recall: float
+    f1: float
+    support: int
+
+
+class RegressionEvaluateResponse(BaseModel):
+    """回归评估响应"""
+    version: str
+    golden_sample_version: str
+    model_version_used: str
+    accuracy: float
+    macro_f1: float
+    weighted_f1: float
+    per_class_metrics: Dict[str, RegressionPerClassMetricsSchema]
+    confusion_matrix: List[List[int]]
+    total_samples: int
+    evaluation_time_seconds: float
+    evaluated_at: str
+
+
+class RegressionGateSchema(BaseModel):
+    """门禁判定结果"""
+    gate_passed: bool
+    threshold: float
+    baseline_version: Optional[str]
+    target_version: str
+    baseline_accuracy: float
+    target_accuracy: float
+    delta_accuracy: float
+    baseline_macro_f1: float
+    target_macro_f1: float
+    delta_macro_f1: float
+    baseline_weighted_f1: float
+    target_weighted_f1: float
+    delta_weighted_f1: float
+    blocked_reason: str
+    per_class_delta: Optional[Dict[str, Any]] = None
+
+
+class RegressionGateResponse(BaseModel):
+    """门禁完整响应"""
+    gate_passed: bool
+    can_activate: bool
+    skip_gate: bool
+    threshold: float
+    blocked_reason: str
+    regression: Optional[RegressionEvaluateResponse] = None
+    gate: Optional[RegressionGateSchema] = None
+
+
+# 扩展 model/activate 请求 schema（增加门禁参数）
+class ModelVersionActivateGateRequest(ModelVersionActivateRequest):
+    """
+    扩展的模型激活请求（带门禁参数）
+
+    原 ModelVersionActivateRequest 的所有字段 + 门禁控制字段
+    """
+    gate_threshold: Optional[float] = Field(
+        None, description="自定义门禁阈值（默认 0.02，即 2%）", ge=0.0, le=0.5,
+    )
+    skip_regression_gate: bool = Field(
+        False, description="是否跳过回归门禁（admin override，审计日志将记录）",
+    )
