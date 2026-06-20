@@ -2679,3 +2679,140 @@ INSERT INTO sc_feature_schema_versions (
 SHOW TABLES LIKE '%feature%';
 SHOW COLUMNS FROM sc_feature_snapshots;
 SHOW COLUMNS FROM sc_feature_schema_versions;
+
+-- ============================================================
+-- 模型漂移检测模块
+-- ============================================================
+
+-- ============================================================
+-- 模型漂移配置表
+-- 定义每个模型的漂移检测参数和响应策略
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_model_drift_config (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    model_id VARCHAR(100) NOT NULL COMMENT '模型标识',
+    model_type VARCHAR(20) NOT NULL COMMENT '模型类型 bolt/flange',
+    version VARCHAR(20) COMMENT '版本号，NULL表示对所有版本生效',
+    enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用漂移检测',
+    response_strategy VARCHAR(20) DEFAULT 'notify' COMMENT '响应策略: notify/shadow_retrain/auto_retrain',
+    psi_threshold FLOAT DEFAULT 0.2 COMMENT 'PSI(数据分布漂移)阈值',
+    ks_threshold FLOAT DEFAULT 0.05 COMMENT 'KS检验p值阈值(低于则判定漂移)',
+    confidence_drift_threshold FLOAT DEFAULT 0.15 COMMENT '置信度分布漂移阈值(KS统计量)',
+    false_positive_rate_threshold FLOAT DEFAULT 0.10 COMMENT '误报率阈值',
+    false_positive_window_days INT DEFAULT 7 COMMENT '误报率统计窗口(天)',
+    feature_mean_shift_threshold FLOAT DEFAULT 0.10 COMMENT '特征均值偏移阈值(标准差倍数)',
+    composite_score_threshold FLOAT DEFAULT 0.6 COMMENT '综合漂移分数阈值',
+    consecutive_days_alert INT DEFAULT 2 COMMENT '连续N天超阈值才触发响应',
+    shadow_retrain_quality_bar FLOAT DEFAULT 0.9 COMMENT 'Shadow模型最低质量门槛(相对当前版本%)',
+    auto_retrain_min_days INT DEFAULT 7 COMMENT '自动重训最小间隔天数',
+    weights_json TEXT COMMENT '各维度权重配置 JSON',
+    notify_channels TEXT COMMENT '通知渠道列表 JSON',
+    notify_targets TEXT COMMENT '通知目标列表 JSON',
+    extra_config TEXT COMMENT '扩展配置 JSON',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY idx_drift_config_model (model_id, model_type, version, tenant_id),
+    INDEX idx_drift_config_tenant (tenant_id),
+    INDEX idx_drift_config_enabled (enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型漂移检测配置表';
+
+-- ============================================================
+-- 模型漂移基线表
+-- 存储模型训练时的基准分布，用于漂移对比
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_model_drift_baselines (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    model_id VARCHAR(100) NOT NULL COMMENT '模型标识',
+    model_type VARCHAR(20) NOT NULL COMMENT '模型类型 bolt/flange',
+    version VARCHAR(20) NOT NULL COMMENT '版本号',
+    baseline_type VARCHAR(30) NOT NULL COMMENT '基线类型: data_distribution/confidence_distribution/feature_stats',
+    feature_name VARCHAR(100) COMMENT '特征名(per-feature基线)',
+    bins_json TEXT COMMENT '分箱边界和计数 JSON',
+    stats_json TEXT COMMENT '统计量 JSON(均值/方差/分位数等)',
+    sample_count INT COMMENT '基线样本量',
+    computed_at DATETIME COMMENT '基线计算时间',
+    data_window_start DATETIME COMMENT '基线数据窗口起始',
+    data_window_end DATETIME COMMENT '基线数据窗口结束',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    UNIQUE KEY idx_drift_baseline_unique (model_id, model_type, version, baseline_type, feature_name, tenant_id),
+    INDEX idx_drift_baseline_model (model_id, model_type, version),
+    INDEX idx_drift_baseline_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型漂移基线表';
+
+-- ============================================================
+-- 模型漂移事件表
+-- 记录每次漂移检测的结果和触发的响应
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_model_drift_events (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    event_no VARCHAR(50) UNIQUE COMMENT '事件编号',
+    model_id VARCHAR(100) NOT NULL COMMENT '模型标识',
+    model_type VARCHAR(20) NOT NULL COMMENT '模型类型 bolt/flange',
+    version VARCHAR(20) COMMENT '模型版本',
+    detection_date DATE NOT NULL COMMENT '检测日期(批处理日期)',
+    psi_score FLOAT COMMENT 'PSI分数(数据分布漂移)',
+    ks_p_value FLOAT COMMENT 'KS检验p值',
+    ks_statistic FLOAT COMMENT 'KS检验统计量',
+    confidence_drift_score FLOAT COMMENT '置信度分布漂移分数(KS统计量)',
+    confidence_ks_p_value FLOAT COMMENT '置信度分布KS检验p值',
+    false_positive_rate FLOAT COMMENT '误报率',
+    false_positive_count INT COMMENT '误报样本数',
+    total_prediction_count INT COMMENT '总预测样本数',
+    feature_drift_json TEXT COMMENT '各特征漂移详情 JSON',
+    feature_mean_shift_count INT COMMENT '特征均值偏移的特征数',
+    composite_drift_score FLOAT COMMENT '综合漂移分数(加权平均)',
+    drift_level VARCHAR(20) DEFAULT 'none' COMMENT '漂移等级: none/low/medium/high/critical',
+    triggered_dims TEXT COMMENT '触发告警的漂移维度 JSON',
+    consecutive_days INT DEFAULT 1 COMMENT '连续超阈值天数',
+    response_action VARCHAR(20) DEFAULT 'none' COMMENT '实际执行的响应动作: none/notify/shadow_retrain/auto_retrain',
+    response_status VARCHAR(20) DEFAULT 'pending' COMMENT '响应状态: pending/running/completed/failed/skipped',
+    response_details TEXT COMMENT '响应详情 JSON(训练会话ID等)',
+    notification_sent TINYINT(1) DEFAULT 0 COMMENT '是否已发送通知',
+    retrain_session_id VARCHAR(100) COMMENT '重训会话ID',
+    new_version VARCHAR(20) COMMENT '重训产生的新版本号',
+    alert_level INT DEFAULT 2 COMMENT '告警级别 1-4',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_drift_event_model_date (model_id, model_type, detection_date),
+    INDEX idx_drift_event_date (detection_date),
+    INDEX idx_drift_event_level (drift_level),
+    INDEX idx_drift_event_action (response_action, response_status),
+    INDEX idx_drift_event_tenant_date (tenant_id, detection_date),
+    INDEX idx_drift_event_tenant_model (tenant_id, model_id, model_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型漂移事件表';
+
+-- ============================================================
+-- 插入默认漂移配置
+-- ============================================================
+INSERT INTO sc_model_drift_config (
+    model_id, model_type, version, enabled, response_strategy,
+    psi_threshold, ks_threshold, confidence_drift_threshold,
+    false_positive_rate_threshold, false_positive_window_days,
+    feature_mean_shift_threshold, composite_score_threshold,
+    consecutive_days_alert, shadow_retrain_quality_bar, auto_retrain_min_days,
+    weights_json, notify_channels, notify_targets
+) VALUES (
+    'default', 'bolt', NULL, 1, 'notify',
+    0.2, 0.05, 0.15,
+    0.10, 7,
+    0.10, 0.6,
+    2, 0.9, 7,
+    '{"psi":0.25,"ks":0.20,"confidence":0.25,"false_positive":0.20,"feature_shift":0.10}',
+    '["email"]',
+    '{"email":["admin@example.com"]}'
+), (
+    'default', 'flange', NULL, 1, 'notify',
+    0.2, 0.05, 0.15,
+    0.10, 7,
+    0.10, 0.6,
+    2, 0.9, 7,
+    '{"psi":0.25,"ks":0.20,"confidence":0.25,"false_positive":0.20,"feature_shift":0.10}',
+    '["email"]',
+    '{"email":["admin@example.com"]}'
+);
+
+-- 显示漂移检测模块表
+SHOW TABLES LIKE 'sc_model_drift%';

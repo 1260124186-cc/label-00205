@@ -36,6 +36,7 @@ class EventType(str, enum.Enum):
     - LOG_LEVEL_CHANGED: 日志级别变更
     - STRATEGY_CONFIG_CHANGED: 策略配置变更
     - REDIS_CONFIG_SYNC: 跨实例Redis同步事件
+    - MODEL_DRIFT_DETECTED: 检测到模型漂移
     """
     CONFIG_CHANGED = "config_changed"
     CONFIG_PRE_RELOAD = "config_pre_reload"
@@ -45,6 +46,7 @@ class EventType(str, enum.Enum):
     LOG_LEVEL_CHANGED = "log_level_changed"
     STRATEGY_CONFIG_CHANGED = "strategy_config_changed"
     REDIS_CONFIG_SYNC = "redis_config_sync"
+    MODEL_DRIFT_DETECTED = "model_drift_detected"
 
 
 @dataclass

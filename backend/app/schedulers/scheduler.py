@@ -107,6 +107,7 @@ class TaskScheduler:
             'monthly_archive_job': 'archive',
             'purge_expired_job': 'archive',
             'partition_maintenance_job': 'maintenance',
+            'model_drift_job': 'model_drift',
         }
 
         self.leader_required = config.get('scheduler.leader_election.required', False)
@@ -118,6 +119,7 @@ class TaskScheduler:
                 'monthly_archive_job',
                 'purge_expired_job',
                 'partition_maintenance_job',
+                'model_drift_job',
             ]
         )
 
@@ -132,6 +134,7 @@ class TaskScheduler:
             'monthly_archive_job',
             'purge_expired_job',
             'partition_maintenance_job',
+            'model_drift_job',
         ]
 
         event_bus.subscribe(
@@ -300,6 +303,18 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"分区维护任务已添加: {cron}")
+
+        model_drift_config = self.config.get('model_drift_job', {})
+        if model_drift_config.get('enabled', True):
+            cron = model_drift_config.get('cron', '0 1 * * *')
+            self.scheduler.add_job(
+                self._model_drift_job,
+                CronTrigger.from_crontab(cron),
+                id='model_drift_job',
+                name='模型漂移检测任务',
+                replace_existing=True
+            )
+            logger.info(f"模型漂移检测任务已添加: {cron}")
 
     def _acquire_leadership_if_needed(self, job_name: str) -> bool:
         """
@@ -999,6 +1014,63 @@ class TaskScheduler:
 
         except Exception as e:
             logger.error(f"分区维护任务失败: {e}")
+        finally:
+            self._release_leadership_if_needed(job_name)
+
+    def _model_drift_job(self) -> None:
+        """
+        每日模型漂移检测与自动重训编排任务（支持Leader选举）
+
+        执行流程:
+        1. 每日批处理计算 per-model 各维度漂移分数
+        2. 超阈值写入 sc_model_drift_events
+        3. 根据响应策略执行 notify / shadow_retrain / auto_retrain
+        """
+        job_name = 'model_drift_job'
+
+        if not self._acquire_leadership_if_needed(job_name):
+            return
+
+        try:
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.services.model_drift import ModelDriftService, DriftOrchestrator
+
+                drift_service = ModelDriftService()
+                orchestrator = DriftOrchestrator()
+
+                logger.info("[Scheduler] 开始执行模型漂移检测")
+
+                detection_stats = drift_service.run_daily_drift_detection()
+                ctx.total_nodes = detection_stats.get('total', 0)
+
+                for detail in detection_stats.get('details', []):
+                    model_key = f"{detail.get('model_type')}/{detail.get('model_id')}"
+                    if detail.get('status') == 'drift_detected':
+                        ctx.record_success(model_key)
+                    elif detail.get('status') == 'failed':
+                        ctx.record_failure(model_key, detail.get('error', 'unknown'), 'DriftDetectionError')
+                    else:
+                        ctx.record_success(model_key)
+
+                logger.info(
+                    f"[Scheduler] 漂移检测完成: {detection_stats}")
+
+                logger.info("[Scheduler] 开始处理待响应的漂移事件")
+                response_stats = orchestrator.process_pending_events(limit=100)
+
+                for k, v in response_stats.items():
+                    if k != 'total':
+                        logger.info(f"[Scheduler] 响应统计 - {k}: {v}")
+
+                logger.info("[Scheduler] 模型漂移检测任务完成")
+
+        except Exception as e:
+            logger.exception(f"模型漂移检测任务失败: {e}")
         finally:
             self._release_leadership_if_needed(job_name)
 

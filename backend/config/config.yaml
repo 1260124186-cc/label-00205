@@ -1086,3 +1086,124 @@ webhook:
   default_timeout_seconds: 10
   default_max_retries: 5
   digest_window_seconds: 300
+
+# ============================================================
+# 模型漂移检测与自动重训编排配置
+# ============================================================
+model_drift:
+  # 是否启用模型漂移检测（总开关）
+  enabled: true
+
+  # 调度配置
+  scheduler:
+    # 定时任务 Cron：默认每天凌晨1点执行
+    cron: "0 1 * * *"
+    # 是否启用Leader选举（集群模式避免重复执行）
+    leader_election_required: true
+    # 处理超时时间（秒）
+    timeout_seconds: 3600
+
+  # 漂移检测默认阈值（可被数据库 sc_model_drift_config 覆盖）
+  default_thresholds:
+    # PSI（群体稳定性指数）阈值
+    # <0.1: 无漂移  0.1~0.25: 轻度漂移  >0.25: 显著漂移
+    psi: 0.2
+    # KS检验 p值阈值（低于则拒绝同分布假设）
+    ks_p_value: 0.05
+    # 置信度分布漂移阈值（KS统计量）
+    confidence_drift: 0.15
+    # 误报率阈值
+    false_positive_rate: 0.10
+    # 误报率统计窗口（天）
+    false_positive_window_days: 7
+    # 特征均值偏移阈值（标准差倍数）
+    feature_mean_shift: 2.0
+    # 综合漂移分数阈值
+    composite_score: 0.6
+
+  # 各检测维度权重（总和应为 1.0）
+  dimension_weights:
+    psi: 0.25
+    ks: 0.20
+    confidence: 0.25
+    false_positive: 0.20
+    feature_shift: 0.10
+
+  # 响应策略配置
+  response:
+    # 默认响应策略: notify / shadow_retrain / auto_retrain
+    default_strategy: "notify"
+    # 连续 N 天超阈值才触发响应（防止偶发误报）
+    consecutive_days_alert: 2
+    # Shadow 模式最低质量门槛（新版本指标需达到当前版本的百分比）
+    shadow_retrain_quality_bar: 0.9
+    # 自动重训最小间隔天数（避免频繁重训）
+    auto_retrain_min_days: 7
+
+    # 通知配置
+    notification:
+      # 启用的通知渠道
+      channels:
+        - email
+        # - dingtalk
+        # - webhook
+      # 通知目标（按渠道配置）
+      targets:
+        email:
+          - "admin@example.com"
+        dingtalk:
+          - ""
+        webhook:
+          - ""
+      # 告警级别映射（漂移等级 → 告警级别 1-4）
+      level_mapping:
+        low: 1
+        medium: 2
+        high: 3
+        critical: 4
+
+    # 重训配置
+    retraining:
+      # 是否启用增量训练
+      incremental: true
+      # 是否强制重训（忽略数据量不足等限制）
+      force: true
+      # 重训完成后是否自动评估指标
+      auto_evaluate: true
+      # 指标达标后是否自动激活（仅 auto_retrain 策略）
+      auto_activate: true
+      # Shadow 模式的观察期（天），观察期内指标持续达标才建议激活
+      shadow_observation_days: 3
+
+  # 数据窗口配置
+  data_window:
+    # 当前数据窗口（天），用于与基线对比
+    current_days: 7
+    # 基线数据窗口（天），用于建立基准分布
+    baseline_days: 30
+    # 每类数据的最大采样数（避免内存溢出）
+    max_samples_per_dimension: 5000
+    # 最小有效样本数（低于则跳过该维度检测）
+    min_samples: 30
+
+  # 基线管理配置
+  baseline:
+    # 是否在模型训练完成后自动建立基线
+    auto_create_after_training: true
+    # 基线过期天数（超过则自动重算）
+    expire_days: 180
+    # 基线更新策略: on_retrain / scheduled / manual
+    update_policy: "on_retrain"
+
+  # 事件保留配置
+  event_retention:
+    # 漂移事件保留天数
+    events_days: 365
+    # 基线快照保留天数
+    baseline_days: 730
+
+  # 调度任务配置（供 scheduler.py 读取）
+  model_drift_job:
+    enabled: true
+    # 每天凌晨 1 点执行
+    cron: "0 1 * * *"

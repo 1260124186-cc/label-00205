@@ -22,7 +22,7 @@ from typing import Generator, Optional, List, Dict
 
 import numpy as np
 
-from sqlalchemy import create_engine, Column, BigInteger, String, Float, DateTime, Index, Text, Boolean, Integer, BINARY
+from sqlalchemy import create_engine, Column, BigInteger, String, Float, DateTime, Index, Text, Boolean, Integer, BINARY, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from loguru import logger
@@ -3605,3 +3605,295 @@ class FeatureSnapshot(Base):
         Index('idx_feature_tenant_time', 'tenant_id', 'create_time'),
         Index('idx_feature_unique', 'node_id', 'compute_time', 'feature_version', 'source_window_hash', unique=True),
     )
+
+
+# ============================================================
+# 模型漂移检测模块 ORM 模型
+# ============================================================
+
+class ModelDriftConfig(Base):
+    """
+    模型漂移检测配置表模型
+
+    对应数据库表: sc_model_drift_config
+    定义每个模型的漂移检测参数和响应策略。
+    """
+    __tablename__ = 'sc_model_drift_config'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    model_id = Column(String(100), nullable=False, comment='模型标识')
+    model_type = Column(String(20), nullable=False, comment='模型类型 bolt/flange')
+    version = Column(String(20), comment='版本号，NULL表示对所有版本生效')
+    enabled = Column(Boolean, default=True, comment='是否启用漂移检测')
+    response_strategy = Column(String(20), default='notify', comment='响应策略: notify/shadow_retrain/auto_retrain')
+    psi_threshold = Column(Float, default=0.2, comment='PSI(数据分布漂移)阈值')
+    ks_threshold = Column(Float, default=0.05, comment='KS检验p值阈值(低于则判定漂移)')
+    confidence_drift_threshold = Column(Float, default=0.15, comment='置信度分布漂移阈值(KS统计量)')
+    false_positive_rate_threshold = Column(Float, default=0.10, comment='误报率阈值')
+    false_positive_window_days = Column(Integer, default=7, comment='误报率统计窗口(天)')
+    feature_mean_shift_threshold = Column(Float, default=0.10, comment='特征均值偏移阈值(标准差倍数)')
+    composite_score_threshold = Column(Float, default=0.6, comment='综合漂移分数阈值')
+    consecutive_days_alert = Column(Integer, default=2, comment='连续N天超阈值才触发响应')
+    shadow_retrain_quality_bar = Column(Float, default=0.9, comment='Shadow模型最低质量门槛(相对当前版本%)')
+    auto_retrain_min_days = Column(Integer, default=7, comment='自动重训最小间隔天数')
+    weights_json = Column(Text, comment='各维度权重配置 JSON')
+    notify_channels = Column(Text, comment='通知渠道列表 JSON')
+    notify_targets = Column(Text, comment='通知目标列表 JSON')
+    extra_config = Column(Text, comment='扩展配置 JSON')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_drift_config_model', 'model_id', 'model_type', 'version', 'tenant_id', unique=True),
+        Index('idx_drift_config_tenant', 'tenant_id'),
+        Index('idx_drift_config_enabled', 'enabled'),
+    )
+
+    @property
+    def weights(self) -> Dict[str, float]:
+        """解析 weights_json 为字典"""
+        import json as _json
+        try:
+            return _json.loads(self.weights_json) if self.weights_json else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def thresholds(self) -> Dict[str, float]:
+        """聚合各阈值字段为字典（供API返回）"""
+        return {
+            "psi": self.psi_threshold,
+            "ks_p_value": self.ks_threshold,
+            "confidence_drift": self.confidence_drift_threshold,
+            "false_positive_rate": self.false_positive_rate_threshold,
+            "false_positive_window_days": self.false_positive_window_days,
+            "feature_mean_shift": self.feature_mean_shift_threshold,
+            "composite_score": self.composite_score_threshold,
+        }
+
+    @property
+    def notify_channels_list(self) -> List[str]:
+        """解析 notify_channels 为列表"""
+        import json as _json
+        try:
+            return _json.loads(self.notify_channels) if self.notify_channels else []
+        except (_json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def created_at(self):
+        """create_time 的别名"""
+        return self.create_time
+
+    @property
+    def updated_at(self):
+        """update_time 的别名"""
+        return self.update_time
+
+
+class ModelDriftBaseline(Base):
+    """
+    模型漂移基线表模型
+
+    对应数据库表: sc_model_drift_baselines
+    存储模型训练时的基准分布，用于漂移对比。
+    """
+    __tablename__ = 'sc_model_drift_baselines'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    model_id = Column(String(100), nullable=False, comment='模型标识')
+    model_type = Column(String(20), nullable=False, comment='模型类型 bolt/flange')
+    version = Column(String(20), nullable=False, comment='版本号')
+    baseline_type = Column(String(30), nullable=False, comment='基线类型: data_distribution/confidence_distribution/feature_stats')
+    feature_name = Column(String(100), comment='特征名(per-feature基线)')
+    bins_json = Column(Text, comment='分箱边界和计数 JSON')
+    stats_json = Column(Text, comment='统计量 JSON(均值/方差/分位数等)')
+    sample_count = Column(Integer, comment='基线样本量')
+    computed_at = Column(DateTime, comment='基线计算时间')
+    data_window_start = Column(DateTime, comment='基线数据窗口起始')
+    data_window_end = Column(DateTime, comment='基线数据窗口结束')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_drift_baseline_unique', 'model_id', 'model_type', 'version', 'baseline_type', 'feature_name', 'tenant_id', unique=True),
+        Index('idx_drift_baseline_model', 'model_id', 'model_type', 'version'),
+        Index('idx_drift_baseline_tenant', 'tenant_id'),
+    )
+
+    @property
+    def stats(self) -> Dict:
+        """解析 stats_json 为字典"""
+        import json as _json
+        try:
+            return _json.loads(self.stats_json) if self.stats_json else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def bins(self) -> Dict:
+        """解析 bins_json 为字典"""
+        import json as _json
+        try:
+            return _json.loads(self.bins_json) if self.bins_json else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def created_at(self):
+        """create_time 的别名"""
+        return self.create_time
+
+
+class ModelDriftEvent(Base):
+    """
+    模型漂移事件表模型
+
+    对应数据库表: sc_model_drift_events
+    记录每次漂移检测的结果和触发的响应。
+    """
+    __tablename__ = 'sc_model_drift_events'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    event_no = Column(String(50), unique=True, comment='事件编号')
+    model_id = Column(String(100), nullable=False, comment='模型标识')
+    model_type = Column(String(20), nullable=False, comment='模型类型 bolt/flange')
+    version = Column(String(20), comment='模型版本')
+    detection_date = Column(Date, nullable=False, comment='检测日期(批处理日期)')
+    psi_score = Column(Float, comment='PSI分数(数据分布漂移)')
+    ks_p_value = Column(Float, comment='KS检验p值')
+    ks_statistic = Column(Float, comment='KS检验统计量')
+    confidence_drift_score = Column(Float, comment='置信度分布漂移分数(KS统计量)')
+    confidence_ks_p_value = Column(Float, comment='置信度分布KS检验p值')
+    false_positive_rate = Column(Float, comment='误报率')
+    false_positive_count = Column(Integer, comment='误报样本数')
+    total_prediction_count = Column(Integer, comment='总预测样本数')
+    feature_drift_json = Column(Text, comment='各特征漂移详情 JSON')
+    feature_mean_shift_count = Column(Integer, comment='特征均值偏移的特征数')
+    composite_drift_score = Column(Float, comment='综合漂移分数(加权平均)')
+    drift_level = Column(String(20), default='none', comment='漂移等级: none/low/medium/high/critical')
+    triggered_dims = Column(Text, comment='触发告警的漂移维度 JSON')
+    consecutive_days = Column(Integer, default=1, comment='连续超阈值天数')
+    response_action = Column(String(20), default='none', comment='实际执行的响应动作: none/notify/shadow_retrain/auto_retrain')
+    response_status = Column(String(20), default='pending', comment='响应状态: pending/running/completed/failed/skipped')
+    response_details = Column(Text, comment='响应详情 JSON(训练会话ID等)')
+    notification_sent = Column(Boolean, default=False, comment='是否已发送通知')
+    retrain_session_id = Column(String(100), comment='重训会话ID')
+    new_version = Column(String(20), comment='重训产生的新版本号')
+    alert_level = Column(Integer, default=2, comment='告警级别 1-4')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_drift_event_model_date', 'model_id', 'model_type', 'detection_date'),
+        Index('idx_drift_event_date', 'detection_date'),
+        Index('idx_drift_event_level', 'drift_level'),
+        Index('idx_drift_event_action', 'response_action', 'response_status'),
+        Index('idx_drift_event_tenant_date', 'tenant_id', 'detection_date'),
+        Index('idx_drift_event_tenant_model', 'tenant_id', 'model_id', 'model_type'),
+    )
+
+    @property
+    def feature_drift(self) -> Dict:
+        """解析 feature_drift_json 为字典"""
+        import json as _json
+        try:
+            return _json.loads(self.feature_drift_json) if self.feature_drift_json else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def triggered_dimensions(self) -> List[str]:
+        """解析 triggered_dims 为列表"""
+        import json as _json
+        try:
+            return _json.loads(self.triggered_dims) if self.triggered_dims else []
+        except (_json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def response_detail_dict(self) -> Dict:
+        """解析 response_details 为字典"""
+        import json as _json
+        try:
+            return _json.loads(self.response_details) if self.response_details else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def composite_score(self) -> Optional[float]:
+        """composite_drift_score 的别名"""
+        return self.composite_drift_score
+
+    @property
+    def is_alert(self) -> bool:
+        """是否告警（drift_level != 'none' 且 triggered_dimensions 非空）"""
+        if self.drift_level and self.drift_level != "none":
+            return True
+        return bool(self.triggered_dimensions)
+
+    @property
+    def response_strategy(self) -> str:
+        """response_action 的别名"""
+        return self.response_action or "none"
+
+    @property
+    def dimension_scores(self) -> List[Dict]:
+        """聚合各维度分数供 API 返回"""
+        dims = []
+        if self.psi_score is not None:
+            dims.append({
+                "dimension": "psi",
+                "score": self.psi_score,
+                "threshold": None,
+                "is_alert": self.psi_score > 0.2 if self.psi_score else False,
+                "details": {},
+            })
+        if self.ks_statistic is not None or self.ks_p_value is not None:
+            dims.append({
+                "dimension": "ks",
+                "score": self.ks_statistic or 0.0,
+                "threshold": None,
+                "is_alert": (self.ks_p_value or 1.0) < 0.05,
+                "details": {"ks_p_value": self.ks_p_value},
+            })
+        if self.confidence_drift_score is not None:
+            dims.append({
+                "dimension": "confidence",
+                "score": self.confidence_drift_score,
+                "threshold": None,
+                "is_alert": self.confidence_drift_score > 0.15 if self.confidence_drift_score else False,
+                "details": {"ks_p_value": self.confidence_ks_p_value},
+            })
+        if self.false_positive_rate is not None:
+            dims.append({
+                "dimension": "false_positive",
+                "score": self.false_positive_rate,
+                "threshold": None,
+                "is_alert": self.false_positive_rate > 0.10 if self.false_positive_rate else False,
+                "details": {
+                    "false_positive_count": self.false_positive_count,
+                    "total_prediction_count": self.total_prediction_count,
+                },
+            })
+        if self.feature_mean_shift_count is not None and self.feature_mean_shift_count > 0:
+            dims.append({
+                "dimension": "feature_shift",
+                "score": min(1.0, self.feature_mean_shift_count / 10.0) if self.feature_mean_shift_count else 0.0,
+                "threshold": None,
+                "is_alert": self.feature_mean_shift_count > 0,
+                "details": {"shifted_feature_count": self.feature_mean_shift_count},
+            })
+        return dims
+
+    @property
+    def created_at(self):
+        """create_time 的别名"""
+        return self.create_time
+
+    @property
+    def updated_at(self):
+        """update_time 的别名"""
+        return self.update_time
