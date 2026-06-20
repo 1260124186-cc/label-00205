@@ -2500,3 +2500,84 @@ ON DUPLICATE KEY UPDATE record_count = VALUES(record_count);
 SHOW TABLES LIKE '%archive%';
 SHOW TABLES LIKE '%retention%';
 SHOW TABLES LIKE '%cold_data%';
+
+-- ============================================================
+-- Webhook 出站订阅模块
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS sc_webhook_subscriptions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT COMMENT '租户ID',
+    name VARCHAR(200) NOT NULL COMMENT '订阅名称',
+    url VARCHAR(500) NOT NULL COMMENT 'Webhook URL',
+    secret VARCHAR(200) COMMENT 'HMAC签名密钥',
+    event_types TEXT COMMENT '订阅事件类型 JSON: ["status_changed","risk_high","fault_detected"]',
+    filter_node_types TEXT COMMENT '节点类型过滤 JSON: ["bolt","flange"]',
+    filter_node_ids TEXT COMMENT '节点ID范围过滤 JSON: ["B001","B002"]',
+    min_level INT DEFAULT 0 COMMENT '最低等级过滤 (0=不过滤, 1-4)',
+    enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
+    max_retries INT DEFAULT 5 COMMENT '最大重试次数',
+    timeout_seconds INT DEFAULT 10 COMMENT 'HTTP超时秒数',
+    enable_digest TINYINT(1) DEFAULT 0 COMMENT '是否启用批量合并',
+    digest_window_seconds INT DEFAULT 300 COMMENT '合并窗口秒数（默认5分钟）',
+    description VARCHAR(500) COMMENT '描述',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_whsub_tenant (tenant_id),
+    INDEX idx_whsub_enabled (enabled),
+    INDEX idx_whsub_tenant_enabled (tenant_id, enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Webhook订阅配置表';
+
+CREATE TABLE IF NOT EXISTS sc_webhook_delivery_logs (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT COMMENT '租户ID',
+    subscription_id BIGINT NOT NULL COMMENT '关联订阅ID',
+    event_id VARCHAR(64) COMMENT '事件ID',
+    event_type VARCHAR(50) COMMENT '事件类型',
+    node_type VARCHAR(20) COMMENT '节点类型',
+    node_id VARCHAR(100) COMMENT '节点ID',
+    payload TEXT COMMENT '请求体 JSON',
+    hmac_signature VARCHAR(128) COMMENT 'HMAC-SHA256签名',
+    status VARCHAR(20) DEFAULT 'pending' COMMENT '状态 pending/success/failed/dead_letter',
+    http_status_code INT COMMENT 'HTTP响应状态码',
+    response_body TEXT COMMENT 'HTTP响应体（截断）',
+    retry_count INT DEFAULT 0 COMMENT '已重试次数',
+    next_retry_at DATETIME COMMENT '下次重试时间',
+    error_message TEXT COMMENT '错误信息',
+    is_digest TINYINT(1) DEFAULT 0 COMMENT '是否为合并推送',
+    digest_event_count INT DEFAULT 0 COMMENT '合并的事件数量',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_whlog_tenant (tenant_id),
+    INDEX idx_whlog_sub (subscription_id),
+    INDEX idx_whlog_status (status),
+    INDEX idx_whlog_event (event_id),
+    INDEX idx_whlog_node (node_type, node_id),
+    INDEX idx_whlog_tenant_sub (tenant_id, subscription_id),
+    INDEX idx_whlog_tenant_status (tenant_id, status),
+    INDEX idx_whlog_retry (status, next_retry_at),
+    INDEX idx_whlog_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Webhook投递日志表';
+
+CREATE TABLE IF NOT EXISTS sc_webhook_dead_letters (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT COMMENT '租户ID',
+    subscription_id BIGINT NOT NULL COMMENT '关联订阅ID',
+    event_id VARCHAR(64) COMMENT '原始事件ID',
+    event_type VARCHAR(50) COMMENT '事件类型',
+    node_type VARCHAR(20) COMMENT '节点类型',
+    node_id VARCHAR(100) COMMENT '节点ID',
+    original_payload TEXT COMMENT '原始请求体 JSON',
+    last_error TEXT COMMENT '最后一次错误信息',
+    total_retries INT DEFAULT 0 COMMENT '总重试次数',
+    dead_letter_reason VARCHAR(200) COMMENT '进入死信队列原因',
+    original_created_at DATETIME COMMENT '原始事件创建时间',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_whdl_tenant (tenant_id),
+    INDEX idx_whdl_sub (subscription_id),
+    INDEX idx_whdl_event (event_id),
+    INDEX idx_whdl_node (node_type, node_id),
+    INDEX idx_whdl_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Webhook死信队列表';
+
+SHOW TABLES LIKE '%webhook%';

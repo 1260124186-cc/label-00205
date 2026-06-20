@@ -656,7 +656,7 @@ stream_prediction:
 
   # 事件发布配置
   event_publishing:
-    # 事件发布类型: in_process | kafka | mqtt
+    # 事件发布类型: in_process | kafka | mqtt | http
     type: in_process
 
     # Kafka 发布配置
@@ -1075,3 +1075,14 @@ archive:
     slow_job_alert_minutes: 60
     # 指标上报到 Prometheus（需安装 prometheus_client）
     expose_prometheus_metrics: false
+
+# ============================================================
+# Webhook 出站订阅配置
+# ============================================================
+webhook:
+  enabled: true
+  retry_interval_seconds: 60
+  max_delivery_log_days: 30
+  default_timeout_seconds: 10
+  default_max_retries: 5
+  digest_window_seconds: 300

@@ -297,6 +297,9 @@ def create_app() -> FastAPI:
     from app.api.routes import public_router
     app.include_router(public_router, prefix="/api/v1")
 
+    from app.services.webhook.routes import router as webhook_router
+    app.include_router(webhook_router, prefix="/api/v1")
+
     from app.bff.schema import create_bff_router
     bff_router = create_bff_router()
     app.include_router(bff_router, prefix="/graphql")

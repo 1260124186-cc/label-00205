@@ -9,6 +9,7 @@
 - InProcessEventPublisher: 进程内事件发布器（用于测试和单节点）
 - KafkaEventPublisher: Kafka 事件发布器
 - MQTTEventPublisher: MQTT 事件发布器
+- HttpEventPublisher: HTTP Webhook 事件发布器
 """
 
 import json
@@ -532,6 +533,83 @@ class MQTTEventPublisher(EventPublisher):
             logger.info("MQTT事件发布器已停止")
 
 
+class HttpEventPublisher(EventPublisher):
+
+    def __init__(self, name: str = "http"):
+        super().__init__(name)
+        self._lock = threading.Lock()
+        logger.info("HTTP事件发布器初始化完成")
+
+    def _map_event_type(self, event: StreamEvent) -> str:
+        if event.event_type == 'status_change':
+            return 'status_changed'
+        elif event.event_type == 'alert':
+            alert_data = event.data.get('alert', {})
+            if alert_data.get('fault_detected'):
+                return 'fault_detected'
+            if alert_data.get('risk_high'):
+                return 'risk_high'
+            return 'alert'
+        return event.event_type
+
+    def _determine_level(self, event: StreamEvent) -> int:
+        if event.event_type == 'status_change':
+            return event.data.get('new_status', 0)
+        elif event.event_type == 'alert':
+            return event.data.get('alert', {}).get('alert_level', 0)
+        return 0
+
+    def publish(self, event: StreamEvent) -> bool:
+        try:
+            from app.services.webhook import (
+                get_webhook_subscription_service,
+                get_webhook_delivery_service,
+                get_webhook_digest_manager,
+            )
+
+            subscription_service = get_webhook_subscription_service()
+            delivery_service = get_webhook_delivery_service()
+            digest_manager = get_webhook_digest_manager()
+
+            webhook_event_type = self._map_event_type(event)
+            level = self._determine_level(event)
+
+            matching_subscriptions = subscription_service.get_matching_subscriptions(
+                event_type=webhook_event_type,
+                node_type=event.node_type,
+                node_id=event.node_id,
+                level=level,
+            )
+
+            for subscription in matching_subscriptions:
+                if not subscription.enabled:
+                    continue
+                if subscription.enable_digest:
+                    digest_manager.add_event(subscription, event.to_dict())
+                else:
+                    thread = threading.Thread(
+                        target=delivery_service.deliver_to_subscription,
+                        args=(subscription, event.to_dict()),
+                        daemon=True,
+                    )
+                    thread.start()
+
+            with self._lock:
+                self._event_count += 1
+
+            self._notify_subscribers(event)
+
+            logger.debug(
+                f"HTTP事件已发布: type={event.event_type}, "
+                f"node={event.node_type}/{event.node_id}, "
+                f"subscriptions={len(matching_subscriptions)}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"发布HTTP事件失败: {e}")
+            return False
+
+
 class CompositeEventPublisher(EventPublisher):
     """
     组合事件发布器
@@ -639,6 +717,10 @@ def create_event_publisher_from_config() -> EventPublisher:
             password=mqtt_config.get('password'),
         )
         publishers.append(mqtt_publisher)
+
+    elif publisher_type == 'http':
+        http_publisher = HttpEventPublisher()
+        publishers.append(http_publisher)
 
     if len(publishers) == 1:
         return publishers[0]
