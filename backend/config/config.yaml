@@ -920,3 +920,158 @@ device_health:
     auto_report_heartbeat: true
     # 心跳上报批量大小
     heartbeat_batch_size: 100
+
+# ============================================================
+# 时序数据冷热归档与分区配置
+# ============================================================
+archive:
+  # 是否启用归档模块（全局开关）
+  enabled: true
+
+  # 全局默认保留策略（租户未单独配置时使用）
+  default_policy:
+    # 策略类型: compliance(合规7年) / operations(运营1年) / custom(自定义)
+    policy_type: "operations"
+    # 热数据（MySQL）保留天数
+    hot_retention_days: 90
+    # 冷数据（对象存储）总保留天数
+    cold_retention_days: 365
+    # 合规保留年数（仅策略为 compliance 时生效，覆盖 cold_retention_days）
+    compliance_retention_years: 7
+    # 是否启用冷数据懒加载
+    lazy_load_enabled: true
+
+  # 冷存储配置
+  cold_storage:
+    # 存储类型: local / s3 / oss / minio / influxdb / timescaledb
+    type: "local"
+    # 压缩算法: snappy / gzip / zstd / brotli / lz4 / none
+    compression: "snappy"
+
+    # ---------- 本地文件系统（开发/测试）----------
+    local:
+      # 归档文件根目录
+      base_dir: "./data/cold_storage"
+
+    # ---------- S3 兼容对象存储（生产推荐）----------
+    s3:
+      # 自定义 Endpoint（MinIO/阿里云OSS等填此处，AWS S3留空）
+      endpoint_url: ""
+      # 区域
+      region: "us-east-1"
+      # 存储桶名
+      bucket: "bolt-preload-archive"
+      # 访问密钥（建议通过环境变量 ARCHIVE_S3_ACCESS_KEY 注入）
+      access_key: ""
+      secret_key: ""
+      # Bucket 内的基础路径前缀
+      base_path: "timeseries"
+      # 是否使用 SSL
+      use_ssl: true
+      # 存储等级: standard / standard_ia / glacier / deep_archive
+      storage_class: "standard_ia"
+      # 服务端加密
+      server_side_encryption: "AES256"
+
+    # ---------- 阿里云 OSS ----------
+    oss:
+      endpoint_url: "https://oss-cn-hangzhou.aliyuncs.com"
+      bucket: "bolt-preload-archive"
+      access_key: ""
+      secret_key: ""
+      base_path: "timeseries"
+
+    # ---------- MinIO ----------
+    minio:
+      endpoint_url: "http://localhost:9000"
+      region: "us-east-1"
+      bucket: "bolt-preload-archive"
+      access_key: "minioadmin"
+      secret_key: "minioadmin"
+      base_path: "timeseries"
+      use_ssl: false
+
+  # 归档任务调度（全局默认，租户可单独覆盖）
+  scheduler:
+    # 月度归档任务（热→冷）
+    monthly_archive:
+      enabled: true
+      # Cron 表达式：默认每月1日凌晨3点
+      cron: "0 3 1 * *"
+      # 归档批大小（每批从MySQL读取的行数）
+      batch_size: 50000
+      # 最大并行归档任务数（按租户）
+      max_parallel: 2
+      # 归档完成后是否从热库删除
+      delete_from_hot: true
+      # 归档校验：写后读校验完整性
+      verify_after_write: true
+
+    # 过期冷数据清理任务
+    purge_expired:
+      enabled: true
+      # Cron：默认每月1日凌晨4点
+      cron: "0 4 1 * *"
+      # 是否物理删除（false=仅标记状态为deleted）
+      permanent_delete: false
+
+    # 分区键维护任务
+    partition_maintenance:
+      enabled: true
+      # Cron：默认每天凌晨2:30
+      cron: "30 2 * * *"
+      # 预创建未来几个月的分区
+      precreate_months: 2
+
+  # 懒加载（冷→热查询）配置
+  lazy_load:
+    # 是否全局启用
+    enabled: true
+    # 同步模式最大等待秒数（超时降级为异步）
+    sync_timeout_seconds: 10
+    # 异步模式默认优先级: low / normal / high / urgent
+    default_priority: "normal"
+    # 最大并发懒加载请求数（全局）
+    max_concurrent: 5
+    # 单请求最多加载的归档文件数（防止OOM）
+    max_files_per_request: 100
+    # 回迁到热库后的过期时间（小时）
+    restore_cache_hours: 72
+
+  # 查询路由默认配置
+  query_routing:
+    # 训练任务默认读取层级: hot_only / hot_warm / all
+    training_default_tier: "hot_only"
+    # 预测任务默认读取层级
+    prediction_default_tier: "hot_only"
+    # 分析任务默认读取层级
+    analysis_default_tier: "hot_warm"
+    # 报表任务默认读取层级
+    reporting_default_tier: "hot_warm"
+    # 合规审计默认读取层级
+    compliance_default_tier: "all"
+    # 时间范围超阈值时是否自动升级层级
+    auto_upgrade_tier: true
+    # 升级后的警告是否返回给调用方
+    return_upgrade_warnings: true
+
+  # 按租户差异化配置（可选，未配置的租户使用默认）
+  tenant_overrides:
+    # 示例：特定合规要求租户（tenant_id = 99）
+    # 99:
+    #   policy_type: "compliance"
+    #   hot_retention_days: 90
+    #   cold_retention_days: 2555   # 7年
+    #   cold_storage_type: "s3"
+    #   monthly_archive_cron: "0 1 1 * *"
+
+  # 监控与告警
+  monitoring:
+    # 归档失败告警阈值（连续失败次数）
+    failure_alert_threshold: 3
+    # 冷存储使用率告警阈值（%）
+    storage_usage_warn_percent: 80
+    # 归档速度慢告警：单任务超过N分钟
+    slow_job_alert_minutes: 60
+    # 指标上报到 Prometheus（需安装 prometheus_client）
+    expose_prometheus_metrics: false

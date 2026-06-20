@@ -3244,3 +3244,294 @@ class _BoltDataCompat:
     def __repr__(self):
         return (f"<_BoltDataCompat sensor_id={self.sensor_id} "
                 f"ptf={self.ptf} create_time={self.create_time}>")
+
+
+# ============================================================
+# 时序数据冷热归档与分区模块 ORM 模型
+# ============================================================
+
+class ArchivePartitionKey(Base):
+    """
+    归档分区键定义表模型
+
+    对应数据库表: sc_archive_partition_keys
+    定义按月分区的分区键信息，用于 MySQL 按月分区表的元数据管理。
+    每个分区代表一个自然月的数据。
+    """
+    __tablename__ = 'sc_archive_partition_keys'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+    table_name = Column(String(100), nullable=False, comment='源表名，如 sc_bolt_data')
+    partition_name = Column(String(100), nullable=False, comment='分区名，如 p202501')
+    partition_key = Column(String(7), nullable=False, comment='年月分区键 YYYY-MM')
+    partition_value = Column(Integer, nullable=False, comment='分区数值 YYYYMM')
+    start_date = Column(DateTime, nullable=False, comment='分区起始时间（含）')
+    end_date = Column(DateTime, nullable=False, comment='分区结束时间（不含）')
+    row_count = Column(BigInteger, default=0, comment='分区内数据行数')
+    data_size_bytes = Column(BigInteger, default=0, comment='分区数据大小（字节）')
+    archive_status = Column(String(20), default='hot', comment='归档状态: hot=热数据, archiving=归档中, archived=已归档, restored=已回迁, purged=已清理')
+    archive_time = Column(DateTime, comment='归档完成时间')
+    purge_time = Column(DateTime, comment='从MySQL清理时间')
+    retention_expire_time = Column(DateTime, comment='保留期限到期时间（超期后从冷存储删除）')
+    is_active = Column(Boolean, default=True, comment='分区是否有效')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('uk_tenant_table_partition', 'tenant_id', 'table_name', 'partition_name', unique=True),
+        Index('idx_tenant_table', 'tenant_id', 'table_name'),
+        Index('idx_archive_status', 'archive_status'),
+        Index('idx_partition_key', 'partition_key'),
+        Index('idx_retention_expire', 'retention_expire_time'),
+        Index('idx_archive_time', 'archive_time'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class ArchiveMetadata(Base):
+    """
+    归档元数据索引表模型
+
+    对应数据库表: sc_archive_metadata
+    记录每个归档文件（Parquet）的元数据索引，仍保存在 MySQL 中。
+    用于快速定位冷数据在对象存储中的位置，实现透明查询路由。
+    """
+    __tablename__ = 'sc_archive_metadata'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    archive_id = Column(String(64), unique=True, nullable=False, comment='归档唯一ID (UUID)')
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+    source_table = Column(String(100), nullable=False, comment='源表名')
+    partition_name = Column(String(100), comment='关联的分区名')
+    partition_key = Column(String(7), comment='年月分区键 YYYY-MM')
+
+    sensor_id = Column(String(100), comment='传感器/螺栓ID（单传感器归档则有值）')
+    sensor_ids = Column(Text, comment='包含的传感器ID列表 JSON（批量归档）')
+    data_start_time = Column(DateTime, nullable=False, comment='归档数据起始时间（含）')
+    data_end_time = Column(DateTime, nullable=False, comment='归档数据结束时间（含）')
+    row_count = Column(BigInteger, nullable=False, comment='归档数据行数')
+    file_size_bytes = Column(BigInteger, nullable=False, comment='Parquet文件大小（字节）')
+
+    storage_type = Column(String(20), default='s3', comment='冷存储类型: s3/oss/minio/local_filesystem/timescaledb_cold')
+    storage_bucket = Column(String(200), comment='存储桶名')
+    storage_path = Column(String(500), nullable=False, comment='对象存储路径或文件路径')
+    file_checksum = Column(String(128), comment='文件校验和 (SHA256)')
+    compression = Column(String(20), default='snappy', comment='压缩算法: snappy/gzip/zstd/none')
+    schema_version = Column(String(20), default='v1', comment='Parquet Schema版本')
+
+    aggregation_level = Column(String(20), default='raw', comment='数据聚合级别: raw/minute/hour')
+    fields = Column(Text, comment='包含的字段列表 JSON')
+    tags = Column(Text, comment='标签维度 JSON')
+    statistics = Column(Text, comment='统计摘要 JSON: min/max/mean/count/null_count per field')
+
+    job_id = Column(String(64), comment='关联的归档任务ID')
+    status = Column(String(20), default='active', comment='状态: active/deleted/restored/corrupted')
+    restore_time = Column(DateTime, comment='最近一次回迁时间')
+    restore_count = Column(Integer, default=0, comment='回迁次数')
+    last_access_time = Column(DateTime, comment='最后访问时间（懒加载记录）')
+    access_count = Column(Integer, default=0, comment='访问次数')
+
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_tenant_table_range', 'tenant_id', 'source_table', 'data_start_time', 'data_end_time'),
+        Index('idx_tenant_sensor_range', 'tenant_id', 'sensor_id', 'data_start_time', 'data_end_time'),
+        Index('idx_partition_key', 'partition_key'),
+        Index('idx_storage_path', 'storage_bucket', 'storage_path'),
+        Index('idx_archive_status', 'status'),
+        Index('idx_last_access', 'last_access_time'),
+        Index('idx_archive_id', 'archive_id'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class ArchiveJob(Base):
+    """
+    归档任务执行日志表模型
+
+    对应数据库表: sc_archive_jobs
+    记录每次归档任务的执行详情，包括配置、进度、结果、错误信息。
+    """
+    __tablename__ = 'sc_archive_jobs'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    job_id = Column(String(64), unique=True, nullable=False, comment='任务唯一ID (UUID)')
+    tenant_id = Column(BigInteger, comment='租户ID，空表示全局任务')
+    job_name = Column(String(200), nullable=False, comment='任务名称')
+    job_type = Column(String(30), nullable=False, comment='任务类型: archive_monthly/archive_custom/purge_expired/restore/verify')
+    trigger_type = Column(String(20), default='scheduled', comment='触发类型: scheduled/manual/api')
+
+    source_table = Column(String(100), comment='源表名')
+    target_storage = Column(String(20), comment='目标存储类型')
+    partition_key = Column(String(7), comment='目标分区键 YYYY-MM')
+    partitions = Column(Text, comment='涉及的分区键列表 JSON')
+    sensor_ids = Column(Text, comment='指定传感器ID列表 JSON，空表示全部')
+
+    hot_threshold_days = Column(Integer, comment='热数据保留天数（超过此天数的归档）')
+    retention_days = Column(Integer, comment='总保留天数（超期从冷存储删除）')
+    delete_from_hot = Column(Boolean, default=True, comment='归档后是否从MySQL删除热数据')
+
+    status = Column(String(20), default='pending', comment='状态: pending/running/completed/failed/cancelled/paused')
+    start_time = Column(DateTime, nullable=False, comment='开始时间')
+    end_time = Column(DateTime, comment='结束时间')
+    duration_seconds = Column(Integer, comment='执行时长（秒）')
+
+    total_partitions = Column(Integer, default=0, comment='总分区数')
+    processed_partitions = Column(Integer, default=0, comment='已处理分区数')
+    total_rows = Column(BigInteger, default=0, comment='总数据行数')
+    archived_rows = Column(BigInteger, default=0, comment='已归档行数')
+    failed_rows = Column(BigInteger, default=0, comment='失败行数')
+    deleted_rows = Column(BigInteger, default=0, comment='从热库删除行数')
+
+    archive_size_bytes = Column(BigInteger, default=0, comment='归档数据总大小（字节）')
+    archive_file_count = Column(Integer, default=0, comment='生成的归档文件数')
+    storage_cost_saved = Column(Float, comment='估算节省的存储成本（元）')
+
+    error_count = Column(Integer, default=0, comment='错误数')
+    error_summary = Column(Text, comment='错误摘要 JSON')
+    error_details = Column(Text, comment='详细错误信息 JSON')
+
+    config_snapshot = Column(Text, comment='任务配置快照 JSON')
+    created_by = Column(String(100), comment='创建人（手动触发时）')
+    cron_expression = Column(String(100), comment='关联的 cron 表达式（定时任务）')
+
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_job_id', 'job_id'),
+        Index('idx_tenant_job_type', 'tenant_id', 'job_type'),
+        Index('idx_job_status', 'status'),
+        Index('idx_job_start_time', 'start_time'),
+        Index('idx_partition_key', 'partition_key'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class TenantRetentionPolicy(Base):
+    """
+    租户级保留策略表模型
+
+    对应数据库表: sc_tenant_retention_policies
+    定义每个租户的冷热数据保留策略：
+    - 合规要求（如7年） vs 运营要求（如1年）
+    - 可按数据表和聚合级别分别设置
+    """
+    __tablename__ = 'sc_tenant_retention_policies'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+    policy_name = Column(String(200), nullable=False, comment='策略名称')
+    policy_type = Column(String(30), nullable=False, comment='策略类型: compliance=合规策略/operations=运营策略/custom=自定义')
+    description = Column(String(500), comment='策略描述')
+
+    is_default = Column(Boolean, default=False, comment='是否为默认策略')
+    is_active = Column(Boolean, default=True, comment='是否启用')
+    priority = Column(Integer, default=0, comment='优先级（数值大优先）')
+
+    scope_table = Column(String(100), comment='适用表名，空表示全部时序表')
+    scope_sensor_ids = Column(Text, comment='适用传感器ID列表 JSON，空表示全部')
+    scope_aggregation_level = Column(String(20), comment='适用聚合级别: raw/minute/hour/all')
+
+    hot_retention_days = Column(Integer, nullable=False, default=90, comment='热数据保留天数（MySQL中保留的天数）')
+    cold_retention_days = Column(Integer, nullable=False, default=365, comment='冷数据保留天数（对象存储中总保留天数）')
+    compliance_retention_years = Column(Integer, comment='合规要求保留年数（如7年，超期后彻底删除）')
+
+    archive_cron = Column(String(50), default='0 3 1 * *', comment='归档任务 cron 表达式，默认每月1日凌晨3点')
+    purge_cron = Column(String(50), default='0 4 1 * *', comment='过期清理任务 cron 表达式')
+    auto_delete_hot = Column(Boolean, default=True, comment='归档完成后自动删除热数据')
+    lazy_load_enabled = Column(Boolean, default=True, comment='是否启用冷数据懒加载')
+
+    storage_class = Column(String(20), default='standard_ia', comment='冷存储等级: standard/standard_ia/glacier/deep_archive')
+    compression_algo = Column(String(20), default='snappy', comment='Parquet压缩算法')
+    encryption_enabled = Column(Boolean, default=True, comment='是否加密归档文件')
+
+    effective_from = Column(DateTime, comment='生效起始时间')
+    effective_to = Column(DateTime, comment='生效截止时间')
+    version = Column(Integer, default=1, comment='策略版本号')
+    change_reason = Column(String(500), comment='变更原因')
+
+    created_by = Column(String(100), comment='创建人')
+    approved_by = Column(String(100), comment='审批人（合规策略需要审批）')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('uk_tenant_policy_name', 'tenant_id', 'policy_name', unique=True),
+        Index('idx_tenant_policy_type', 'tenant_id', 'policy_type', 'is_active'),
+        Index('idx_policy_active', 'is_active'),
+        Index('idx_default_policy', 'tenant_id', 'is_default'),
+        Index('idx_policy_table', 'scope_table'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class ColdDataLoadRequest(Base):
+    """
+    冷数据懒加载请求记录表模型
+
+    对应数据库表: sc_cold_data_load_requests
+    记录历史分析API触发的冷数据懒加载请求，用于审计和性能统计。
+    支持异步加载 + 状态追踪。
+    """
+    __tablename__ = 'sc_cold_data_load_requests'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    request_id = Column(String(64), unique=True, nullable=False, comment='请求唯一ID (UUID)')
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+    user_id = Column(String(100), comment='触发用户ID')
+    user_type = Column(String(20), default='api', comment='触发来源: api/user/training/analysis')
+    api_endpoint = Column(String(200), comment='触发的 API 端点')
+
+    source_table = Column(String(100), nullable=False, comment='查询的源表名')
+    sensor_id = Column(String(100), comment='传感器ID')
+    sensor_ids = Column(Text, comment='传感器ID列表 JSON')
+    query_start_time = Column(DateTime, nullable=False, comment='查询起始时间')
+    query_end_time = Column(DateTime, nullable=False, comment='查询结束时间')
+    aggregation_level = Column(String(20), default='raw', comment='请求的聚合级别')
+
+    hot_data_range = Column(Text, comment='命中热数据的时间范围 JSON')
+    cold_data_ranges = Column(Text, comment='需要懒加载的冷数据时间范围列表 JSON')
+    archive_ids = Column(Text, comment='涉及的归档ID列表 JSON')
+    partition_keys = Column(Text, comment='涉及的分区键列表 JSON')
+
+    status = Column(String(20), default='pending', comment='状态: pending/loading/completed/failed/partial')
+    priority = Column(String(10), default='normal', comment='优先级: low/normal/high/critical')
+    async_mode = Column(Boolean, default=False, comment='是否异步加载')
+
+    start_time = Column(DateTime, comment='开始加载时间')
+    end_time = Column(DateTime, comment='加载完成时间')
+    duration_seconds = Column(Float, comment='加载耗时（秒）')
+
+    hot_row_count = Column(BigInteger, default=0, comment='热数据行数')
+    cold_row_count = Column(BigInteger, default=0, comment='冷数据行数（已加载）')
+    total_row_count = Column(BigInteger, default=0, comment='总数据行数')
+    cold_file_count = Column(Integer, default=0, comment='读取的冷文件数')
+    cold_bytes_loaded = Column(BigInteger, default=0, comment='从冷存储读取的字节数')
+
+    restore_to_hot = Column(Boolean, default=False, comment='是否将冷数据回迁到热库')
+    restore_expire_hours = Column(Integer, default=72, comment='回迁数据在热库的过期时间（小时）')
+    cache_hit = Column(Boolean, default=False, comment='是否命中回迁缓存')
+
+    error_message = Column(Text, comment='错误信息')
+    request_params = Column(Text, comment='原始请求参数 JSON')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_request_id', 'request_id'),
+        Index('idx_tenant_user', 'tenant_id', 'user_id'),
+        Index('idx_tenant_query_range', 'tenant_id', 'source_table', 'query_start_time', 'query_end_time'),
+        Index('idx_load_status', 'status'),
+        Index('idx_load_priority', 'priority'),
+        Index('idx_create_time', 'create_time'),
+        Index('idx_sensor_range', 'sensor_id', 'query_start_time', 'query_end_time'),
+        Index('idx_tenant', 'tenant_id'),
+    )

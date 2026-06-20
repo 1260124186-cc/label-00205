@@ -2239,3 +2239,264 @@ CREATE TABLE IF NOT EXISTS sc_schedule_sync_log (
 SHOW TABLES LIKE '%inspection_schedule%';
 SHOW TABLES LIKE '%team_capacity%';
 SHOW TABLES LIKE '%schedule_sync%';
+
+-- ============================================================
+-- 时序数据冷热归档与分区模块
+-- ============================================================
+
+-- ============================================================
+-- 归档分区键定义表
+-- 记录按月分区的分区键信息，管理热数据分区的生命周期
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_archive_partition_keys (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL COMMENT '租户ID',
+    table_name VARCHAR(100) NOT NULL COMMENT '源表名，如sc_bolt_data',
+    partition_name VARCHAR(100) NOT NULL COMMENT '分区名称，如p202501',
+    partition_key VARCHAR(20) NOT NULL COMMENT '分区键值，格式YYYYMM，如202501',
+    partition_start DATETIME NOT NULL COMMENT '分区开始时间',
+    partition_end DATETIME NOT NULL COMMENT '分区结束时间（不含）',
+    record_count BIGINT DEFAULT 0 COMMENT '分区内记录数',
+    data_size_bytes BIGINT DEFAULT 0 COMMENT '分区数据大小（字节）',
+    archive_status VARCHAR(20) DEFAULT 'hot' COMMENT '归档状态: hot/archiving/archived/purged',
+    archive_job_id BIGINT COMMENT '关联归档任务ID',
+    archive_time DATETIME COMMENT '完成归档时间',
+    retention_expire_time DATETIME COMMENT '保留到期时间（冷存储删除时间）',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE KEY uk_tenant_table_partition (tenant_id, table_name, partition_name),
+    INDEX idx_tenant_status (tenant_id, archive_status),
+    INDEX idx_partition_key (partition_key),
+    INDEX idx_archive_time (archive_time),
+    INDEX idx_retention_expire (retention_expire_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='归档分区键定义表';
+
+-- ============================================================
+-- 归档元数据索引表
+-- 记录每个Parquet文件的元数据，用于快速定位冷数据
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_archive_metadata (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL COMMENT '租户ID',
+    source_table VARCHAR(100) NOT NULL COMMENT '源表名',
+    partition_key VARCHAR(20) NOT NULL COMMENT '分区键 YYYYMM',
+    archive_job_id BIGINT COMMENT '关联归档任务ID',
+    storage_type VARCHAR(20) NOT NULL DEFAULT 's3' COMMENT '冷存储类型: s3/oss/minio/influxdb/timescaledb',
+    storage_bucket VARCHAR(200) COMMENT '存储桶名/数据库名',
+    storage_path VARCHAR(500) NOT NULL COMMENT '存储路径/表名',
+    file_name VARCHAR(200) NOT NULL COMMENT '文件名/分片名',
+    file_format VARCHAR(20) DEFAULT 'parquet' COMMENT '文件格式: parquet/csv/orc',
+    file_size_bytes BIGINT DEFAULT 0 COMMENT '文件大小（字节）',
+    record_count BIGINT DEFAULT 0 COMMENT '记录数',
+    row_group_count INT DEFAULT 0 COMMENT 'Parquet行组数',
+    min_time DATETIME COMMENT '最小数据时间',
+    max_time DATETIME COMMENT '最大数据时间',
+    sensor_ids TEXT COMMENT '包含的传感器/螺栓ID列表 JSON',
+    compression_codec VARCHAR(30) DEFAULT 'snappy' COMMENT '压缩编码: snappy/gzip/zstd',
+    schema_version VARCHAR(20) DEFAULT '1.0' COMMENT 'Parquet Schema版本',
+    checksum VARCHAR(128) COMMENT '文件校验和（SHA256）',
+    status VARCHAR(20) DEFAULT 'active' COMMENT '状态: active/restoring/deleted/corrupted',
+    restored_count INT DEFAULT 0 COMMENT '被懒加载恢复次数',
+    last_restored_time DATETIME COMMENT '最后恢复时间',
+    tags TEXT COMMENT '标签 JSON，用于检索',
+    extra_metadata TEXT COMMENT '扩展元数据 JSON',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    INDEX idx_tenant_table (tenant_id, source_table),
+    INDEX idx_tenant_partition (tenant_id, partition_key),
+    INDEX idx_storage_path (storage_bucket, storage_path),
+    INDEX idx_time_range (min_time, max_time),
+    INDEX idx_status (status),
+    INDEX idx_last_restored (last_restored_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='归档元数据索引表';
+
+-- ============================================================
+-- 归档任务执行日志表
+-- 记录每次归档任务的执行详情
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_archive_jobs (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL COMMENT '租户ID',
+    job_name VARCHAR(200) NOT NULL COMMENT '任务名称',
+    job_type VARCHAR(30) NOT NULL COMMENT '任务类型: hot_to_cold/retention_cleanup/restore/verify',
+    trigger_type VARCHAR(20) DEFAULT 'scheduled' COMMENT '触发类型: scheduled/manual',
+    cron_expression VARCHAR(100) COMMENT '使用的Cron表达式',
+    status VARCHAR(20) DEFAULT 'running' COMMENT '状态: pending/running/completed/failed/paused/cancelled',
+    source_tables TEXT COMMENT '归档的源表列表 JSON',
+    partition_keys TEXT COMMENT '归档的分区键列表 JSON',
+    storage_config TEXT COMMENT '使用的存储配置 JSON',
+    hot_threshold_days INT DEFAULT 90 COMMENT '热数据阈值（天）',
+    retention_days INT DEFAULT 365 COMMENT '运营保留天数',
+    compliance_retention_days INT DEFAULT 2555 COMMENT '合规保留天数（7年=2555天）',
+    total_records BIGINT DEFAULT 0 COMMENT '总记录数',
+    archived_records BIGINT DEFAULT 0 COMMENT '成功归档记录数',
+    failed_records BIGINT DEFAULT 0 COMMENT '失败记录数',
+    deleted_records BIGINT DEFAULT 0 COMMENT '从热库删除的记录数',
+    total_files INT DEFAULT 0 COMMENT '生成的文件总数',
+    total_bytes BIGINT DEFAULT 0 COMMENT '归档总字节数',
+    compression_ratio FLOAT COMMENT '压缩比率 原始/压缩',
+    start_time DATETIME NOT NULL COMMENT '开始时间',
+    end_time DATETIME COMMENT '结束时间',
+    duration_seconds INT COMMENT '执行时长（秒）',
+    error_code VARCHAR(50) COMMENT '错误码',
+    error_message TEXT COMMENT '错误信息',
+    error_stack TEXT COMMENT '错误堆栈',
+    retry_count INT DEFAULT 0 COMMENT '重试次数',
+    parent_job_id BIGINT COMMENT '父任务ID（重试链）',
+    instance_id VARCHAR(100) COMMENT '执行实例ID',
+    operator_id VARCHAR(50) COMMENT '操作人ID（手动触发时）',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_job_type (job_type),
+    INDEX idx_status (status),
+    INDEX idx_start_time (start_time),
+    INDEX idx_tenant_status (tenant_id, status),
+    INDEX idx_instance (instance_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='归档任务执行日志表';
+
+-- ============================================================
+-- 租户级保留策略表
+-- 支持合规/运营/自定义三种策略类型的差异化保留周期
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_tenant_retention_policies (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL UNIQUE COMMENT '租户ID（一租户一策略）',
+    policy_name VARCHAR(200) NOT NULL COMMENT '策略名称',
+    policy_type VARCHAR(30) NOT NULL DEFAULT 'standard' COMMENT '策略类型: compliance(合规7年)/operations(运营1年)/custom(自定义)',
+    hot_data_days INT DEFAULT 90 COMMENT '热数据保留天数（MySQL）',
+    warm_data_days INT DEFAULT 365 COMMENT '温数据保留天数（快速冷存储，低延迟）',
+    cold_data_days INT DEFAULT 2555 COMMENT '冷数据保留天数（归档存储，7年=2555天）',
+    total_retention_days INT DEFAULT 2555 COMMENT '总保留天数（到期永久删除）',
+    archive_enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用自动归档',
+    archive_cron VARCHAR(100) DEFAULT '0 2 * * *' COMMENT '归档调度Cron，默认每天凌晨2点',
+    archive_batch_size INT DEFAULT 10000 COMMENT '归档批处理大小',
+    archive_parallelism INT DEFAULT 2 COMMENT '归档并行度',
+    archive_storage_type VARCHAR(20) DEFAULT 's3' COMMENT '默认冷存储类型',
+    archive_compression VARCHAR(20) DEFAULT 'snappy' COMMENT '归档压缩编码',
+    cleanup_enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用到期清理',
+    cleanup_cron VARCHAR(100) DEFAULT '0 3 1 * *' COMMENT '清理调度Cron，默认每月1号凌晨3点',
+    delete_permanently TINYINT(1) DEFAULT 0 COMMENT '到期是否永久删除（0=仅标记，1=物理删除）',
+    lazy_load_enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用冷数据懒加载',
+    lazy_load_cache_days INT DEFAULT 7 COMMENT '懒加载缓存天数（加载到热区后保留）',
+    lazy_load_max_concurrent INT DEFAULT 3 COMMENT '最大并发懒加载任务数',
+    predict_read_tier VARCHAR(20) DEFAULT 'hot' COMMENT '预测任务读取层级: hot_only/hot_warm/all',
+    training_read_tier VARCHAR(20) DEFAULT 'hot' COMMENT '训练任务读取层级: hot_only/hot_warm/all',
+    analysis_read_tier VARCHAR(20) DEFAULT 'hot_warm' COMMENT '分析任务读取层级: hot_only/hot_warm/all',
+    priority_tables TEXT COMMENT '优先归档的表 JSON',
+    exclude_tables TEXT COMMENT '排除归档的表 JSON',
+    version INT DEFAULT 1 COMMENT '策略版本号（乐观锁）',
+    effective_time DATETIME COMMENT '生效时间',
+    description VARCHAR(500) COMMENT '策略描述',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_policy_type (policy_type),
+    INDEX idx_archive_enabled (archive_enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='租户级保留策略表';
+
+-- ============================================================
+-- 冷数据懒加载请求记录表
+-- 审计历史分析API触发的冷数据按需加载
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_cold_data_load_requests (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL COMMENT '租户ID',
+    request_id VARCHAR(64) UNIQUE NOT NULL COMMENT '请求唯一ID',
+    source_api VARCHAR(200) COMMENT '触发的API路径',
+    source_type VARCHAR(30) NOT NULL COMMENT '来源类型: analysis_api/training_api/user_manual/admin_operation',
+    operator_id VARCHAR(50) COMMENT '操作人/调用方ID',
+    operator_name VARCHAR(200) COMMENT '操作人/调用方名称',
+    source_table VARCHAR(100) NOT NULL COMMENT '源表名',
+    sensor_ids TEXT COMMENT '查询的传感器/螺栓ID JSON',
+    time_start DATETIME NOT NULL COMMENT '查询开始时间',
+    time_end DATETIME NOT NULL COMMENT '查询结束时间',
+    required_partitions TEXT COMMENT '需要加载的分区键 JSON',
+    archive_metadata_ids TEXT COMMENT '关联的归档元数据ID列表 JSON',
+    load_priority VARCHAR(20) DEFAULT 'normal' COMMENT '优先级: low/normal/high/urgent',
+    status VARCHAR(20) DEFAULT 'pending' COMMENT '状态: pending/loading/completed/failed/cancelled/expired',
+    cache_target VARCHAR(20) DEFAULT 'hot_partition' COMMENT '缓存目标: hot_partition/temporary_table/in_memory',
+    cache_expire_time DATETIME COMMENT '缓存过期时间',
+    total_records_expected BIGINT COMMENT '预期记录数',
+    total_records_loaded BIGINT COMMENT '实际加载记录数',
+    total_bytes_loaded BIGINT COMMENT '实际加载字节数',
+    estimated_wait_seconds INT COMMENT '预估等待时间（秒）',
+    start_time DATETIME COMMENT '开始加载时间',
+    end_time DATETIME COMMENT '完成加载时间',
+    duration_seconds INT COMMENT '加载耗时（秒）',
+    hit_count INT DEFAULT 0 COMMENT '加载后被访问次数',
+    last_hit_time DATETIME COMMENT '最后访问时间',
+    error_code VARCHAR(50) COMMENT '错误码',
+    error_message TEXT COMMENT '错误信息',
+    callback_url VARCHAR(500) COMMENT '加载完成回调URL',
+    callback_status VARCHAR(20) COMMENT '回调状态: pending/success/failed',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_status (status),
+    INDEX idx_request_id (request_id),
+    INDEX idx_time_range (time_start, time_end),
+    INDEX idx_source_table (tenant_id, source_table),
+    INDEX idx_create_time (create_time),
+    INDEX idx_cache_expire (cache_expire_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='冷数据懒加载请求记录表';
+
+-- ============================================================
+-- 插入默认租户保留策略
+-- ============================================================
+INSERT INTO sc_tenant_retention_policies (
+    tenant_id, policy_name, policy_type,
+    hot_data_days, warm_data_days, cold_data_days, total_retention_days,
+    archive_enabled, archive_cron,
+    cleanup_enabled, cleanup_cron, delete_permanently,
+    lazy_load_enabled, lazy_load_cache_days,
+    predict_read_tier, training_read_tier, analysis_read_tier,
+    description, create_by
+) VALUES (
+    1, '默认标准策略', 'operations',
+    90, 365, 365, 365,
+    1, '0 2 * * *',
+    1, '0 3 1 * *', 0,
+    1, 7,
+    'hot_only', 'hot_only', 'hot_warm',
+    '默认运营级策略：热数据90天，总保留1年', 'system'
+), (
+    0, '全局合规策略模板', 'compliance',
+    90, 365, 2555, 2555,
+    1, '0 1 * * *',
+    1, '0 2 1 * *', 0,
+    1, 14,
+    'hot_only', 'hot_warm', 'all',
+    '合规级策略模板：7年完整保留，适用于法规要求场景（tenant_id=0为模板）', 'system'
+) ON DUPLICATE KEY UPDATE update_time = CURRENT_TIMESTAMP;
+
+-- 初始化分区键（为已存在的测试数据创建分区记录）
+INSERT INTO sc_archive_partition_keys (
+    tenant_id, table_name, partition_name, partition_key,
+    partition_start, partition_end, record_count, archive_status
+)
+SELECT
+    1 as tenant_id,
+    'sc_bolt_data' as table_name,
+    CONCAT('p', DATE_FORMAT(create_time, '%Y%m')) as partition_name,
+    DATE_FORMAT(create_time, '%Y%m') as partition_key,
+    DATE_FORMAT(DATE_FORMAT(create_time, '%Y-%m-01'), '%Y-%m-%d 00:00:00') as partition_start,
+    DATE_FORMAT(DATE_ADD(DATE_FORMAT(create_time, '%Y-%m-01'), INTERVAL 1 MONTH), '%Y-%m-%d 00:00:00') as partition_end,
+    COUNT(*) as record_count,
+    'hot' as archive_status
+FROM sc_bolt_data
+GROUP BY DATE_FORMAT(create_time, '%Y%m')
+ON DUPLICATE KEY UPDATE record_count = VALUES(record_count);
+
+-- 显示归档模块新增的表
+SHOW TABLES LIKE '%archive%';
+SHOW TABLES LIKE '%retention%';
+SHOW TABLES LIKE '%cold_data%';
