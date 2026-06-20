@@ -493,7 +493,117 @@ class TrainingService:
             logger.info(f"螺栓模型已存在，跳过: tenant={tenant_id}, bolt={bolt_id}")
             return {'status': 'skipped', 'bolt_id': bolt_id, 'message': '模型已存在'}
 
-        data, labels, data_source_info = self._load_bolt_training_data_enhanced(tenant_id, bolt_id)
+        # 初始化特征快照相关变量
+        use_feature_snapshot = False
+        fe_enabled = False
+        feature_dim = 0
+
+        # === 检查是否使用特征快照进行训练 ===
+        fs_cfg = None
+        if training_config and hasattr(training_config, 'feature_snapshot'):
+            fs_cfg = training_config.feature_snapshot
+        elif training_config and isinstance(training_config, dict):
+            fs_cfg = training_config.get('feature_snapshot')
+
+        use_feature_snapshot = (
+            fs_cfg is not None and
+            (fs_cfg if isinstance(fs_cfg, dict) else fs_cfg).get('enabled', False)
+        )
+
+        if use_feature_snapshot:
+            try:
+                from app.services.feature_store import get_feature_store, IncompatibleFeatureVersionError
+
+                feature_store = get_feature_store()
+                fs_config_dict = fs_cfg if isinstance(fs_cfg, dict) else {
+                    'feature_version': fs_cfg.feature_version,
+                    'start_time': fs_cfg.start_time,
+                    'end_time': fs_cfg.end_time,
+                    'check_version_compatibility': fs_cfg.check_version_compatibility,
+                    'mark_used_for_training': fs_cfg.mark_used_for_training,
+                }
+
+                feature_version = fs_config_dict.get('feature_version', 'v1.0')
+                start_time = fs_config_dict.get('start_time')
+                end_time = fs_config_dict.get('end_time')
+                check_compatibility = fs_config_dict.get('check_version_compatibility', True)
+                mark_used = fs_config_dict.get('mark_used_for_training', True)
+
+                logger.info(
+                    f"使用特征快照训练: bolt={bolt_id}, "
+                    f"feature_version={feature_version}, "
+                    f"time_range=[{start_time}, {end_time}]"
+                )
+
+                # 从特征存储加载特征矩阵
+                feature_matrix, snapshots = feature_store.load_training_features(
+                    node_ids=[str(bolt_id)],
+                    feature_version=feature_version,
+                    node_type='bolt',
+                    start_time=start_time,
+                    end_time=end_time,
+                    check_compatibility=check_compatibility,
+                )
+
+                if len(snapshots) < 100:
+                    return {
+                        'status': 'failed',
+                        'bolt_id': bolt_id,
+                        'message': f'特征快照数据不足 (仅{len(snapshots)}条，需要至少100条)',
+                        'feature_version': feature_version,
+                    }
+
+                # 标记快照已用于训练（保证可追溯）
+                if mark_used and snapshots:
+                    snapshot_ids = [s.id for s in snapshots if s.id is not None]
+                    feature_store.mark_used_for_training(snapshot_ids, session_id)
+
+                # 从快照中提取标签（如果有预测结果则使用其状态码作为标签）
+                labels = []
+                for snap in snapshots:
+                    if snap.prediction_result and 'status_code' in snap.prediction_result:
+                        labels.append(int(snap.prediction_result['status_code']))
+                    else:
+                        labels.append(0)
+
+                labels = np.array(labels, dtype=np.int64)
+
+                # 构造返回数据（使用特征矩阵作为训练数据）
+                data = feature_matrix
+                data_source_info = {
+                    'data_source': 'feature_snapshot',
+                    'actual_channels_used': ['feature_vector'],
+                    'feature_version': feature_version,
+                    'snapshot_count': len(snapshots),
+                    'snapshot_ids': [s.id for s in snapshots if s.id is not None],
+                    'complete_ratio': 1.0,
+                    'input_dim_actual': feature_matrix.shape[1] if len(feature_matrix.shape) > 1 else feature_matrix.shape[0],
+                }
+
+                # 标记训练配置，跳过后续的特征工程（因为已经有特征了）
+                fe_enabled = False
+                feature_dim = feature_matrix.shape[1] if len(feature_matrix.shape) > 1 else 0
+
+                logger.info(
+                    f"特征快照加载成功: bolt={bolt_id}, "
+                    f"samples={len(snapshots)}, dim={feature_dim}, "
+                    f"feature_version={feature_version}"
+                )
+
+            except IncompatibleFeatureVersionError as e:
+                logger.error(f"特征版本不兼容，训练终止: {e}")
+                return {
+                    'status': 'failed',
+                    'bolt_id': bolt_id,
+                    'message': f'特征版本不兼容: {str(e)}',
+                    'error_type': 'incompatible_feature_version',
+                }
+            except Exception as e:
+                logger.error(f"加载特征快照失败，回退到原始数据训练: {e}")
+                use_feature_snapshot = False
+                data, labels, data_source_info = self._load_bolt_training_data_enhanced(tenant_id, bolt_id)
+        else:
+            data, labels, data_source_info = self._load_bolt_training_data_enhanced(tenant_id, bolt_id)
 
         if len(data) < 100:
             return {
@@ -526,17 +636,20 @@ class TrainingService:
             }
 
         # === 特征工程：提取、标准化、初始化相关变量 ===
-        fe_cfg = config.get('feature_engineering', {})
-        fe_enabled = fe_cfg.get('enabled', False)
+        # 如果使用特征快照模式，fe_enabled 和 feature_dim 已经设置过了
+        if not use_feature_snapshot:
+            fe_cfg = config.get('feature_engineering', {})
+            fe_enabled = fe_cfg.get('enabled', False)
+            feature_dim = 0
+
         raw_feature_matrix = None
         feature_names = []
         scaled_feature_matrix = None
         scaler_state = None
-        feature_dim = 0
         train_features = None
         val_features = None
 
-        if fe_enabled:
+        if fe_enabled and not use_feature_snapshot:
             if data.ndim == 2 and 'preload' in actual_channels_used:
                 preload_idx = actual_channels_used.index('preload')
                 preload_data = data[:, preload_idx]

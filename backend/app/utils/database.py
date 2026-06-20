@@ -22,7 +22,7 @@ from typing import Generator, Optional, List, Dict
 
 import numpy as np
 
-from sqlalchemy import create_engine, Column, BigInteger, String, Float, DateTime, Index, Text, Boolean, Integer
+from sqlalchemy import create_engine, Column, BigInteger, String, Float, DateTime, Index, Text, Boolean, Integer, BINARY
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from loguru import logger
@@ -3534,4 +3534,73 @@ class ColdDataLoadRequest(Base):
         Index('idx_create_time', 'create_time'),
         Index('idx_sensor_range', 'sensor_id', 'query_start_time', 'query_end_time'),
         Index('idx_tenant', 'tenant_id'),
+    )
+
+
+class FeatureSchemaVersion(Base):
+    """
+    特征 Schema 版本表模型
+
+    对应数据库表: sc_feature_schema_versions
+    管理特征向量的结构定义，保证训练和推理使用一致的特征结构。
+    """
+    __tablename__ = 'sc_feature_schema_versions'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    version = Column(String(20), nullable=False, unique=True, comment='特征版本号，如 v1.0, v1.1')
+    dimension = Column(Integer, nullable=False, comment='特征维度数量')
+    feature_names = Column(Text, nullable=False, comment='特征名称列表 JSON，按顺序排列')
+    feature_types = Column(Text, comment='特征类型列表 JSON，如 ["numeric", "numeric", "categorical"]')
+    description = Column(Text, comment='版本变更说明')
+    is_active = Column(Boolean, default=True, comment='是否为当前活跃版本')
+    compatible_versions = Column(Text, comment='兼容的旧版本列表 JSON，如 ["v1.0"]')
+    breaking_change = Column(Boolean, default=False, comment='是否为不兼容变更')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_schema_version', 'version'),
+        Index('idx_schema_active', 'is_active'),
+        Index('idx_schema_tenant', 'tenant_id'),
+    )
+
+
+class FeatureSnapshot(Base):
+    """
+    特征快照表模型
+
+    对应数据库表: sc_feature_snapshots
+    存储每次计算的特征向量快照，用于训练复现和推理分析。
+    """
+    __tablename__ = 'sc_feature_snapshots'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    node_id = Column(String(100), nullable=False, comment='节点ID（螺栓ID或法兰面ID')
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    compute_time = Column(DateTime, nullable=False, comment='特征计算时间（对应数据窗口的结束时间）')
+    feature_version = Column(String(20), nullable=False, comment='特征版本号')
+    vector = Column(Text, comment='特征向量 JSON 格式（便于调试）')
+    vector_bin = Column(BINARY, comment='特征向量二进制格式（节省存储空间）')
+    vector_dim = Column(Integer, comment='特征维度，用于快速校验')
+    source_window_hash = Column(String(64), comment='输入数据窗口的哈希值，用于数据溯源和去重')
+    source_window_start = Column(DateTime, comment='输入数据窗口起始时间')
+    source_window_end = Column(DateTime, comment='输入数据窗口结束时间')
+    data_source = Column(String(50), comment='数据来源：training/inference/debug')
+    model_version = Column(String(50), comment='关联的模型版本（推理时）')
+    prediction_result = Column(Text, comment='关联的预测结果快照 JSON（推理时）')
+    is_used_for_training = Column(Boolean, default=False, comment='是否已用于训练')
+    training_session_id = Column(String(100), comment='关联的训练会话ID')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_feature_node', 'node_type', 'node_id'),
+        Index('idx_feature_compute_time', 'compute_time'),
+        Index('idx_feature_version', 'feature_version'),
+        Index('idx_feature_window_hash', 'source_window_hash'),
+        Index('idx_feature_source', 'data_source'),
+        Index('idx_feature_training', 'is_used_for_training', 'training_session_id'),
+        Index('idx_feature_tenant_node', 'tenant_id', 'node_type', 'node_id'),
+        Index('idx_feature_tenant_time', 'tenant_id', 'create_time'),
+        Index('idx_feature_unique', 'node_id', 'compute_time', 'feature_version', 'source_window_hash', unique=True),
     )

@@ -726,6 +726,28 @@ class FocalLossConfig(BaseModel):
     alpha: Optional[List[float]] = Field(default=None, description="类别权重alpha列表")
 
 
+class FeatureSnapshotTrainingConfig(BaseModel):
+    """特征快照训练配置（保证训练可复现）"""
+    enabled: bool = Field(default=False, description="是否使用特征快照进行训练")
+    feature_version: str = Field(default="v1.0", description="特征版本 v1.0(58维)/v1.1(65维含工况)")
+    start_time: Optional[datetime] = Field(default=None, description="训练数据起始时间")
+    end_time: Optional[datetime] = Field(default=None, description="训练数据结束时间")
+    check_version_compatibility: bool = Field(default=True, description="是否检查特征版本兼容性")
+    mark_used_for_training: bool = Field(default=True, description="是否标记快照已用于训练")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "enabled": True,
+                "feature_version": "v1.0",
+                "start_time": "2025-01-01T00:00:00",
+                "end_time": "2025-06-01T00:00:00",
+                "check_version_compatibility": True,
+                "mark_used_for_training": True
+            }
+        }
+
+
 class TrainingConfigSchema(BaseModel):
     """完整训练配置"""
     epochs: Optional[int] = Field(default=None, description="总训练轮数")
@@ -737,6 +759,7 @@ class TrainingConfigSchema(BaseModel):
     class_imbalance: Optional[ClassImbalanceConfig] = Field(default=None, description="类别不平衡处理配置")
     incremental: Optional[IncrementalTrainingConfig] = Field(default=None, description="增量训练配置")
     focal_loss: Optional[FocalLossConfig] = Field(default=None, description="Focal Loss配置")
+    feature_snapshot: Optional[FeatureSnapshotTrainingConfig] = Field(default=None, description="特征快照训练配置")
 
 
 class EnhancedTrainingRequest(BaseModel):
@@ -6430,3 +6453,158 @@ class SyncStatusResponse(BaseModel):
     bolt_data_cursor: Optional[SyncCursorStatusSchema] = Field(None, description="原始数据同步游标状态")
     server_time: datetime = Field(..., description="服务器时间")
     sla_target_seconds: int = Field(60, description="SLA 目标延迟（秒）")
+
+
+# ============================================================
+# 特征存储相关模型
+# ============================================================
+
+class FeatureVersionInfoSchema(BaseModel):
+    """
+    特征 Schema 版本信息
+    """
+    version: str = Field(..., description="特征版本号，如 v1.0, v1.1")
+    dimension: int = Field(..., description="特征维度数量")
+    feature_names: List[str] = Field(default_factory=list, description="特征名称列表，按顺序排列")
+    feature_types: Optional[List[str]] = Field(None, description="特征类型列表")
+    description: Optional[str] = Field(None, description="版本变更说明")
+    is_active: bool = Field(True, description="是否为当前活跃版本")
+    compatible_versions: List[str] = Field(default_factory=list, description="兼容的旧版本列表")
+    breaking_change: bool = Field(False, description="是否为不兼容变更")
+
+    class Config:
+        from_attributes = True
+
+
+class FeatureSnapshotSchema(BaseModel):
+    """
+    特征快照信息
+    """
+    id: Optional[int] = Field(None, description="快照ID")
+    node_id: str = Field(..., description="节点ID（螺栓ID或法兰面ID")
+    node_type: str = Field(..., description="节点类型 bolt/flange")
+    compute_time: datetime = Field(..., description="特征计算时间")
+    feature_version: str = Field(..., description="特征版本号")
+    vector: List[float] = Field(default_factory=list, description="特征向量")
+    vector_dim: int = Field(..., description="特征维度")
+    source_window_hash: Optional[str] = Field(None, description="输入数据窗口哈希值")
+    source_window_start: Optional[datetime] = Field(None, description="输入数据窗口起始时间")
+    source_window_end: Optional[datetime] = Field(None, description="输入数据窗口结束时间")
+    data_source: Optional[str] = Field(None, description="数据来源：training/inference/debug")
+    model_version: Optional[str] = Field(None, description="关联的模型版本")
+    prediction_result: Optional[Dict[str, Any]] = Field(None, description="关联的预测结果")
+    is_used_for_training: bool = Field(False, description="是否已用于训练")
+    training_session_id: Optional[str] = Field(None, description="关联的训练会话ID")
+    create_time: Optional[datetime] = Field(None, description="创建时间")
+
+    class Config:
+        from_attributes = True
+
+
+class FeatureComputeRequest(BaseModel):
+    """
+    特征计算请求（调试用）
+    """
+    node_id: str = Field(..., description="节点ID")
+    node_type: str = Field("bolt", description="节点类型 bolt/flange")
+    data: List[float] = Field(..., description="输入时间序列数据")
+    timestamps: Optional[List[datetime]] = Field(None, description="时间戳列表")
+    feature_version: str = Field("v1.0", description="目标特征版本")
+    extra_data: Optional[Dict[str, Any]] = Field(None, description="额外的工况数据（v1.1 需要）")
+    data_source: str = Field("debug", description="数据来源")
+    save_snapshot: bool = Field(True, description="是否保存特征快照")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "node_id": "B001",
+                "node_type": "bolt",
+                "data": [1.2, 3.4, 5.6, 7.8, 9.0, 2.3, 4.5, 6.7, 8.9, 1.0],
+                "timestamps": [
+                    "2025-06-20T10:00:00",
+                    "2025-06-20T10:01:00",
+                    "2025-06-20T10:02:00"
+                ],
+                "feature_version": "v1.0",
+                "data_source": "debug",
+                "save_snapshot": True
+            }
+        }
+
+
+class FeatureComputeResponse(BaseModel):
+    """
+    特征计算响应
+    """
+    success: bool = Field(..., description="计算是否成功")
+    feature_version: str = Field(..., description="使用的特征版本")
+    vector: List[float] = Field(..., description="计算得到的特征向量")
+    vector_dim: int = Field(..., description="特征维度")
+    source_window_hash: str = Field(..., description="输入数据窗口哈希值")
+    compute_time: datetime = Field(..., description="计算时间")
+    snapshot_id: Optional[int] = Field(None, description="保存的快照ID")
+    is_duplicate: bool = Field(False, description="是否为重复快照（已存在）")
+    message: Optional[str] = Field(None, description="说明信息")
+
+
+class FeatureSnapshotListResponse(BaseModel):
+    """
+    特征快照列表响应
+    """
+    items: List[FeatureSnapshotSchema] = Field(default_factory=list, description="特征快照列表")
+    total: int = Field(..., description="总记录数")
+    node_id: str = Field(..., description="节点ID")
+    feature_version: Optional[str] = Field(None, description="过滤的特征版本")
+
+
+class FeatureVersionListResponse(BaseModel):
+    """
+    特征版本列表响应
+    """
+    versions: List[FeatureVersionInfoSchema] = Field(default_factory=list, description="特征版本列表")
+    latest_version: Optional[FeatureVersionInfoSchema] = Field(None, description="最新活跃版本")
+
+
+class FeatureVersionCompatibilityCheckRequest(BaseModel):
+    """
+    特征版本兼容性检查请求
+    """
+    target_version: str = Field(..., description="目标特征版本")
+    check_versions: List[str] = Field(..., description="待检查的版本列表")
+
+
+class FeatureVersionCompatibilityCheckResponse(BaseModel):
+    """
+    特征版本兼容性检查响应
+    """
+    is_compatible: bool = Field(..., description="是否全部兼容")
+    target_version: str = Field(..., description="目标版本")
+    incompatible_versions: List[str] = Field(default_factory=list, description="不兼容的版本列表")
+    compatible_versions: List[str] = Field(default_factory=list, description="兼容的版本列表")
+    message: Optional[str] = Field(None, description="说明信息")
+
+
+class TrainingFeatureLoadRequest(BaseModel):
+    """
+    训练特征加载请求
+    """
+    node_ids: List[str] = Field(..., description="节点ID列表")
+    feature_version: str = Field(..., description="目标特征版本")
+    node_type: str = Field("bolt", description="节点类型")
+    start_time: Optional[datetime] = Field(None, description="起始时间")
+    end_time: Optional[datetime] = Field(None, description="结束时间")
+    check_compatibility: bool = Field(True, description="是否检查版本兼容性")
+
+
+class TrainingFeatureLoadResponse(BaseModel):
+    """
+    训练特征加载响应
+    """
+    success: bool = Field(..., description="加载是否成功")
+    feature_matrix_shape: List[int] = Field(..., description="特征矩阵形状 [n_samples, n_features]")
+    sample_count: int = Field(..., description="样本数量")
+    feature_dim: int = Field(..., description="特征维度")
+    feature_version: str = Field(..., description="使用的特征版本")
+    node_count: int = Field(..., description="涉及的节点数量")
+    snapshot_ids: List[int] = Field(default_factory=list, description="加载的快照ID列表")
+    message: Optional[str] = Field(None, description="说明信息")

@@ -252,6 +252,17 @@ from app.api.schemas import (
     RegressionPerClassMetricsSchema,
     RegressionGateSchema, RegressionGateResponse,
     ModelVersionActivateGateRequest,
+    # 特征存储相关 Schema
+    FeatureVersionInfoSchema,
+    FeatureSnapshotSchema,
+    FeatureComputeRequest,
+    FeatureComputeResponse,
+    FeatureSnapshotListResponse,
+    FeatureVersionListResponse,
+    FeatureVersionCompatibilityCheckRequest,
+    FeatureVersionCompatibilityCheckResponse,
+    TrainingFeatureLoadRequest,
+    TrainingFeatureLoadResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -414,9 +425,12 @@ def get_federated_client(client_id: str):
 )
 async def predict_bolt(
     request: BoltPredictionRequest,
+    background_tasks: BackgroundTasks,
     validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式"),
     version: Optional[str] = Query(None, description="使用指定版本的模型进行预测"),
     shadow_version: Optional[str] = Query(None, description="Shadow模式版本号，仅预测不写库，用于A/B对比"),
+    feature_version: str = Query("v1.0", description="特征存储版本 v1.0(58维)/v1.1(65维含工况)"),
+    save_feature_snapshot: bool = Query(True, description="是否异步保存特征快照供后续分析"),
 ):
     """
     预测单个螺栓的状态
@@ -504,6 +518,58 @@ async def predict_bolt(
             shadow_result=result.get('shadow_result'),
             fault_detail=fault_detail_obj,
         )
+
+        # 异步保存特征快照（不影响主请求响应时间）
+        if save_feature_snapshot and not shadow_version:
+            try:
+                import numpy as np
+                from app.services.feature_store import get_feature_store
+
+                feature_store = get_feature_store()
+                data_array = np.array(values, dtype=np.float32)
+                ts_array = None
+                if timestamps:
+                    import pandas as pd
+                    ts_array = pd.to_datetime(timestamps).values
+
+                features, source_hash = feature_store.compute_features(
+                    data=data_array,
+                    timestamps=ts_array,
+                    feature_version=feature_version,
+                )
+
+                source_window_start = None
+                source_window_end = None
+                if ts_array is not None and len(ts_array) > 0:
+                    source_window_start = pd.Timestamp(ts_array[0]).to_pydatetime()
+                    source_window_end = pd.Timestamp(ts_array[-1]).to_pydatetime()
+
+                prediction_snapshot = {
+                    'status': result['status'],
+                    'status_code': result['status_code'],
+                    'confidence': float(result['confidence']),
+                    'risk_score': float(result['risk_score']),
+                    'risk_level': result['risk_level'],
+                    'model_version': result.get('model_version'),
+                    'model_type': result.get('model_type'),
+                    'prediction_source': result.get('prediction_source'),
+                }
+
+                feature_store.async_save_snapshot(
+                    background_tasks=background_tasks,
+                    node_id=str(bolt_id),
+                    node_type='bolt',
+                    feature_vector=features,
+                    feature_version=feature_version,
+                    source_window_hash=source_hash,
+                    source_window_start=source_window_start,
+                    source_window_end=source_window_end,
+                    data_source='inference',
+                    model_version=result.get('model_version'),
+                    prediction_result=prediction_snapshot,
+                )
+            except Exception as e:
+                logger.warning(f"添加特征快照异步任务失败，不影响预测结果: {e}")
 
         return response
 
@@ -871,9 +937,12 @@ async def predict_bolt_multivariate(
 )
 async def predict_flange(
     request: FlangePredictionRequest,
+    background_tasks: BackgroundTasks,
     validation_mode: str = Query("strict", description="校验模式: strict=严格模式, lenient=宽松模式"),
     version: Optional[str] = Query(None, description="使用指定版本的模型进行预测"),
     shadow_version: Optional[str] = Query(None, description="Shadow模式版本号，仅预测不写库，用于A/B对比"),
+    feature_version: str = Query("v1.0", description="特征存储版本 v1.0(58维)/v1.1(65维含工况)"),
+    save_feature_snapshot: bool = Query(True, description="是否异步保存特征快照供后续分析"),
 ):
     """
     预测法兰面的整体状态
@@ -936,7 +1005,7 @@ async def predict_flange(
                 pattern=pattern_obj,
             )
 
-        return FlangePredictionResponse(
+        response = FlangePredictionResponse(
             flange_id=flange_id,
             status=result['status'],
             status_code=result['status_code'],
@@ -959,6 +1028,49 @@ async def predict_flange(
             shadow_result=result.get('shadow_result'),
             fault_detail=fault_detail_obj,
         )
+
+        # 异步保存特征快照（不影响主请求响应时间）
+        if save_feature_snapshot and not shadow_version:
+            try:
+                import numpy as np
+                from app.services.feature_store import get_feature_store
+
+                feature_store = get_feature_store()
+
+                # 为法兰面整体计算特征（使用所有螺栓数据的聚合）
+                if len(multi_bolt_data) > 0:
+                    aggregated_data = np.mean(np.array(multi_bolt_data, dtype=np.float32), axis=0)
+                    features, source_hash = feature_store.compute_features(
+                        data=aggregated_data,
+                        feature_version=feature_version,
+                    )
+
+                    prediction_snapshot = {
+                        'status': result['status'],
+                        'status_code': result['status_code'],
+                        'confidence': float(result['confidence']),
+                        'risk_score': float(result['risk_score']),
+                        'risk_level': result['risk_level'],
+                        'model_version': result.get('model_version'),
+                        'bolt_count': len(multi_bolt_data),
+                        'leading_bolts': result.get('leading_bolts'),
+                    }
+
+                    feature_store.async_save_snapshot(
+                        background_tasks=background_tasks,
+                        node_id=str(flange_id),
+                        node_type='flange',
+                        feature_vector=features,
+                        feature_version=feature_version,
+                        source_window_hash=source_hash,
+                        data_source='inference',
+                        model_version=result.get('model_version'),
+                        prediction_result=prediction_snapshot,
+                    )
+            except Exception as e:
+                logger.warning(f"添加法兰面特征快照异步任务失败，不影响预测结果: {e}")
+
+        return response
 
     except HTTPException:
         raise
@@ -14722,4 +14834,363 @@ async def get_scenario_parameter_docs():
         raise
     except Exception as e:
         logger.error(f"获取场景参数文档失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================================
+# 特征存储 API - Feature Store
+# =====================================================================
+
+
+_feature_store_instance = None
+
+
+def get_feature_store_router_instance():
+    """懒加载特征存储服务实例"""
+    global _feature_store_instance
+    if _feature_store_instance is None:
+        from app.services.feature_store import get_feature_store
+        _feature_store_instance = get_feature_store()
+    return _feature_store_instance
+
+
+@router.get(
+    "/features/versions",
+    tags=["特征存储"],
+    summary="获取所有特征版本信息",
+    response_model=FeatureVersionListResponse,
+)
+async def get_feature_versions():
+    """
+    获取所有活跃的特征 Schema 版本信息，包括最新版本。
+    """
+    try:
+        store = get_feature_store_router_instance()
+        versions = store.get_active_versions()
+        latest = store.get_latest_version()
+
+        return FeatureVersionListResponse(
+            versions=[FeatureVersionInfoSchema(
+                version=v.version,
+                dimension=v.dimension,
+                feature_names=v.feature_names,
+                feature_types=v.feature_types,
+                description=v.description,
+                is_active=v.is_active,
+                compatible_versions=v.compatible_versions,
+                breaking_change=v.breaking_change,
+            ) for v in versions],
+            latest_version=FeatureVersionInfoSchema(
+                version=latest.version,
+                dimension=latest.dimension,
+                feature_names=latest.feature_names,
+                feature_types=latest.feature_types,
+                description=latest.description,
+                is_active=latest.is_active,
+                compatible_versions=latest.compatible_versions,
+                breaking_change=latest.breaking_change,
+            ) if latest else None,
+        )
+    except Exception as e:
+        logger.error(f"获取特征版本失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/features/{node_id}/latest",
+    tags=["特征存储"],
+    summary="获取指定节点的最新特征快照",
+    response_model=FeatureSnapshotSchema,
+)
+async def get_latest_feature(
+    node_id: str,
+    node_type: str = Query("bolt", description="节点类型 bolt/flange"),
+    feature_version: str = Query(None, description="过滤指定版本的特征"),
+):
+    """
+    获取指定节点的最新特征快照。
+
+    - **node_id**: 节点ID（螺栓ID或法兰面ID）
+    - **node_type**: 节点类型（bolt/flange）
+    - **feature_version**: 可选，过滤指定版本的特征
+    """
+    try:
+        store = get_feature_store_router_instance()
+        snapshot = store.get_latest_snapshot(
+            node_id=node_id,
+            node_type=node_type,
+            feature_version=feature_version,
+        )
+
+        if not snapshot:
+            raise HTTPException(
+                status_code=404,
+                detail=f"未找到节点 {node_id} 的特征快照"
+            )
+
+        return FeatureSnapshotSchema(
+            id=snapshot.id,
+            node_id=snapshot.node_id,
+            node_type=snapshot.node_type,
+            compute_time=snapshot.compute_time,
+            feature_version=snapshot.feature_version,
+            vector=snapshot.vector.tolist(),
+            vector_dim=snapshot.vector_dim,
+            source_window_hash=snapshot.source_window_hash,
+            source_window_start=snapshot.source_window_start,
+            source_window_end=snapshot.source_window_end,
+            data_source=snapshot.data_source,
+            model_version=snapshot.model_version,
+            prediction_result=snapshot.prediction_result,
+            is_used_for_training=snapshot.is_used_for_training,
+            training_session_id=snapshot.training_session_id,
+            create_time=snapshot.create_time,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取最新特征失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/features/{node_id}",
+    tags=["特征存储"],
+    summary="列出指定节点的特征快照",
+    response_model=FeatureSnapshotListResponse,
+)
+async def list_feature_snapshots(
+    node_id: str,
+    node_type: str = Query("bolt", description="节点类型 bolt/flange"),
+    feature_version: str = Query(None, description="过滤指定版本的特征"),
+    start_time: str = Query(None, description="起始时间 ISO 格式"),
+    end_time: str = Query(None, description="结束时间 ISO 格式"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量上限"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """
+    列出指定节点的特征快照，支持按时间范围和版本过滤。
+    """
+    try:
+        store = get_feature_store_router_instance()
+        snapshots, total = store.list_snapshots(
+            node_id=node_id,
+            node_type=node_type,
+            feature_version=feature_version,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            offset=offset,
+        )
+
+        items = []
+        for snap in snapshots:
+            items.append(FeatureSnapshotSchema(
+                id=snap.id,
+                node_id=snap.node_id,
+                node_type=snap.node_type,
+                compute_time=snap.compute_time,
+                feature_version=snap.feature_version,
+                vector=snap.vector.tolist(),
+                vector_dim=snap.vector_dim,
+                source_window_hash=snap.source_window_hash,
+                source_window_start=snap.source_window_start,
+                source_window_end=snap.source_window_end,
+                data_source=snap.data_source,
+                model_version=snap.model_version,
+                prediction_result=snap.prediction_result,
+                is_used_for_training=snap.is_used_for_training,
+                training_session_id=snap.training_session_id,
+                create_time=snap.create_time,
+            ))
+
+        return FeatureSnapshotListResponse(
+            items=items,
+            total=total,
+            node_id=node_id,
+            feature_version=feature_version,
+        )
+    except Exception as e:
+        logger.error(f"列出特征快照失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/features/compute",
+    tags=["特征存储"],
+    summary="计算特征（调试接口）",
+    response_model=FeatureComputeResponse,
+)
+async def compute_feature(
+    request: FeatureComputeRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    计算特征向量并可选保存快照（调试用）。
+
+    - **node_id**: 节点ID
+    - **node_type**: 节点类型
+    - **data**: 输入时间序列数据
+    - **timestamps**: 时间戳列表（可选）
+    - **feature_version**: 目标特征版本（v1.0/v1.1）
+    - **extra_data**: 额外工况数据（v1.1 需要）
+    - **save_snapshot**: 是否保存特征快照
+    """
+    try:
+        import numpy as np
+        store = get_feature_store_router_instance()
+
+        data = np.array(request.data, dtype=np.float32)
+        timestamps = None
+        if request.timestamps:
+            timestamps = np.array(request.timestamps)
+
+        compute_time = datetime.now()
+        features, source_hash = store.compute_features(
+            data=data,
+            timestamps=timestamps,
+            feature_version=request.feature_version,
+            extra_data=request.extra_data,
+        )
+
+        snapshot_id = None
+        is_duplicate = False
+        message = None
+
+        if request.save_snapshot:
+            from datetime import datetime
+            import pandas as pd
+
+            source_window_start = None
+            source_window_end = None
+            if timestamps is not None and len(timestamps) > 0:
+                if isinstance(timestamps[0], datetime):
+                    source_window_start = timestamps[0]
+                    source_window_end = timestamps[-1]
+                else:
+                    source_window_start = pd.Timestamp(timestamps[0]).to_pydatetime()
+                    source_window_end = pd.Timestamp(timestamps[-1]).to_pydatetime()
+
+            snapshot = store.save_snapshot(
+                node_id=request.node_id,
+                node_type=request.node_type,
+                feature_vector=features,
+                feature_version=request.feature_version,
+                source_window_hash=source_hash,
+                compute_time=compute_time,
+                source_window_start=source_window_start,
+                source_window_end=source_window_end,
+                data_source=request.data_source,
+            )
+
+            if snapshot is None:
+                is_duplicate = True
+                existing = store.get_snapshot_by_hash(
+                    request.node_id, source_hash, request.feature_version
+                )
+                if existing:
+                    snapshot_id = existing.id
+                message = "相同输入的特征快照已存在，返回已有快照"
+            else:
+                snapshot_id = snapshot.id
+
+        return FeatureComputeResponse(
+            success=True,
+            feature_version=request.feature_version,
+            vector=features.tolist(),
+            vector_dim=len(features),
+            source_window_hash=source_hash,
+            compute_time=compute_time,
+            snapshot_id=snapshot_id,
+            is_duplicate=is_duplicate,
+            message=message,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"计算特征失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/features/check-compatibility",
+    tags=["特征存储"],
+    summary="检查特征版本兼容性",
+    response_model=FeatureVersionCompatibilityCheckResponse,
+)
+async def check_feature_compatibility(
+    request: FeatureVersionCompatibilityCheckRequest,
+):
+    """
+    检查多个特征版本与目标版本的兼容性。
+
+    如果存在不兼容版本（breaking_change=1），则 is_compatible=false。
+    """
+    try:
+        store = get_feature_store_router_instance()
+        incompatible = []
+        compatible = []
+
+        for v in set(request.check_versions):
+            try:
+                if store.check_version_compatibility(request.target_version, v):
+                    compatible.append(v)
+                else:
+                    incompatible.append(v)
+            except ValueError as e:
+                incompatible.append(f"{v}(不存在)")
+
+        return FeatureVersionCompatibilityCheckResponse(
+            is_compatible=len(incompatible) == 0,
+            target_version=request.target_version,
+            incompatible_versions=incompatible,
+            compatible_versions=compatible,
+            message="所有版本兼容" if not incompatible else f"存在 {len(incompatible)} 个不兼容版本",
+        )
+    except Exception as e:
+        logger.error(f"检查版本兼容性失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/features/training/load",
+    tags=["特征存储"],
+    summary="加载训练用特征数据集",
+    response_model=TrainingFeatureLoadResponse,
+)
+async def load_training_features(
+    request: TrainingFeatureLoadRequest,
+):
+    """
+    从特征快照中加载训练用的特征数据集。
+
+    会自动检查版本兼容性，如存在不兼容版本则拒绝加载。
+    """
+    try:
+        store = get_feature_store_router_instance()
+        feature_matrix, snapshots = store.load_training_features(
+            node_ids=request.node_ids,
+            feature_version=request.feature_version,
+            node_type=request.node_type,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            check_compatibility=request.check_compatibility,
+        )
+
+        snapshot_ids = [s.id for s in snapshots if s.id is not None]
+
+        return TrainingFeatureLoadResponse(
+            success=True,
+            feature_matrix_shape=list(feature_matrix.shape),
+            sample_count=feature_matrix.shape[0] if len(feature_matrix.shape) > 0 else 0,
+            feature_dim=feature_matrix.shape[1] if len(feature_matrix.shape) > 1 else 0,
+            feature_version=request.feature_version,
+            node_count=len(request.node_ids),
+            snapshot_ids=snapshot_ids,
+            message=f"成功加载 {len(snapshots)} 条特征快照" if snapshots else "没有找到符合条件的特征快照",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"加载训练特征失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

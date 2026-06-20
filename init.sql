@@ -2581,3 +2581,101 @@ CREATE TABLE IF NOT EXISTS sc_webhook_dead_letters (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Webhook死信队列表';
 
 SHOW TABLES LIKE '%webhook%';
+
+-- ============================================================
+-- 特征存储模块 - Feature Store
+-- ============================================================
+
+-- ============================================================
+-- 特征 Schema 版本表
+-- 管理特征向量的结构定义，保证训练和推理使用一致的特征结构
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_feature_schema_versions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    version VARCHAR(20) NOT NULL UNIQUE COMMENT '特征版本号，如 v1.0, v1.1',
+    dimension INT NOT NULL COMMENT '特征维度数量',
+    feature_names TEXT NOT NULL COMMENT '特征名称列表 JSON，按顺序排列',
+    feature_types TEXT COMMENT '特征类型列表 JSON，如 ["numeric", "numeric", "categorical"]',
+    description TEXT COMMENT '版本变更说明',
+    is_active TINYINT(1) DEFAULT 1 COMMENT '是否为当前活跃版本',
+    compatible_versions TEXT COMMENT '兼容的旧版本列表 JSON，如 ["v1.0"]',
+    breaking_change TINYINT(1) DEFAULT 0 COMMENT '是否为不兼容变更',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_schema_version (version),
+    INDEX idx_schema_active (is_active),
+    INDEX idx_schema_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='特征Schema版本表';
+
+-- ============================================================
+-- 特征快照表
+-- 存储每次计算的特征向量快照，用于训练复现和推理分析
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_feature_snapshots (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID（螺栓ID或法兰面ID）',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型 bolt/flange',
+    compute_time DATETIME NOT NULL COMMENT '特征计算时间（对应数据窗口的结束时间）',
+    feature_version VARCHAR(20) NOT NULL COMMENT '特征版本号，关联 sc_feature_schema_versions.version',
+    vector JSON COMMENT '特征向量 JSON 格式（便于调试）',
+    vector_bin BLOB COMMENT '特征向量二进制格式（节省存储空间）',
+    vector_dim INT COMMENT '特征维度，用于快速校验',
+    source_window_hash VARCHAR(64) COMMENT '输入数据窗口的哈希值，用于数据溯源和去重',
+    source_window_start DATETIME COMMENT '输入数据窗口起始时间',
+    source_window_end DATETIME COMMENT '输入数据窗口结束时间',
+    data_source VARCHAR(50) COMMENT '数据来源：training/inference/debug',
+    model_version VARCHAR(50) COMMENT '关联的模型版本（推理时）',
+    prediction_result TEXT COMMENT '关联的预测结果快照 JSON（推理时）',
+    is_used_for_training TINYINT(1) DEFAULT 0 COMMENT '是否已用于训练',
+    training_session_id VARCHAR(100) COMMENT '关联的训练会话ID',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_feature_node (node_type, node_id),
+    INDEX idx_feature_compute_time (compute_time),
+    INDEX idx_feature_version (feature_version),
+    INDEX idx_feature_window_hash (source_window_hash),
+    INDEX idx_feature_source (data_source),
+    INDEX idx_feature_training (is_used_for_training, training_session_id),
+    INDEX idx_feature_tenant_node (tenant_id, node_type, node_id),
+    INDEX idx_feature_tenant_time (tenant_id, compute_time),
+    UNIQUE KEY idx_feature_unique (node_id, compute_time, feature_version, source_window_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='特征快照表';
+
+-- ============================================================
+-- 初始化特征 Schema 版本
+-- ============================================================
+
+-- v1.0: 58维基础特征
+INSERT INTO sc_feature_schema_versions (
+    version, dimension, feature_names, feature_types,
+    description, is_active, compatible_versions, breaking_change
+) VALUES (
+    'v1.0',
+    58,
+    '["rolling_mean_5","rolling_std_5","rolling_max_5","rolling_min_5","rolling_mean_10","rolling_std_10","rolling_max_10","rolling_min_10","rolling_mean_20","rolling_std_20","rolling_max_20","rolling_min_20","rolling_mean_50","rolling_std_50","rolling_max_50","rolling_min_50","trend_slope","trend_intercept","fft_dominant_freq","fft_dominant_amplitude","fft_second_freq","fft_second_amplitude","autocorr_lag1","autocorr_lag5","mean","std","median","skewness","kurtosis","max_value","min_value","range","mean_abs_change","change_std","max_increase","max_decrease","q25","q75","iqr","zero_crossing_rate","signal_energy","safety_deviation_ratio","below_min_ratio","above_max_ratio","warning_zone_ratio","critical_zone_ratio","has_sudden_drop","recent_trend_slope","volatility_increase","consecutive_below_ratio","recovery_count","coefficient_of_variation"]',
+    '["numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric"]',
+    '初始版本，包含58维时序统计特征和领域特征',
+    1,
+    '[]',
+    0
+);
+
+-- v1.1: 新增工况特征，共65维（不兼容旧版本）
+INSERT INTO sc_feature_schema_versions (
+    version, dimension, feature_names, feature_types,
+    description, is_active, compatible_versions, breaking_change
+) VALUES (
+    'v1.1',
+    65,
+    '["rolling_mean_5","rolling_std_5","rolling_max_5","rolling_min_5","rolling_mean_10","rolling_std_10","rolling_max_10","rolling_min_10","rolling_mean_20","rolling_std_20","rolling_max_20","rolling_min_20","rolling_mean_50","rolling_std_50","rolling_max_50","rolling_min_50","trend_slope","trend_intercept","fft_dominant_freq","fft_dominant_amplitude","fft_second_freq","fft_second_amplitude","autocorr_lag1","autocorr_lag5","mean","std","median","skewness","kurtosis","max_value","min_value","range","mean_abs_change","change_std","max_increase","max_decrease","q25","q75","iqr","zero_crossing_rate","signal_energy","safety_deviation_ratio","below_min_ratio","above_max_ratio","warning_zone_ratio","critical_zone_ratio","has_sudden_drop","recent_trend_slope","volatility_increase","consecutive_below_ratio","recovery_count","coefficient_of_variation","wc_temperature_level","wc_humidity_level","wc_pressure_level","wc_vibration_level","wc_operating_mode","wc_load_factor","wc_seasonal_factor"]',
+    '["numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric","numeric"]',
+    '新增7维工况特征：温度等级、湿度等级、压力等级、振动等级、运行模式、负载系数、季节因子。维度从58增加到65，为不兼容变更。',
+    1,
+    '[]',
+    1
+);
+
+-- 显示特征存储相关表
+SHOW TABLES LIKE '%feature%';
+SHOW COLUMNS FROM sc_feature_snapshots;
+SHOW COLUMNS FROM sc_feature_schema_versions;
