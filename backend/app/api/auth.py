@@ -49,7 +49,7 @@ from app.utils.config import config
 
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-PERMISSION_HIERARCHY = {"read": 0, "write": 1, "admin": 2}
+PERMISSION_HIERARCHY = {"read": 0, "write": 1, "admin": 2, "sync:read": 0}
 
 ENDPOINT_PERMISSION_MAP = {
     "read": [
@@ -70,6 +70,10 @@ ENDPOINT_PERMISSION_MAP = {
         "/federated/round/status", "/federated/model/history",
         "/anomaly/list", "/anomaly/statistics",
         "/cmms/configs", "/cmms/sync-logs",
+        "/sync/predictions", "/sync/bolt-data", "/sync/status",
+    ],
+    "sync:read": [
+        "/sync/predictions", "/sync/bolt-data", "/sync/status",
     ],
     "write": [
         "/model/train", "/model/train/enhanced",

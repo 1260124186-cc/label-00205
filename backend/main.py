@@ -33,6 +33,7 @@ from app import __version__
 from app.api.routes import router
 from app.api.sso_routes import router as sso_router
 from app.api.timeseries_routes import router as timeseries_router
+from app.api.sync_routes import router as sync_router
 from app.schedulers.scheduler import scheduler
 from app.utils.config import config
 from app.utils.database import db_manager
@@ -230,7 +231,25 @@ def create_app() -> FastAPI:
 - **风险评估**: 评估螺栓/法兰面的风险等级
 - **月度预测**: 预测未来30天的状态趋势
 - **模型管理**: 训练和管理预测模型
+- **下游增量同步 API**: 基于游标的数据增量同步（预测结果 & 原始数据）
 - **监控指标**: Prometheus 格式的 /metrics 端点
+
+## 下游增量同步 API
+
+### 端点
+- `GET /api/v1/sync/predictions?since_id=12345&limit=500` - 预测结果增量同步
+- `GET /api/v1/sync/bolt-data?since_time=...` - 螺栓原始数据增量（支持脱敏）
+- `GET /api/v1/sync/status` - 同步游标状态查询
+
+### 核心特性
+- 基于单调递增 `id` 或 `update_time` 游标拉取增量
+- 支持 `If-None-Match` / `ETag` 减少带宽
+- 租户级游标隔离（X-Tenant-API-Key / X-Tenant-Token）
+- API Key 权限: `sync:read`（`read` 权限同样兼容）
+
+### SLA
+- **增量延迟 < 1 分钟**（批处理场景）
+- 响应头包含 `X-SLA-Latency` 实时延迟指标
 
 ## 状态类别
 
@@ -273,6 +292,7 @@ def create_app() -> FastAPI:
     app.include_router(router, prefix="/api/v1")
     app.include_router(sso_router)
     app.include_router(timeseries_router, prefix="/api/v1")
+    app.include_router(sync_router, prefix="/api/v1")
 
     from app.api.routes import public_router
     app.include_router(public_router, prefix="/api/v1")

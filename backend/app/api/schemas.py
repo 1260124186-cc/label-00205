@@ -6256,3 +6256,177 @@ class ModelVersionActivateGateRequest(ModelVersionActivateRequest):
     skip_regression_gate: bool = Field(
         False, description="是否跳过回归门禁（admin override，审计日志将记录）",
     )
+
+
+# ============================================================
+# 下游增量同步 API Schema
+# ============================================================
+
+# ---------- 预测结果增量同步 ----------
+
+class SyncPredictionItemSchema(BaseModel):
+    """
+    同步预测结果单条记录
+
+    对应 sci_abnormal_prediction 表的完整字段
+    """
+    id: int = Field(..., description="记录ID（单调递增，用作游标）")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+    bolt_id: Optional[int] = Field(None, description="螺栓编码")
+    flm_id: Optional[str] = Field(None, description="法兰面组编码")
+    node_type: Optional[str] = Field(None, description="节点类型（螺栓/法兰面）")
+    year_month: Optional[str] = Field(None, description="年月")
+    pw_type: Optional[str] = Field(None, description="预警预测类型")
+    begin_time: Optional[datetime] = Field(None, description="预计发生起始时间")
+    end_time: Optional[datetime] = Field(None, description="预计发生结束时间")
+    confidence: Optional[float] = Field(None, description="预测置信度")
+    rec_measures: Optional[str] = Field(None, description="推荐措施")
+    recent_time: Optional[datetime] = Field(None, description="状态时间")
+    fault_type: Optional[str] = Field(None, description="故障类型：loosening/overload/fracture/fatigue/corrosion")
+    fault_confidence: Optional[float] = Field(None, description="故障分类置信度")
+    fault_evidence: Optional[Dict[str, Any]] = Field(None, description="故障证据JSON（已解析为字典）")
+    create_time: Optional[datetime] = Field(None, description="创建时间")
+
+    class Config:
+        from_attributes = True
+
+
+class SyncPredictionsResponse(BaseModel):
+    """
+    预测结果增量同步响应
+
+    SLA: 增量延迟 < 1 分钟（批处理场景）
+    """
+    items: List[SyncPredictionItemSchema] = Field(default_factory=list, description="预测结果记录列表")
+    next_since_id: int = Field(..., description="下次请求的 since_id 游标（返回结果中最大的 id，无数据时等于传入的 since_id）")
+    has_more: bool = Field(False, description="是否还有更多数据")
+    limit: int = Field(..., description="本次请求的 limit 参数")
+    returned_count: int = Field(..., description="实际返回记录数")
+    server_time: datetime = Field(..., description="服务器时间，用于时钟偏差校准")
+    data_source: str = Field("mysql", description="数据源：mysql/timeseries")
+    sla_latency_seconds: Optional[float] = Field(None, description="最新记录相对于服务器时间的延迟（秒），用于验证 SLA")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "items": [
+                    {
+                        "id": 12346,
+                        "tenant_id": 1,
+                        "bolt_id": 1001,
+                        "flm_id": None,
+                        "node_type": "螺栓",
+                        "year_month": "202506",
+                        "pw_type": "关注级预警",
+                        "confidence": 0.82,
+                        "fault_type": "loosening",
+                        "fault_confidence": 0.75,
+                        "create_time": "2025-06-20T10:30:00"
+                    }
+                ],
+                "next_since_id": 12346,
+                "has_more": False,
+                "limit": 500,
+                "returned_count": 1,
+                "server_time": "2025-06-20T10:31:00",
+                "data_source": "mysql",
+                "sla_latency_seconds": 60.0
+            }
+        }
+
+
+# ---------- 螺栓原始数据增量同步 ----------
+
+class SyncBoltDataItemSchema(BaseModel):
+    """
+    同步螺栓原始数据单条记录（支持脱敏模式）
+
+    对应 sc_bolt_data 表
+    """
+    id: int = Field(..., description="记录ID（单调递增）")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+    sensor_id: Optional[int] = Field(None, description="通道ID/螺栓ID")
+    collector_id: Optional[int] = Field(None, description="采集器ID")
+    splitter_num: Optional[int] = Field(None, description="分线器ID")
+    position: Optional[str] = Field(None, description="安装位置")
+    ptf: Optional[float] = Field(None, description="预紧力值")
+    temperature: Optional[float] = Field(None, description="环境温度 (°C)")
+    humidity: Optional[float] = Field(None, description="环境湿度 (%)")
+    vibration: Optional[float] = Field(None, description="振动加速度 (g)")
+    torque: Optional[float] = Field(None, description="拧紧扭矩 (N·m)")
+    pressure: Optional[float] = Field(None, description="介质压力 (MPa)")
+    data_quality: Optional[str] = Field(None, description="数据质量 full/partial/degraded")
+    missing_channels: Optional[List[str]] = Field(None, description="缺失通道列表")
+    create_time: Optional[datetime] = Field(None, description="创建时间")
+
+    class Config:
+        from_attributes = True
+
+
+class SyncBoltDataResponse(BaseModel):
+    """
+    螺栓原始数据增量同步响应
+
+    SLA: 增量延迟 < 1 分钟（批处理场景）
+    """
+    items: List[SyncBoltDataItemSchema] = Field(default_factory=list, description="螺栓原始数据记录列表")
+    next_since_id: int = Field(..., description="下次请求的 since_id 游标")
+    next_since_time: Optional[datetime] = Field(None, description="下次请求的 since_time 游标（基于时间的游标）")
+    has_more: bool = Field(False, description="是否还有更多数据")
+    limit: int = Field(..., description="本次请求的 limit 参数")
+    returned_count: int = Field(..., description="实际返回记录数")
+    server_time: datetime = Field(..., description="服务器时间，用于时钟偏差校准")
+    data_source: str = Field("mysql", description="数据源：mysql/timeseries")
+    desensitized: bool = Field(False, description="是否已脱敏（敏感字段已移除或哈希处理）")
+    sla_latency_seconds: Optional[float] = Field(None, description="最新记录相对于服务器时间的延迟（秒），用于验证 SLA")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "items": [
+                    {
+                        "id": 567890,
+                        "tenant_id": 1,
+                        "sensor_id": 1001,
+                        "ptf": 602.5,
+                        "temperature": 25.3,
+                        "humidity": 45.2,
+                        "create_time": "2025-06-20T10:30:00"
+                    }
+                ],
+                "next_since_id": 567890,
+                "next_since_time": "2025-06-20T10:30:00",
+                "has_more": True,
+                "limit": 500,
+                "returned_count": 1,
+                "server_time": "2025-06-20T10:31:00",
+                "data_source": "mysql",
+                "desensitized": False,
+                "sla_latency_seconds": 60.0
+            }
+        }
+
+
+# ---------- 同步游标状态 ----------
+
+class SyncCursorStatusSchema(BaseModel):
+    """
+    租户级同步游标状态信息
+    """
+    tenant_id: int = Field(..., description="租户ID")
+    resource: str = Field(..., description="资源类型：predictions / bolt-data")
+    last_since_id: Optional[int] = Field(None, description="最后消费的记录ID")
+    last_since_time: Optional[datetime] = Field(None, description="最后消费的时间点")
+    last_sync_time: Optional[datetime] = Field(None, description="最后同步时间")
+    total_consumed: int = Field(0, description="该租户累计已同步记录数")
+
+
+class SyncStatusResponse(BaseModel):
+    """
+    同步状态总览响应
+    """
+    tenant_id: int = Field(..., description="当前租户ID")
+    predictions_cursor: Optional[SyncCursorStatusSchema] = Field(None, description="预测结果同步游标状态")
+    bolt_data_cursor: Optional[SyncCursorStatusSchema] = Field(None, description="原始数据同步游标状态")
+    server_time: datetime = Field(..., description="服务器时间")
+    sla_target_seconds: int = Field(60, description="SLA 目标延迟（秒）")
