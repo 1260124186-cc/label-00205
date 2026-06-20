@@ -610,6 +610,7 @@ class PredictionOrchestrator:
         probs = None
         prediction_source = 'rule'
         ensemble_result: Optional[EnsemblePrediction] = None
+        uncertainty_metrics_dict: Optional[Dict[str, Any]] = None
 
         # Step 0: 原始数据热写入时序库（可选）
         if save_to_db and not is_shadow:
@@ -662,6 +663,38 @@ class PredictionOrchestrator:
             )
             model_type = 'lstm'
             prediction_source = 'lstm'
+
+            # Step 2.5: Monte Carlo Dropout 不确定性量化
+            uncertainty_enabled = config.get(
+                'model.uncertainty.enabled', True
+            )
+            if uncertainty_enabled:
+                try:
+                    n_mc_samples = config.get(
+                        'model.uncertainty.mc_samples', 30
+                    )
+                    uncertainty_result = model.predict_with_uncertainty(
+                        processed.data,
+                        n_samples=n_mc_samples,
+                        features=feature_vector,
+                    )
+                    uncertainty_metrics_dict = {
+                        'status_prob_mean': uncertainty_result['status_prob_mean'].tolist(),
+                        'status_prob_std': uncertainty_result['status_prob_std'].tolist(),
+                        'epistemic_uncertainty': uncertainty_result['epistemic_uncertainty'],
+                        'confidence': uncertainty_result['confidence'],
+                        'confidence_lower': uncertainty_result['confidence_lower'],
+                        'confidence_upper': uncertainty_result['confidence_upper'],
+                        'n_samples': uncertainty_result['n_samples'],
+                    }
+                    logger.debug(
+                        f"MC Dropout 不确定性量化完成: 螺栓 {bolt_id}, "
+                        f"epistemic={uncertainty_result['epistemic_uncertainty']:.4f}, "
+                        f"prob_std_max={uncertainty_result['status_prob_std'].max():.4f}"
+                    )
+                except Exception as e:
+                    logger.warning(f"MC Dropout 不确定性量化失败，跳过: {e}")
+                    uncertainty_metrics_dict = None
         else:
             original_status_code, confidence, probs = self.rule_classifier.predict(data)
             model_type = 'rule'
@@ -913,7 +946,11 @@ class PredictionOrchestrator:
         except Exception as e:
             logger.debug(f"设备健康惩罚查询失败，跳过: {e}")
 
-        # Step 5: 应用预警策略（融合工况信息）
+        # Step 5: 应用预警策略（融合工况信息 + 不确定性联动）
+        epistemic_uncertainty = (
+            uncertainty_metrics_dict.get('epistemic_uncertainty')
+            if uncertainty_metrics_dict else None
+        )
         final_status_code, final_status = self._apply_warning_with_condition(
             original_status_code=original_status_code,
             original_status=original_status,
@@ -921,6 +958,7 @@ class PredictionOrchestrator:
             risk_assessment=risk_assessment,
             condition=condition_for_risk,
             bolt_id=bolt_id,
+            epistemic_uncertainty=epistemic_uncertainty,
         )
 
         # 推荐措施（优先用模型建议，兜底使用风险评估建议）
@@ -1056,6 +1094,7 @@ class PredictionOrchestrator:
             'fault_detail': fault_detail,
             'ensemble': ensemble_detail,
             'working_condition': working_condition_info if working_condition_info else None,
+            'uncertainty_metrics': uncertainty_metrics_dict,
         }
 
         # Step 5: 审计快照
@@ -1075,6 +1114,7 @@ class PredictionOrchestrator:
                 final_status=final_status,
                 recommendations=risk_assessment.recommendations,
                 working_condition=working_condition_info if working_condition_info else None,
+                uncertainty_metrics=uncertainty_metrics_dict,
             )
         except Exception as e:
             logger.warning(f"螺栓 {bolt_id} 审计快照记录异常: {e}")
@@ -2796,12 +2836,13 @@ class PredictionOrchestrator:
         multi_bolt_data: Optional[List[np.ndarray]] = None,
         working_condition: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        uncertainty_metrics: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         记录预测审计快照
 
         收集完整的预测上下文，包括输入哈希、模型版本、
-        特征摘要、中间结果、最终决策、策略版本、可解释性报告。
+        特征摘要、中间结果、最终决策、策略版本、可解释性报告、不确定性度量。
         """
         from app.services.audit import AuditService, ExplainabilityService
 
@@ -2882,6 +2923,7 @@ class PredictionOrchestrator:
             strategy_version=strategy_version,
             strategy_type=self.warning_policy.strategy_type,
             explainability=explain_report,
+            uncertainty_metrics=uncertainty_metrics,
         )
 
     def _adjust_confidence_by_condition(
@@ -3128,6 +3170,7 @@ class PredictionOrchestrator:
         risk_assessment: RiskAssessment,
         condition: Optional[WorkingCondition] = None,
         bolt_id: str = '',
+        epistemic_uncertainty: Optional[float] = None,
     ) -> Tuple[int, str]:
         """
         带工况感知的预警策略应用
@@ -3137,6 +3180,9 @@ class PredictionOrchestrator:
         - 升/降负荷：提高报警门槛（变化是预期的，减少误报）
         - 停机冷却：提高灵敏度（异常可能意味着冷却异常）
         - 检修后恢复：提高报警门槛（恢复期波动是正常的）
+
+        不确定性联动：
+        - 高认知不确定性 + 中风险 → 策略可降级或升级为需人工复核
         """
         final_code, final_status = self.warning_policy.apply(
             original_status_code,
@@ -3144,6 +3190,7 @@ class PredictionOrchestrator:
             confidence,
             risk_level=risk_assessment.level.value,
             lstm_confidence=float(confidence),
+            epistemic_uncertainty=epistemic_uncertainty,
         )
 
         if condition is None or condition == WorkingCondition.UNKNOWN:

@@ -88,6 +88,7 @@ class AuditService:
         strategy_type: int,
         explainability: Optional[Dict[str, Any]] = None,
         retention_years: Optional[int] = None,
+        uncertainty_metrics: Optional[Dict[str, Any]] = None,
     ) -> Optional[PredictionAudit]:
         """
         记录预测审计快照
@@ -104,6 +105,7 @@ class AuditService:
             strategy_type: 策略类型
             explainability: 可解释性报告
             retention_years: 保留年限
+            uncertainty_metrics: 不确定性度量 (MC Dropout 量化结果)
 
         Returns:
             PredictionAudit 记录
@@ -140,6 +142,9 @@ class AuditService:
                     explainability=json.dumps(
                         explainability or {}, ensure_ascii=False, default=str
                     ),
+                    uncertainty_metrics=json.dumps(
+                        uncertainty_metrics, ensure_ascii=False, default=str
+                    ) if uncertainty_metrics else None,
                     retention_years=retention,
                     expire_time=now + timedelta(days=retention * 365),
                     create_time=now,

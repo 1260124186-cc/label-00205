@@ -874,6 +874,98 @@ class BoltLSTMModel:
 
         return predicted_class, confidence, None
 
+    def predict_with_uncertainty(
+        self,
+        data: np.ndarray,
+        n_samples: int = 30,
+        features: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        """
+        Monte Carlo Dropout 不确定性量化推理
+
+        推理时开启 Dropout，采样 N 次得到预测分布与方差，
+        输出概率均值、标准差和认知不确定性。
+
+        Args:
+            data: 输入数据，形状为 (sequence_length, 2) 或 (sequence_length,)
+            n_samples: MC 采样次数，默认 30
+            features: 特征向量 (feature_dim,)，可选
+
+        Returns:
+            Dict: {
+                'predicted_class': int,
+                'status_prob_mean': np.ndarray,  各类别概率均值 (5,)
+                'status_prob_std': np.ndarray,   各类别概率标准差 (5,)
+                'epistemic_uncertainty': float,   认知不确定性（预测方差熵）
+                'confidence': float,              预测类别置信度
+                'confidence_lower': float,        置信度 95% 下界
+                'confidence_upper': float,        置信度 95% 上界
+                'n_samples': int,
+                'all_probs': np.ndarray,          全部采样概率 (n_samples, 5)
+            }
+        """
+        if n_samples < 2:
+            n_samples = 2
+
+        self.model.train()
+
+        sequence_length = self.model_config.get('sequence_length', 100)
+        (X, feat), _ = self.prepare_data(
+            data, sequence_length=sequence_length, features=features
+        )
+
+        all_probs = []
+        with torch.no_grad():
+            for _ in range(n_samples):
+                outputs = self.model(X, feat)
+                probabilities = torch.softmax(outputs, dim=1)
+                prob = probabilities[-1].cpu().numpy()
+                all_probs.append(prob)
+
+        all_probs = np.array(all_probs)
+
+        status_prob_mean = np.mean(all_probs, axis=0)
+        status_prob_std = np.std(all_probs, axis=0)
+
+        predicted_class = int(np.argmax(status_prob_mean))
+        confidence = float(status_prob_mean[predicted_class])
+
+        epistemic_uncertainty = float(
+            -np.sum(status_prob_mean * np.log(status_prob_mean + 1e-10))
+            + np.mean(
+                np.array([
+                    -np.sum(p * np.log(p + 1e-10)) for p in all_probs
+                ])
+            )
+        )
+        epistemic_uncertainty = max(0.0, epistemic_uncertainty)
+
+        class_samples = all_probs[:, predicted_class]
+        confidence_lower = float(np.percentile(class_samples, 2.5))
+        confidence_upper = float(np.percentile(class_samples, 97.5))
+
+        self.model.eval()
+
+        logger.debug(
+            f"MC Dropout 不确定性量化: class={predicted_class}, "
+            f"confidence={confidence:.4f}, "
+            f"epistemic={epistemic_uncertainty:.4f}, "
+            f"prob_std_max={status_prob_std.max():.4f}, "
+            f"n_samples={n_samples}"
+        )
+
+        return {
+            'predicted_class': predicted_class,
+            'status_prob_mean': status_prob_mean,
+            'status_prob_std': status_prob_std,
+            'epistemic_uncertainty': epistemic_uncertainty,
+            'confidence': confidence,
+            'confidence_lower': confidence_lower,
+            'confidence_upper': confidence_upper,
+            'n_samples': n_samples,
+            'all_probs': all_probs,
+        }
+
     def predict_batch(
         self,
         data_list: List[np.ndarray],

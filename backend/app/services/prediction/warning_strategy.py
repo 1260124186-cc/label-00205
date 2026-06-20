@@ -11,13 +11,20 @@
 策略二增强：
 当 risk_level=中 且 lstm_confidence 低于 lstm_confidence_threshold 时，
 提高报警门槛（将 status_code 降级为 0）。
+
+不确定性联动增强：
+高认知不确定性 + 中风险时，策略二可降级或升级为需人工复核。
 """
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any
 from loguru import logger
 
 from app.models.bolt_lstm import STATUS_LABELS
 from app.utils.config import config
+
+
+STATUS_MANUAL_REVIEW = -1
+STATUS_LABEL_MANUAL_REVIEW = '需人工复核'
 
 
 class WarningStrategyPolicy:
@@ -39,6 +46,16 @@ class WarningStrategyPolicy:
 
         self.medium_risk_lstm_threshold = config.get(
             'warning_strategy.strategy_2.medium_risk_lstm_confidence_threshold', 0.6
+        )
+
+        self.epistemic_uncertainty_high_threshold = config.get(
+            'warning_strategy.uncertainty.epistemic_high_threshold', 0.3
+        )
+        self.epistemic_uncertainty_critical_threshold = config.get(
+            'warning_strategy.uncertainty.epistemic_critical_threshold', 0.5
+        )
+        self.uncertainty_strategy_action = config.get(
+            'warning_strategy.uncertainty.medium_risk_action', 'manual_review'
         )
 
         db_loaded = False
@@ -84,6 +101,7 @@ class WarningStrategyPolicy:
         node_id: Optional[str] = None,
         risk_level: Optional[str] = None,
         lstm_confidence: Optional[float] = None,
+        epistemic_uncertainty: Optional[float] = None,
     ) -> Tuple[int, str]:
         if node_type and node_id and (
             node_type != self._node_type or node_id != self._node_id
@@ -100,30 +118,51 @@ class WarningStrategyPolicy:
                 ct = self.strategy_1_threshold
 
             if st == self.STRATEGY_REPORT_ALL:
-                return self._apply_with_threshold(status_code, confidence, ct, mode='report_all')
+                return self._apply_with_threshold(
+                    status_code, confidence, ct, mode='report_all',
+                    epistemic_uncertainty=epistemic_uncertainty,
+                )
             else:
                 return self._apply_with_threshold(
                     status_code, confidence, ct, mode='precise',
                     risk_level=risk_level, lstm_confidence=lstm_confidence,
+                    epistemic_uncertainty=epistemic_uncertainty,
                 )
 
         if self.strategy_type == self.STRATEGY_REPORT_ALL:
-            return self._apply_report_all(status_code, confidence)
+            return self._apply_report_all(
+                status_code, confidence,
+                epistemic_uncertainty=epistemic_uncertainty,
+            )
         else:
             return self._apply_precise(
                 status_code, confidence,
                 risk_level=risk_level, lstm_confidence=lstm_confidence,
+                epistemic_uncertainty=epistemic_uncertainty,
             )
 
     def _apply_report_all(
         self,
         status_code: int,
         confidence: float,
+        epistemic_uncertainty: Optional[float] = None,
     ) -> Tuple[int, str]:
         if confidence >= self.strategy_1_threshold:
             new_code = status_code
         else:
             new_code = max(0, status_code - 1)
+
+        if (
+            new_code > 0
+            and epistemic_uncertainty is not None
+            and epistemic_uncertainty >= self.epistemic_uncertainty_critical_threshold
+        ):
+            logger.info(
+                f"策略一不确定性联动: 认知不确定性{epistemic_uncertainty:.3f} >= "
+                f"{self.epistemic_uncertainty_critical_threshold}，升级为需人工复核"
+            )
+            return STATUS_MANUAL_REVIEW, STATUS_LABEL_MANUAL_REVIEW
+
         return new_code, STATUS_LABELS.get(new_code, '正常')
 
     def _apply_precise(
@@ -132,6 +171,7 @@ class WarningStrategyPolicy:
         confidence: float,
         risk_level: Optional[str] = None,
         lstm_confidence: Optional[float] = None,
+        epistemic_uncertainty: Optional[float] = None,
     ) -> Tuple[int, str]:
         if confidence >= self.strategy_2_threshold:
             new_code = status_code
@@ -146,6 +186,37 @@ class WarningStrategyPolicy:
                     f"{self.medium_risk_lstm_threshold}，报警门槛提高，降级为正常"
                 )
 
+        if (
+            new_code > 0
+            and epistemic_uncertainty is not None
+            and epistemic_uncertainty >= self.epistemic_uncertainty_high_threshold
+            and risk_level in ('中', 'medium')
+        ):
+            action = self.uncertainty_strategy_action
+            if action == 'manual_review':
+                logger.info(
+                    f"策略二不确定性联动: 高不确定性{epistemic_uncertainty:.3f} + "
+                    f"中风险 → 升级为需人工复核"
+                )
+                return STATUS_MANUAL_REVIEW, STATUS_LABEL_MANUAL_REVIEW
+            elif action == 'downgrade':
+                new_code = 0
+                logger.info(
+                    f"策略二不确定性联动: 高不确定性{epistemic_uncertainty:.3f} + "
+                    f"中风险 → 降级为正常"
+                )
+
+        if (
+            new_code > 0
+            and epistemic_uncertainty is not None
+            and epistemic_uncertainty >= self.epistemic_uncertainty_critical_threshold
+        ):
+            logger.info(
+                f"策略二不确定性联动: 极高不确定性{epistemic_uncertainty:.3f} >= "
+                f"{self.epistemic_uncertainty_critical_threshold}，升级为需人工复核"
+            )
+            return STATUS_MANUAL_REVIEW, STATUS_LABEL_MANUAL_REVIEW
+
         return new_code, STATUS_LABELS.get(new_code, '正常')
 
     @staticmethod
@@ -156,12 +227,30 @@ class WarningStrategyPolicy:
         mode: str = 'report_all',
         risk_level: Optional[str] = None,
         lstm_confidence: Optional[float] = None,
+        epistemic_uncertainty: Optional[float] = None,
     ) -> Tuple[int, str]:
+        epistemic_high = config.get(
+            'warning_strategy.uncertainty.epistemic_high_threshold', 0.3
+        )
+        epistemic_critical = config.get(
+            'warning_strategy.uncertainty.epistemic_critical_threshold', 0.5
+        )
+        action = config.get(
+            'warning_strategy.uncertainty.medium_risk_action', 'manual_review'
+        )
+
         if mode == 'report_all':
             if confidence >= threshold:
                 new_code = status_code
             else:
                 new_code = max(0, status_code - 1)
+
+            if (
+                new_code > 0
+                and epistemic_uncertainty is not None
+                and epistemic_uncertainty >= epistemic_critical
+            ):
+                return STATUS_MANUAL_REVIEW, STATUS_LABEL_MANUAL_REVIEW
         else:
             if confidence >= threshold:
                 new_code = status_code
@@ -175,4 +264,60 @@ class WarningStrategyPolicy:
                 if lstm_confidence < med_threshold:
                     new_code = 0
 
+            if (
+                new_code > 0
+                and epistemic_uncertainty is not None
+                and epistemic_uncertainty >= epistemic_high
+                and risk_level in ('中', 'medium')
+            ):
+                if action == 'manual_review':
+                    return STATUS_MANUAL_REVIEW, STATUS_LABEL_MANUAL_REVIEW
+                elif action == 'downgrade':
+                    new_code = 0
+
+            if (
+                new_code > 0
+                and epistemic_uncertainty is not None
+                and epistemic_uncertainty >= epistemic_critical
+            ):
+                return STATUS_MANUAL_REVIEW, STATUS_LABEL_MANUAL_REVIEW
+
         return new_code, STATUS_LABELS.get(new_code, '正常')
+
+    @staticmethod
+    def classify_uncertainty(
+        epistemic_uncertainty: float,
+    ) -> Dict[str, Any]:
+        """
+        对认知不确定性进行分级
+
+        Args:
+            epistemic_uncertainty: 认知不确定性值
+
+        Returns:
+            Dict: 不确定性分级信息
+        """
+        high_threshold = config.get(
+            'warning_strategy.uncertainty.epistemic_high_threshold', 0.3
+        )
+        critical_threshold = config.get(
+            'warning_strategy.uncertainty.epistemic_critical_threshold', 0.5
+        )
+
+        if epistemic_uncertainty >= critical_threshold:
+            level = 'critical'
+            label = '极高不确定性'
+        elif epistemic_uncertainty >= high_threshold:
+            level = 'high'
+            label = '高不确定性'
+        else:
+            level = 'normal'
+            label = '正常'
+
+        return {
+            'level': level,
+            'label': label,
+            'value': epistemic_uncertainty,
+            'high_threshold': high_threshold,
+            'critical_threshold': critical_threshold,
+        }

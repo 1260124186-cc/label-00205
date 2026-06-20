@@ -862,6 +862,7 @@ class PredictionAudit(Base):
     strategy_version = Column(String(50), comment='预警策略版本')
     strategy_type = Column(Integer, comment='策略类型 1=应报尽报 2=精准报警')
     explainability = Column(Text, comment='可解释性报告 JSON: attention/key_timesteps/factors/rules')
+    uncertainty_metrics = Column(Text, comment='不确定性度量 JSON: status_prob_mean/status_prob_std/epistemic_uncertainty/confidence_interval')
     retention_years = Column(Integer, default=3, comment='保留年限')
     expire_time = Column(DateTime, comment='过期时间 (create_time + retention_years)')
     create_time = Column(DateTime, default=datetime.now, comment='创建时间')

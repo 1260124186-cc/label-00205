@@ -1906,3 +1906,232 @@ class TestCrossModuleIntegration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+# ============================================================
+# Uncertainty Quantification (MC Dropout)
+# ============================================================
+
+class TestMCDropoutUncertainty:
+    """Monte Carlo Dropout 不确定性量化测试"""
+
+    def test_predict_with_uncertainty_output_keys(self):
+        from app.models.bolt_lstm import BoltLSTMModel
+
+        model = BoltLSTMModel(bolt_id='test_uncertainty')
+        data = np.random.randn(100) * 20 + 600
+
+        result = model.predict_with_uncertainty(data, n_samples=10)
+
+        expected_keys = [
+            'predicted_class', 'status_prob_mean', 'status_prob_std',
+            'epistemic_uncertainty', 'confidence', 'confidence_lower',
+            'confidence_upper', 'n_samples', 'all_probs',
+        ]
+        for key in expected_keys:
+            assert key in result, f"Missing key: {key}"
+
+    def test_predict_with_uncertainty_shapes(self):
+        from app.models.bolt_lstm import BoltLSTMModel
+
+        model = BoltLSTMModel(bolt_id='test_uncertainty')
+        data = np.random.randn(100) * 20 + 600
+
+        result = model.predict_with_uncertainty(data, n_samples=15)
+
+        assert result['status_prob_mean'].shape == (5,)
+        assert result['status_prob_std'].shape == (5,)
+        assert result['all_probs'].shape == (15, 5)
+        assert result['n_samples'] == 15
+
+    def test_predict_with_uncertainty_probability_sums_to_one(self):
+        from app.models.bolt_lstm import BoltLSTMModel
+
+        model = BoltLSTMModel(bolt_id='test_uncertainty')
+        data = np.random.randn(100) * 20 + 600
+
+        result = model.predict_with_uncertainty(data, n_samples=10)
+
+        assert abs(result['status_prob_mean'].sum() - 1.0) < 1e-5
+
+    def test_predict_with_uncertainty_confidence_bounds(self):
+        from app.models.bolt_lstm import BoltLSTMModel
+
+        model = BoltLSTMModel(bolt_id='test_uncertainty')
+        data = np.random.randn(100) * 20 + 600
+
+        result = model.predict_with_uncertainty(data, n_samples=20)
+
+        assert result['confidence_lower'] <= result['confidence']
+        assert result['confidence_upper'] >= result['confidence']
+
+    def test_predict_with_uncertainty_epistemic_non_negative(self):
+        from app.models.bolt_lstm import BoltLSTMModel
+
+        model = BoltLSTMModel(bolt_id='test_uncertainty')
+        data = np.random.randn(100) * 20 + 600
+
+        result = model.predict_with_uncertainty(data, n_samples=10)
+
+        assert result['epistemic_uncertainty'] >= 0.0
+
+    def test_predict_with_uncertainty_minimum_samples(self):
+        from app.models.bolt_lstm import BoltLSTMModel
+
+        model = BoltLSTMModel(bolt_id='test_uncertainty')
+        data = np.random.randn(100) * 20 + 600
+
+        result = model.predict_with_uncertainty(data, n_samples=1)
+        assert result['n_samples'] >= 2
+
+    def test_predict_with_uncertainty_with_features(self):
+        from app.models.bolt_lstm import BoltLSTMModel
+
+        model = BoltLSTMModel(bolt_id='test_uncertainty_fe', feature_dim=8)
+        data = np.random.randn(100) * 20 + 600
+        features = np.random.randn(8).astype(np.float32)
+
+        result = model.predict_with_uncertainty(data, n_samples=5, features=features)
+        assert 'status_prob_mean' in result
+        assert result['status_prob_mean'].shape == (5,)
+
+    def test_predict_with_uncertainty_model_returns_eval_mode(self):
+        from app.models.bolt_lstm import BoltLSTMModel
+
+        model = BoltLSTMModel(bolt_id='test_uncertainty')
+        data = np.random.randn(100) * 20 + 600
+
+        _ = model.predict_with_uncertainty(data, n_samples=5)
+
+        assert not model.model.training
+
+
+class TestUncertaintyStrategyLinkage:
+    """不确定性策略联动测试"""
+
+    def test_strategy_two_high_uncertainty_medium_risk_manual_review(self):
+        from app.services.prediction.warning_strategy import (
+            WarningStrategyPolicy,
+            STATUS_MANUAL_REVIEW,
+            STATUS_LABEL_MANUAL_REVIEW,
+        )
+
+        policy = WarningStrategyPolicy(strategy_type=2)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.96,
+            risk_level='中',
+            lstm_confidence=0.8,
+            epistemic_uncertainty=0.4,
+        )
+        assert code == STATUS_MANUAL_REVIEW
+        assert status == STATUS_LABEL_MANUAL_REVIEW
+
+    def test_strategy_two_critical_uncertainty_manual_review(self):
+        from app.services.prediction.warning_strategy import (
+            WarningStrategyPolicy,
+            STATUS_MANUAL_REVIEW,
+            STATUS_LABEL_MANUAL_REVIEW,
+        )
+
+        policy = WarningStrategyPolicy(strategy_type=2)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.96,
+            risk_level='高',
+            lstm_confidence=0.8,
+            epistemic_uncertainty=0.6,
+        )
+        assert code == STATUS_MANUAL_REVIEW
+        assert status == STATUS_LABEL_MANUAL_REVIEW
+
+    def test_strategy_two_normal_uncertainty_not_triggered(self):
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        policy = WarningStrategyPolicy(strategy_type=2)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.96,
+            risk_level='中',
+            lstm_confidence=0.8,
+            epistemic_uncertainty=0.1,
+        )
+        assert code == 2
+
+    def test_strategy_one_critical_uncertainty_manual_review(self):
+        from app.services.prediction.warning_strategy import (
+            WarningStrategyPolicy,
+            STATUS_MANUAL_REVIEW,
+            STATUS_LABEL_MANUAL_REVIEW,
+        )
+
+        policy = WarningStrategyPolicy(strategy_type=1)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.8,
+            epistemic_uncertainty=0.6,
+        )
+        assert code == STATUS_MANUAL_REVIEW
+        assert status == STATUS_LABEL_MANUAL_REVIEW
+
+    def test_strategy_one_normal_uncertainty(self):
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        policy = WarningStrategyPolicy(strategy_type=1)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.8,
+            epistemic_uncertainty=0.1,
+        )
+        assert code == 2
+
+    def test_classify_uncertainty_levels(self):
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        result_normal = WarningStrategyPolicy.classify_uncertainty(0.1)
+        assert result_normal['level'] == 'normal'
+
+        result_high = WarningStrategyPolicy.classify_uncertainty(0.35)
+        assert result_high['level'] == 'high'
+
+        result_critical = WarningStrategyPolicy.classify_uncertainty(0.6)
+        assert result_critical['level'] == 'critical'
+
+    def test_strategy_two_high_uncertainty_high_risk_not_medium_risk(self):
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        policy = WarningStrategyPolicy(strategy_type=2)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.96,
+            risk_level='高',
+            lstm_confidence=0.8,
+            epistemic_uncertainty=0.35,
+        )
+        assert code == 2
+
+    def test_strategy_two_no_uncertainty_backward_compatible(self):
+        from app.services.prediction.warning_strategy import WarningStrategyPolicy
+
+        policy = WarningStrategyPolicy(strategy_type=2)
+
+        code, status = policy.apply(
+            status_code=2,
+            status='检查级预警',
+            confidence=0.96,
+            risk_level='中',
+            lstm_confidence=0.3,
+        )
+        assert code == 0
