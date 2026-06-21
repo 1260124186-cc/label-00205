@@ -12,7 +12,7 @@
 
 使用方式:
     from app.streaming import StreamPredictionEngine
-    
+
     engine = StreamPredictionEngine()
     engine.start()
 """
@@ -22,6 +22,8 @@ from app.streaming.window_manager import (
     MemoryWindowManager,
     RedisWindowManager,
     WindowData,
+    REDIS_KEY_PREFIX,
+    create_window_manager,
 )
 from app.streaming.backpressure import (
     BackpressureController,
@@ -49,6 +51,8 @@ __all__ = [
     'MemoryWindowManager',
     'RedisWindowManager',
     'WindowData',
+    'REDIS_KEY_PREFIX',
+    'create_window_manager',
     'BackpressureController',
     'RateLimiter',
     'StreamConcurrencyManager',

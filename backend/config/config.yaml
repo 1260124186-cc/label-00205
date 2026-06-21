@@ -610,15 +610,48 @@ stream_prediction:
   # 滑动窗口配置
   window:
     # 窗口存储类型: memory | redis
-    storage_type: memory
+    # 生产环境强制 redis（enforce_redis=true 时不可降级为 memory）
+    storage_type: redis
     # 窗口大小（数据点数）
     size: 100
-    # 窗口过期时间（秒）
+    # 窗口过期时间（秒），TTL 到期后 Redis 自动清理
     ttl_seconds: 3600
-    # Redis连接URL（storage_type=redis时使用）
+    # Redis连接URL（storage_type=redis / cluster_mode=standalone 时使用）
     redis_url: "redis://localhost:6379/0"
-    # Redis键前缀
-    key_prefix: "stream_window"
+    # Redis 密码（可选）
+    redis_password: ""
+    # Redis 数据库编号
+    redis_db: 0
+    # 生产环境强制 Redis 后端（enforce_redis=true 时 Redis 不可用则启动失败）
+    enforce_redis: true
+    # 最大 bolt 窗口数（租户级别限流，0 表示不限）
+    max_bolts: 50000
+    # Redis 内存使用上限（MB），超过则拒绝新窗口写入
+    memory_limit_mb: 512
+
+    # Redis 集群模式: standalone | cluster | sentinel
+    cluster_mode: standalone
+    # Redis Cluster 节点列表（cluster_mode=cluster 时使用）
+    cluster_nodes: []
+      # - "redis-node1:6379"
+      # - "redis-node2:6379"
+      # - "redis-node3:6379"
+    # Redis Sentinel 主节点名（cluster_mode=sentinel 时使用）
+    sentinel_master: "mymaster"
+    # Redis Sentinel 节点列表（cluster_mode=sentinel 时使用）
+    sentinel_nodes: []
+      # - "sentinel1:26379"
+      # - "sentinel2:26379"
+      # - "sentinel3:26379"
+    # Redis Sentinel 密码（可选）
+    sentinel_password: ""
+
+    # 窗口数据导出/导入配置（边缘断网恢复场景）
+    export_import:
+      # 导出时是否压缩（gzip）
+      compress: true
+      # 导出数据最大条目数（防止单次导出过大）
+      max_items_per_export: 100000
 
   # 背压与限流配置
   backpressure:

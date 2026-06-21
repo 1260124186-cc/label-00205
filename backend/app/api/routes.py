@@ -7803,18 +7803,18 @@ async def stream_ingest_batch(request: StreamBatchIngestRequest):
     tags=["流式预测"],
     summary="获取窗口状态"
 )
-async def get_stream_window(bolt_id: str):
+async def get_stream_window(bolt_id: str, tenant_id: str = Query("default", description="租户ID")):
     """
-    获取指定螺栓的滑动窗口状态
+    获取指定螺栓的滑动窗口状态（支持租户隔离）
     """
     try:
         engine = get_stream_engine()
 
-        window_status = engine.get_window_status(bolt_id)
+        window_status = engine.get_window_status(bolt_id, tenant_id=tenant_id)
         if window_status is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"螺栓 {bolt_id} 的窗口不存在"
+                detail=f"螺栓 {bolt_id} 的窗口不存在 (tenant={tenant_id})"
             )
 
         return StreamWindowStatusResponse(**window_status)
@@ -7991,9 +7991,9 @@ async def update_stream_config(request: StreamConfigUpdateRequest):
     tags=["流式预测"],
     summary="清空指定螺栓窗口"
 )
-async def clear_stream_window(bolt_id: str):
+async def clear_stream_window(bolt_id: str, tenant_id: str = Query("default", description="租户ID")):
     """
-    清空指定螺栓的滑动窗口数据
+    清空指定螺栓的滑动窗口数据（支持租户隔离）
     """
     try:
         engine = get_stream_engine()
@@ -8002,7 +8002,7 @@ async def clear_stream_window(bolt_id: str):
 
         return {
             "success": success,
-            "message": f"已清空螺栓 {bolt_id} 的窗口" if success else "清空失败"
+            "message": f"已清空螺栓 {bolt_id} 的窗口 (tenant={tenant_id})" if success else "清空失败"
         }
 
     except Exception as e:
@@ -8031,6 +8031,75 @@ async def clear_all_stream_windows():
 
     except Exception as e:
         logger.error(f"清空所有窗口失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/stream/windows/export",
+    tags=["流式预测"],
+    summary="导出窗口数据"
+)
+async def export_stream_windows(
+    tenant_id: Optional[str] = Query(None, description="租户ID（None表示全部）"),
+):
+    """
+    导出窗口数据（边缘断网恢复场景）
+
+    返回 JSON 格式的窗口快照，可由 /stream/windows/import 接口导入恢复。
+    """
+    try:
+        engine = get_stream_engine()
+        data = engine.export_windows(tenant_id=tenant_id)
+        return json.loads(data)
+    except Exception as e:
+        logger.error(f"导出窗口数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/stream/windows/import",
+    tags=["流式预测"],
+    summary="导入窗口数据"
+)
+async def import_stream_windows(
+    request: Request,
+    tenant_id: Optional[str] = Query(None, description="目标租户ID（None表示使用原始租户）"),
+):
+    """
+    导入窗口数据（边缘断网恢复场景）
+
+    接收由 /stream/windows/export 导出的 JSON 数据，恢复窗口状态。
+    """
+    try:
+        engine = get_stream_engine()
+        data = await request.body()
+        import_data = json.loads(data)
+        count = engine.import_windows(
+            json.dumps(import_data) if isinstance(import_data, dict) else data.decode('utf-8'),
+            tenant_id=tenant_id,
+        )
+        return {"imported": count, "tenant_id": tenant_id}
+    except Exception as e:
+        logger.error(f"导入窗口数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/stream/windows/redis-info",
+    tags=["流式预测"],
+    summary="获取 Redis 窗口集群状态"
+)
+async def get_redis_window_info():
+    """
+    获取 Redis 窗口集群状态信息（内存占用、键数量、过期率等）
+
+    仅在 storage_type=redis 时返回有效信息。
+    """
+    try:
+        engine = get_stream_engine()
+        return engine.get_redis_window_info()
+    except Exception as e:
+        logger.error(f"获取Redis窗口信息失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

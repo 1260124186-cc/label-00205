@@ -10,6 +10,7 @@
 """
 
 import time
+import json
 import threading
 import numpy as np
 from collections import deque
@@ -20,6 +21,7 @@ from loguru import logger
 
 from app.streaming.window_manager import (
     SlidingWindowManager,
+    RedisWindowManager,
     WindowData,
     create_window_manager,
 )
@@ -182,6 +184,16 @@ class StreamPredictionEngine:
                 window_size=window_config.get('size', 100),
                 ttl_seconds=window_config.get('ttl_seconds', 3600),
                 redis_url=window_config.get('redis_url', 'redis://localhost:6379/0'),
+                redis_password=window_config.get('redis_password') or None,
+                redis_db=window_config.get('redis_db', 0),
+                enforce_redis=window_config.get('enforce_redis', False),
+                max_bolts=window_config.get('max_bolts', 50000),
+                memory_limit_mb=window_config.get('memory_limit_mb', 512),
+                cluster_mode=window_config.get('cluster_mode', 'standalone'),
+                cluster_nodes=window_config.get('cluster_nodes'),
+                sentinel_master=window_config.get('sentinel_master'),
+                sentinel_nodes=window_config.get('sentinel_nodes'),
+                sentinel_password=window_config.get('sentinel_password') or None,
             )
 
         # 背压控制器
@@ -428,6 +440,7 @@ class StreamPredictionEngine:
 
         try:
             stream_id = message.stream_id
+            tenant_id = message.tenant_id
 
             # 背压检查
             if stream_id not in self._active_streams:
@@ -448,7 +461,7 @@ class StreamPredictionEngine:
             self._record_ingest(node_type=message.node_type, count=data_count)
 
             # 更新窗口填充度指标
-            window = self.window_manager.get_window(message.node_id)
+            window = self.window_manager.get_window(message.node_id, tenant_id=tenant_id)
             if window:
                 fill_ratio = min(len(window.values) / window.window_size, 1.0)
                 metrics.update_window_fill_ratio(
@@ -463,12 +476,14 @@ class StreamPredictionEngine:
                     bolt_id=message.node_id,
                     values=message.values,
                     timestamps=message.timestamps,
+                    tenant_id=tenant_id,
                 )
             else:
                 is_full = self.window_manager.add_point(
                     bolt_id=message.node_id,
                     value=message.values[0],
                     timestamp=message.timestamps[0],
+                    tenant_id=tenant_id,
                 )
 
             logger.debug(
@@ -493,23 +508,21 @@ class StreamPredictionEngine:
             return
 
         try:
-            # 执行预测
             result = self._run_prediction(bolt_id, window_data)
+            tenant_id = getattr(window_data, 'tenant_id', 'default') or 'default'
 
             if result:
                 self._total_predictions += 1
 
-                # 检查状态变更
                 old_status = window_data.last_prediction_status
                 new_status = result.get('status_code', 0)
 
                 if old_status != new_status:
                     self._status_changes += 1
                     self.window_manager.update_prediction_status(
-                        bolt_id, new_status
+                        bolt_id, new_status, tenant_id=tenant_id
                     )
 
-                    # 发布状态变更事件
                     self.event_publisher.publish_status_change(
                         node_type='bolt',
                         node_id=bolt_id,
@@ -519,10 +532,10 @@ class StreamPredictionEngine:
                         metadata={
                             'window_size': window_data.window_size,
                             'prediction_count': window_data.prediction_count + 1,
+                            'tenant_id': tenant_id,
                         },
                     )
                 else:
-                    # 发布普通预测事件
                     self.event_publisher.publish_prediction(
                         node_type='bolt',
                         node_id=bolt_id,
@@ -653,10 +666,8 @@ class StreamPredictionEngine:
         """清理循环"""
         while self._is_running:
             try:
-                # 清理过期窗口
                 self.window_manager.cleanup_expired()
 
-                # 清理空闲流
                 active_bolts = set(self.window_manager.list_bolts())
                 streams_to_remove = [
                     s for s in self._active_streams
@@ -666,35 +677,67 @@ class StreamPredictionEngine:
                     self.backpressure_manager.unregister_stream(stream_id)
                     self._active_streams.discard(stream_id)
 
-                # 更新活跃流数指标
                 metrics.update_stream_active_count(
                     component=self._component_name,
                     count=len(self._active_streams)
                 )
 
-                # 定期更新QPS指标（即使没有新数据）
                 if len(self._ingest_timestamps) > 0:
                     self._update_qps_metric("bolt")
 
-                # 每30秒执行一次
+                self._collect_redis_metrics()
+
                 time.sleep(30)
             except Exception as e:
                 logger.error(f"清理任务异常: {e}")
                 time.sleep(30)
 
+    def _collect_redis_metrics(self) -> None:
+        """采集 Redis 窗口集群监控指标并更新到 Prometheus"""
+        if not isinstance(self.window_manager, RedisWindowManager):
+            return
+        try:
+            redis_info = self.window_manager.get_redis_info()
+            if not redis_info:
+                return
+
+            tenants = self.window_manager.list_tenants()
+            key_count_by_tenant = {}
+            for tid in tenants:
+                key_count_by_tenant[tid] = self.window_manager.count_bolts(tenant_id=tid)
+
+            metrics.update_redis_window_metrics(
+                component=self._component_name,
+                used_memory_bytes=redis_info.get("used_memory_bytes", 0),
+                memory_limit_bytes=float(redis_info.get("memory_limit_mb", 0) * 1024 * 1024),
+                key_count_by_tenant=key_count_by_tenant,
+                expired_total=0,
+                total_keys=redis_info.get("total_keys", 0),
+            )
+
+            expired = self.window_manager.get_expired_counter()
+            if expired > 0:
+                metrics.redis_window_expired_total.set(
+                    value=float(expired),
+                    label_values=(self._component_name,),
+                )
+        except Exception as e:
+            logger.debug(f"采集Redis监控指标失败: {e}")
+
     # ============ 查询接口 ============
 
-    def get_window_status(self, bolt_id: str) -> Optional[Dict[str, Any]]:
+    def get_window_status(self, bolt_id: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
         """
         获取窗口状态
 
         Args:
             bolt_id: 螺栓ID
+            tenant_id: 租户ID
 
         Returns:
             窗口状态字典
         """
-        window = self.window_manager.get_window(bolt_id)
+        window = self.window_manager.get_window(bolt_id, tenant_id=tenant_id)
         if window:
             return {
                 'bolt_id': window.bolt_id,
@@ -704,6 +747,7 @@ class StreamPredictionEngine:
                 'last_updated': window.last_updated,
                 'last_prediction_status': window.last_prediction_status,
                 'prediction_count': window.prediction_count,
+                'tenant_id': window.tenant_id,
                 'first_timestamp': window.timestamps[0] if window.timestamps else None,
                 'last_timestamp': window.timestamps[-1] if window.timestamps else None,
             }
@@ -815,15 +859,6 @@ class StreamPredictionEngine:
             return False
 
     def set_max_concurrent_streams(self, max_streams: int) -> bool:
-        """
-        设置最大并发流数
-
-        Args:
-            max_streams: 最大并发流数
-
-        Returns:
-            bool
-        """
         try:
             self.backpressure_manager.set_max_concurrent_streams(max_streams)
             logger.info(f"最大并发流数已设置: {max_streams}")
@@ -831,6 +866,50 @@ class StreamPredictionEngine:
         except Exception as e:
             logger.error(f"设置最大并发流数失败: {e}")
             return False
+
+    def export_windows(self, tenant_id: Optional[str] = None) -> str:
+        """
+        导出窗口数据（边缘断网恢复场景）
+
+        Args:
+            tenant_id: 租户ID（None 表示导出全部）
+
+        Returns:
+            JSON 格式的窗口数据
+        """
+        try:
+            return self.window_manager.export_windows(tenant_id=tenant_id)
+        except Exception as e:
+            logger.error(f"导出窗口数据失败: {e}")
+            return json.dumps({"version": 1, "count": 0, "windows": {}, "error": str(e)})
+
+    def import_windows(self, data: str, tenant_id: Optional[str] = None) -> int:
+        """
+        导入窗口数据（边缘断网恢复场景）
+
+        Args:
+            data: JSON 格式的窗口数据
+            tenant_id: 目标租户ID（None 表示使用原始 tenant_id）
+
+        Returns:
+            导入的窗口数量
+        """
+        try:
+            return self.window_manager.import_windows(data, tenant_id=tenant_id)
+        except Exception as e:
+            logger.error(f"导入窗口数据失败: {e}")
+            return 0
+
+    def get_redis_window_info(self) -> Dict[str, Any]:
+        """
+        获取 Redis 窗口集群状态信息
+
+        Returns:
+            Redis 信息字典
+        """
+        if isinstance(self.window_manager, RedisWindowManager):
+            return self.window_manager.get_redis_info()
+        return {"backend": "memory", "cluster_mode": "n/a"}
 
     def _on_config_changed(self, event: Event) -> None:
         """流式配置变更事件回调"""

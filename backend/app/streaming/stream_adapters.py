@@ -40,6 +40,7 @@ class StreamMessage:
         values: 数据值列表（单条或微批次）
         timestamps: 数据时间戳列表
         metadata: 元数据
+        tenant_id: 租户ID（用于多租户隔离）
     """
     message_id: str
     stream_id: str
@@ -49,6 +50,7 @@ class StreamMessage:
     values: List[float]
     timestamps: List[str]
     metadata: Dict[str, Any] = None
+    tenant_id: str = "default"
 
     def __post_init__(self):
         if self.metadata is None:

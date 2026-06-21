@@ -466,6 +466,42 @@ class AppMetrics:
         )
         self.registry.register(self.stream_window_fill_ratio)
 
+        # Redis 窗口集群监控指标
+        self.redis_window_memory_used_bytes = Gauge(
+            "redis_window_memory_used_bytes",
+            "Redis memory used for window storage in bytes",
+            ["component"]
+        )
+        self.registry.register(self.redis_window_memory_used_bytes)
+
+        self.redis_window_memory_limit_bytes = Gauge(
+            "redis_window_memory_limit_bytes",
+            "Redis memory limit for window storage in bytes",
+            ["component"]
+        )
+        self.registry.register(self.redis_window_memory_limit_bytes)
+
+        self.redis_window_key_count = Gauge(
+            "redis_window_key_count",
+            "Number of Redis keys used by window storage",
+            ["component", "tenant_id"]
+        )
+        self.registry.register(self.redis_window_key_count)
+
+        self.redis_window_expired_total = Counter(
+            "redis_window_expired_total",
+            "Total number of expired window keys in Redis",
+            ["component"]
+        )
+        self.registry.register(self.redis_window_expired_total)
+
+        self.redis_window_expire_rate = Gauge(
+            "redis_window_expire_rate",
+            "Window key expiration rate (expired / total) in Redis",
+            ["component"]
+        )
+        self.registry.register(self.redis_window_expire_rate)
+
         logger.info("Prometheus metrics initialized")
 
     # ========== 便捷方法 ==========
@@ -581,6 +617,42 @@ class AppMetrics:
             value=float(ratio),
             label_values=(component, bolt_id)
         )
+
+    def update_redis_window_metrics(
+        self,
+        component: str,
+        used_memory_bytes: float,
+        memory_limit_bytes: float,
+        key_count_by_tenant: Optional[Dict[str, int]] = None,
+        expired_total: int = 0,
+        total_keys: int = 0,
+    ):
+        """更新 Redis 窗口集群监控指标"""
+        self.redis_window_memory_used_bytes.set(
+            value=used_memory_bytes,
+            label_values=(component,)
+        )
+        self.redis_window_memory_limit_bytes.set(
+            value=memory_limit_bytes,
+            label_values=(component,)
+        )
+        if key_count_by_tenant:
+            for tenant_id, count in key_count_by_tenant.items():
+                self.redis_window_key_count.set(
+                    value=float(count),
+                    label_values=(component, tenant_id)
+                )
+        if expired_total > 0:
+            self.redis_window_expired_total.inc(
+                amount=float(expired_total),
+                label_values=(component,)
+            )
+        if total_keys > 0:
+            rate = expired_total / total_keys if total_keys > 0 else 0.0
+            self.redis_window_expire_rate.set(
+                value=rate,
+                label_values=(component,)
+            )
 
     def generate_metrics_text(self) -> str:
         """生成 Prometheus 格式的指标文本"""
