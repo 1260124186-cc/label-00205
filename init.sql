@@ -2908,3 +2908,143 @@ CREATE TABLE IF NOT EXISTS sc_model_promotion_suggestions (
 -- 显示影子模式模块表
 SHOW TABLES LIKE 'sc_shadow%';
 SHOW TABLES LIKE 'sc_model_promotion%';
+
+-- ============================================================
+-- 灾备备份与恢复 - 备份记录表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_backup_records (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    backup_id VARCHAR(64) NOT NULL UNIQUE COMMENT '备份唯一ID（BU+时间戳+随机）',
+    backup_type VARCHAR(20) NOT NULL COMMENT '备份类型: full全量/incremental增量/snapshot快照',
+    backup_scope VARCHAR(50) NOT NULL COMMENT '备份范围: model_config仅模型配置/full_with_db含数据库',
+    status VARCHAR(20) DEFAULT 'running' COMMENT '状态: running/completed/failed/uploaded/purged',
+    progress_percent TINYINT DEFAULT 0 COMMENT '进度百分比 0-100',
+    error_message TEXT COMMENT '失败错误信息',
+    stack_trace TEXT COMMENT '异常堆栈（debug用）',
+
+    size_bytes BIGINT DEFAULT 0 COMMENT '原始未压缩总大小（字节）',
+    compressed_size_bytes BIGINT DEFAULT 0 COMMENT '压缩后归档大小（字节）',
+    component_list TEXT COMMENT '包含的组件列表 JSON: ["models","config","database"]',
+    component_sizes TEXT COMMENT '各组件大小明细 JSON: {"models":123456,"config":...}',
+    file_count INT DEFAULT 0 COMMENT '包含文件总数',
+
+    checksum_sha256 VARCHAR(64) COMMENT '归档整体 SHA256 哈希',
+    checksum_md5 VARCHAR(32) COMMENT '归档整体 MD5 哈希',
+    checksums_detail MEDIUMTEXT COMMENT '组件级文件清单哈希 JSON: {"models":{"file1":"sha256",...}}',
+
+    retention_policy VARCHAR(20) DEFAULT 'weekly' COMMENT '保留策略: incremental/weekly/monthly/snapshot',
+    retention_days INT DEFAULT 90 COMMENT '实际保留天数',
+    expire_time DATETIME COMMENT '过期时间（到期自动purge）',
+
+    base_backup_id VARCHAR(64) COMMENT '基础全量备份ID（增量关联用）',
+    backup_chain_id VARCHAR(64) COMMENT '备份链ID（每周一条链，如 chain_2025_W25）',
+    incremental_since DATETIME COMMENT '增量备份的mtime起点（上次备份完成时间）',
+
+    storage_location VARCHAR(20) DEFAULT 'local' COMMENT '存储位置: local/remote/both',
+    local_path VARCHAR(1024) COMMENT '本地归档文件绝对路径',
+    remote_bucket VARCHAR(256) COMMENT '远程存储桶名',
+    remote_object_key VARCHAR(1024) COMMENT '远程对象存储Key',
+    remote_endpoint VARCHAR(512) COMMENT '远程Endpoint（标识不同S3兼容服务）',
+    remote_upload_status VARCHAR(20) COMMENT '远程上传状态: pending/uploading/success/failed/skipped',
+    remote_upload_error TEXT COMMENT '远程上传错误信息',
+    remote_upload_retries TINYINT DEFAULT 0 COMMENT '远程上传重试次数',
+
+    database_dump_info TEXT COMMENT '数据库dump信息 JSON: {"tables":N,"rows":M,"dump_file":"..."}',
+    model_versions TEXT COMMENT '模型版本快照 JSON: {"bolt":{"v1.2":"path",...}}',
+    config_snapshot TEXT COMMENT '关键配置快照 JSON（config.yaml摘要+版本号）',
+
+    trigger_type VARCHAR(20) DEFAULT 'manual' COMMENT '触发类型: scheduled/manual/pre_restore',
+    trigger_source VARCHAR(256) COMMENT '触发来源（scheduler任务名/API用户/操作入口）',
+    operator_id VARCHAR(100) COMMENT '操作人ID（scheduled为system:scheduler）',
+    operator_name VARCHAR(200) COMMENT '操作人姓名',
+    operator_note TEXT COMMENT '操作备注（manual时填写）',
+
+    start_time DATETIME COMMENT '备份开始时间',
+    complete_time DATETIME COMMENT '备份完成时间',
+    duration_seconds INT COMMENT '备份耗时（秒）',
+
+    restore_count INT DEFAULT 0 COMMENT '被用于恢复的次数',
+    last_restore_time DATETIME COMMENT '最近一次恢复时间',
+    pre_restore_snapshot_id VARCHAR(64) COMMENT '恢复产生的快照备份ID（关联反向）',
+
+    tenant_id BIGINT COMMENT '租户ID（预留，目前全局备份）',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    INDEX idx_backup_type_status (backup_type, status),
+    INDEX idx_chain_id (backup_chain_id),
+    INDEX idx_base_backup (base_backup_id),
+    INDEX idx_retention_expire (retention_policy, expire_time),
+    INDEX idx_status_progress (status, progress_percent),
+    INDEX idx_storage_location (storage_location, remote_upload_status),
+    INDEX idx_trigger (trigger_type, trigger_source),
+    INDEX idx_complete_time (complete_time),
+    INDEX idx_tenant (tenant_id),
+    INDEX idx_tenant_status_time (tenant_id, status, create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='灾备备份记录表';
+
+-- ============================================================
+-- 灾备备份与恢复 - 恢复操作日志表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_backup_restore_logs (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    restore_id VARCHAR(64) NOT NULL UNIQUE COMMENT '恢复操作唯一ID',
+    backup_id VARCHAR(64) NOT NULL COMMENT '来源备份ID（关联sc_backup_records）',
+
+    status VARCHAR(20) DEFAULT 'running' COMMENT '状态: running/pre_snapshot/restoring/refreshing/completed/failed/rolled_back',
+    progress_percent TINYINT DEFAULT 0 COMMENT '进度百分比 0-100',
+    error_message TEXT COMMENT '失败错误信息',
+    stack_trace TEXT COMMENT '异常堆栈',
+
+    restore_scope VARCHAR(50) COMMENT '恢复范围: models/config/database/combined',
+    restore_models TINYINT(1) DEFAULT 1 COMMENT '是否恢复模型',
+    restore_config TINYINT(1) DEFAULT 1 COMMENT '是否恢复配置',
+    restore_database TINYINT(1) DEFAULT 0 COMMENT '是否恢复数据库（高危，默认关闭）',
+
+    pre_snapshot_backup_id VARCHAR(64) COMMENT '恢复前自动创建的pre-restore快照ID',
+    pre_snapshot_path VARCHAR(1024) COMMENT 'pre-restore快照本地路径',
+
+    restored_components TEXT COMMENT '已恢复组件列表 JSON',
+    restore_details MEDIUMTEXT COMMENT '恢复详细步骤与结果 JSON',
+    original_paths_backup TEXT COMMENT '原目录重命名备份路径 JSON: {"models":"/path.pre_restore_ts"}',
+
+    cache_refresh_status VARCHAR(20) DEFAULT 'pending' COMMENT '模型缓存刷新状态: pending/running/success/failed/skipped',
+    cache_refresh_detail TEXT COMMENT '缓存刷新细节 JSON',
+    models_reloaded TEXT COMMENT '重载成功的模型列表 JSON',
+    cache_refresh_duration_seconds INT COMMENT '缓存刷新耗时',
+
+    validation_passed TINYINT(1) COMMENT '恢复后完整性校验是否通过',
+    validation_detail TEXT COMMENT '校验详情 JSON（checksum比对）',
+
+    trigger_type VARCHAR(20) DEFAULT 'manual' COMMENT '触发类型: manual/api/scheduled',
+    operator_id VARCHAR(100) COMMENT '操作人ID',
+    operator_name VARCHAR(200) COMMENT '操作人姓名',
+    operator_note TEXT COMMENT '恢复原因/备注',
+
+    skip_pre_snapshot TINYINT(1) DEFAULT 0 COMMENT '是否跳过pre-restore快照（不建议）',
+    skip_cache_refresh TINYINT(1) DEFAULT 0 COMMENT '是否跳过缓存刷新',
+
+    start_time DATETIME COMMENT '恢复开始时间',
+    complete_time DATETIME COMMENT '恢复完成时间',
+    duration_seconds INT COMMENT '总耗时（秒）',
+
+    tenant_id BIGINT COMMENT '租户ID（预留）',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    INDEX idx_backup_id (backup_id),
+    INDEX idx_status_progress (status, progress_percent),
+    INDEX idx_pre_snapshot (pre_snapshot_backup_id),
+    INDEX idx_trigger_operator (trigger_type, operator_id),
+    INDEX idx_complete_time (complete_time),
+    INDEX idx_tenant_status (tenant_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='灾备恢复操作日志表';
+
+-- 初始化备份调度相关的 Leader 选举记录（避免首次运行无行）
+INSERT IGNORE INTO sc_scheduler_leader (leader_key, leader_id, lease_expire_time, version) VALUES
+('daily_incremental_backup_job', '', DATE_SUB(NOW(), INTERVAL 1 HOUR), 0),
+('weekly_full_backup_job', '', DATE_SUB(NOW(), INTERVAL 1 HOUR), 0);
+
+-- 显示灾备模块表
+SHOW TABLES LIKE 'sc_backup%';
+SHOW TABLES LIKE 'sc_%restore%';

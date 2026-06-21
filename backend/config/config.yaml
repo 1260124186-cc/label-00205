@@ -1240,3 +1240,165 @@ model_drift:
     enabled: true
     # 每天凌晨 1 点执行
     cron: "0 1 * * *"
+
+# ============================================================
+# 灾备备份与恢复配置
+# ============================================================
+backup:
+  # 灾备模块全局开关
+  enabled: true
+
+  # 本地备份存储根目录
+  base_path: "./data/backups"
+
+  # 临时工作目录（打包过程使用，建议与 base_path 在同一磁盘）
+  temp_path: "./data/backups/.tmp"
+
+  # 模型文件目录（绝对路径或相对于项目根，增量/全量均包含）
+  models_path: "./trained_models"
+
+  # 配置文件目录（增量/全量均包含）
+  config_path: "./backend/config"
+
+  # 压缩配置
+  compress:
+    # 压缩格式: gzip / zstd / none
+    format: "gzip"
+    # gzip 压缩级别 1-9，zstd 级别 1-22
+    level: 6
+    # 是否在归档内包含文件级 checksum 清单
+    include_manifest: true
+
+  # 完整性校验
+  integrity:
+    # 整体归档哈希算法: sha256 / md5 / both
+    hash_algo: "both"
+    # 组件级文件清单哈希（写入 checksums_detail JSON）
+    component_manifest: true
+
+  # 保留策略（天）
+  retention:
+    # 每日增量备份保留天数
+    incremental_days: 7
+    # 每周全量备份保留天数
+    weekly_days: 90
+    # 月度归档（如需要，可扩展月度备份任务）
+    monthly_days: 180
+    # pre-restore 快照保留天数（用于恢复失败回滚）
+    snapshot_days: 7
+
+  # 调度配置（供 TaskScheduler 读取）
+  scheduler:
+    # 每日增量备份（仅模型+配置）
+    daily_incremental:
+      enabled: true
+      # Cron：默认每日凌晨 02:30（避开训练/归档窗口）
+      cron: "30 2 * * *"
+
+    # 每周全量备份（包含 DB dump）
+    weekly_full:
+      enabled: true
+      # Cron：默认每周日凌晨 03:00（全量备份耗时较长，放在增量之后）
+      cron: "0 3 * * 0"
+
+    # 每次全量备份后是否自动触发过期清理（默认开启）
+    auto_purge_after_full: true
+
+  # MySQL 数据库 dump 配置（全量备份使用）
+  database:
+    # 是否在全量备份中包含 DB dump
+    include_dump: true
+    # mysqldump 可执行路径（留空则从 PATH 查找）
+    mysqldump_path: ""
+    # mysql 客户端可执行路径（恢复时导入使用）
+    mysql_path: ""
+    # dump 额外参数（如 --ignore-table=xxx --single-transaction 等）
+    extra_args:
+      - "--single-transaction"
+      - "--quick"
+      - "--routines"
+      - "--triggers"
+
+  # 异地备份 - S3 兼容对象存储（AWS S3 / MinIO / 阿里云 OSS 等）
+  remote_storage:
+    # 全局开关：启用后将备份文件上传至对象存储
+    enabled: false
+
+    # 默认 Provider: s3 / minio / oss
+    provider: "s3"
+
+    # ---------- 环境变量优先（推荐） ----------
+    # BACKUP_REMOTE_ENDPOINT      - endpoint（MinIO/OSS必填，AWS S3可留空）
+    # BACKUP_REMOTE_ACCESS_KEY    - Access Key
+    # BACKUP_REMOTE_SECRET_KEY    - Secret Key
+    # BACKUP_REMOTE_BUCKET        - Bucket 名称
+    # BACKUP_REMOTE_REGION        - 区域（AWS 默认 us-east-1）
+
+    # ---------- 配置文件方式（环境变量未设置时兜底） ----------
+    # 连接配置
+    endpoint_url: ""                 # MinIO: http://minio:9000 ; 阿里云OSS: https://oss-cn-hangzhou.aliyuncs.com
+    region: "us-east-1"
+    bucket: "bolt-preload-backups"
+    access_key: ""                   # 建议通过环境变量注入，避免明文
+    secret_key: ""
+
+    # 桶内基础路径前缀
+    base_path: "disaster_recovery"
+
+    # 网络与安全
+    use_ssl: true                    # 生产强制开启
+    verify_ssl: true                 # 自签证书场景可临时关
+    addressing_style: "path"         # path (MinIO默认) / virtual (AWS S3默认)
+    connect_timeout_seconds: 10
+    read_timeout_seconds: 300
+
+    # 存储等级（取决于 provider 支持）
+    # AWS: STANDARD / STANDARD_IA / GLACIER / DEEP_ARCHIVE
+    # MinIO 建议 STANDARD
+    storage_class: "STANDARD_IA"
+
+    # 服务端加密（SSE）
+    server_side_encryption: "AES256"   # AES256 / aws:kms / 空
+    # sse_kms_key_id: ""               # SSE-KMS 时填写
+
+    # 并发与重试
+    max_concurrency: 2                 # 同时并发上传的分片/文件数
+    multipart_threshold_mb: 100        # 大于该大小启用分段上传
+    multipart_chunksize_mb: 50
+    max_retries: 3                     # 失败重试次数
+    retry_backoff_seconds: 2           # 指数退避初始秒数
+
+    # 本地已删除时是否同步删除远程（默认 false，防止误删）
+    sync_deletes: false
+
+    # 各 Provider 覆盖（同名键覆盖上方默认值）
+    providers:
+      minio:
+        endpoint_url: "http://localhost:9000"
+        region: "us-east-1"
+        bucket: "bolt-preload-backups"
+        access_key: "minioadmin"
+        secret_key: "minioadmin"
+        use_ssl: false
+        addressing_style: "path"
+        storage_class: "STANDARD"
+      oss:
+        endpoint_url: "https://oss-cn-hangzhou.aliyuncs.com"
+        bucket: "bolt-preload-backups"
+        access_key: ""
+        secret_key: ""
+        addressing_style: "virtual"
+        storage_class: "IA"
+
+  # 恢复流程配置
+  restore:
+    # 恢复前是否自动创建 pre-restore 快照（强烈建议开启）
+    auto_pre_snapshot: true
+    # 恢复后是否自动刷新模型缓存
+    auto_refresh_cache: true
+    # 原目录重命名前缀（恢复失败时可手动回滚）
+    rollback_dir_suffix: ".pre_restore_{timestamp}"
+    # 恢复后校验：检查文件完整性（checksum 比对）
+    verify_after_restore: true
+    # 恢复后缓存刷新最大等待秒数（超时不阻塞主流程）
+    cache_refresh_timeout_seconds: 120

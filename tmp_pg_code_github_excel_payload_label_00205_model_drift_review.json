@@ -1,0 +1,20 @@
+{
+  "repo_id": "label-00205",
+  "author": "",
+  "submitted_at": "2026-06-21 00:08",
+  "trae_session_id": ".538128058159683:e53a6b958c06ee0d757415a403200976_6a36ad8eb9d68543d277a025.6a36aeceb9d68543d277a06c.6a36aecd9bbfa990bad8ccd1:Trae CN.T(2026/6/20 23:16:30)",
+  "user_prompt": "实现模型漂移检测与自动重训编排。漂移维度：数据分布漂移（PSI/KS）、预测置信度分布漂移、误报率上升、特征均值偏移。每日批处理计算 per-model 漂移分数，超阈值写入 sc_model_drift_events。漂移响应策略：notify（仅通知）/ shadow_retrain（训练新版本进 Shadow）/ auto_retrain（自动重训）。",
+  "repo_url": "https://github.com/1260124186-cc/label-00205",
+  "commit_id": "7df7d9c3237731fb42a20d7541e7826e67693800",
+  "task_type": "Feature迭代",
+  "business_domain": "AI/ML应用",
+  "change_scope": "跨模块多文件",
+  "task_difficulty": "困难",
+  "task_completed": "未完成任务",
+  "satisfaction": "不满意",
+  "dissatisfaction_reason": "过程不满意：模型任务拆解漏掉了把“定时批处理可实际执行、手动检测/重训接口可直接调用”作为交付闭环校验，当前把多个实例方法当类方法直接调用，还把重训私有方法按错误参数形态暴露给路由，说明收尾前没有按主链路逐项回归，导致漂移检测与响应编排在关键入口上仍会直接报错。产物不满意：模型漂移模块虽然补了算法、事件表和编排框架，但定时任务配置没有接入实际调度读取路径，手动检测/重训/待处理事件接口也存在直接报错的调用方式，导致“每日批处理 + 响应策略编排”主链路没有真正跑通。",
+  "single_choice": "",
+  "qa_status": "",
+  "qa_note": "",
+  "submitted_to_byte": ""
+}

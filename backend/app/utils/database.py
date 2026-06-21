@@ -4065,3 +4065,309 @@ class ModelPromotionSuggestion(Base):
             'create_time': self.create_time,
             'update_time': self.update_time,
         }
+
+
+# ============================================================
+# 灾备备份与恢复模块 ORM 模型
+# ============================================================
+
+class BackupRecord(Base):
+    """
+    备份记录表模型
+
+    对应数据库表: sc_backup_records
+    存储每次备份的元数据信息，包括大小、组件、checksum、保留策略等。
+    """
+    __tablename__ = 'sc_backup_records'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, comment='主键')
+    backup_id = Column(String(100), unique=True, nullable=False, comment='备份唯一ID')
+    backup_type = Column(String(20), nullable=False, comment='备份类型: incremental(增量)/full(全量)/snapshot(快照)')
+    backup_scope = Column(String(50), comment='备份范围: models_config/models_config_db/all')
+
+    status = Column(String(20), default='pending', comment='状态: pending/running/completed/failed/uploading/uploaded')
+    progress_percent = Column(Float, default=0.0, comment='进度百分比 0-100')
+
+    size_bytes = Column(BigInteger, default=0, comment='备份文件总大小（字节）')
+    compressed_size_bytes = Column(BigInteger, default=0, comment='压缩后大小（字节）')
+    component_list = Column(Text, comment='包含的组件列表 JSON, 如 ["models","config","database"]')
+    component_sizes = Column(Text, comment='各组件大小明细 JSON')
+    file_count = Column(Integer, default=0, comment='文件总数')
+
+    checksum_sha256 = Column(String(128), comment='整体备份包 SHA256 校验和')
+    checksum_md5 = Column(String(64), comment='整体备份包 MD5 校验和')
+    checksums_detail = Column(Text, comment='单文件校验和明细 JSON')
+
+    retention_policy = Column(String(30), default='standard', comment='保留策略: standard/weekly/monthly/yearly/permanent')
+    retention_days = Column(Integer, default=30, comment='保留天数，0=永久')
+    expire_time = Column(DateTime, comment='过期时间')
+
+    base_backup_id = Column(String(100), comment='增量备份的基准备份ID')
+    backup_chain_id = Column(String(100), comment='备份链ID（同一周内的增量+全量共享）')
+    incremental_since = Column(DateTime, comment='增量备份的起始时间点')
+
+    storage_location = Column(String(20), default='local', comment='存储位置: local/s3/minio/oss')
+    local_path = Column(String(500), comment='本地存储路径')
+    remote_bucket = Column(String(200), comment='远程存储桶名')
+    remote_object_key = Column(String(500), comment='远程对象Key')
+    remote_endpoint = Column(String(500), comment='远程服务端点')
+    remote_upload_status = Column(String(20), comment='远程上传状态: pending/uploading/success/failed')
+    remote_upload_time = Column(DateTime, comment='远程上传完成时间')
+    remote_upload_retries = Column(Integer, default=0, comment='远程上传重试次数')
+
+    database_dump_info = Column(Text, comment='数据库dump信息 JSON (表数量、行数等)')
+    model_versions = Column(Text, comment='模型版本清单 JSON')
+    config_snapshot = Column(Text, comment='配置快照摘要 JSON')
+
+    trigger_type = Column(String(20), default='scheduled', comment='触发类型: scheduled/manual/pre_restore')
+    trigger_source = Column(String(100), comment='触发来源 (调度器/用户/恢复操作)')
+    operator_id = Column(String(50), comment='操作人ID (手动触发时)')
+    operator_name = Column(String(100), comment='操作人姓名')
+
+    error_message = Column(Text, comment='错误信息 (失败时)')
+    error_stack = Column(Text, comment='错误堆栈')
+    duration_seconds = Column(Integer, comment='执行时长（秒）')
+
+    restore_count = Column(Integer, default=0, comment='被恢复次数')
+    last_restore_time = Column(DateTime, comment='最后一次恢复时间')
+
+    pre_restore_snapshot_id = Column(String(100), comment='恢复前创建的快照备份ID')
+
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+    complete_time = Column(DateTime, comment='完成时间')
+
+    __table_args__ = (
+        Index('idx_backup_id', 'backup_id'),
+        Index('idx_backup_type', 'backup_type'),
+        Index('idx_backup_status', 'status'),
+        Index('idx_backup_retention', 'retention_policy', 'expire_time'),
+        Index('idx_backup_chain', 'backup_chain_id'),
+        Index('idx_backup_storage', 'storage_location'),
+        Index('idx_backup_create_time', 'create_time'),
+        Index('idx_backup_trigger', 'trigger_type'),
+        Index('idx_backup_tenant', 'tenant_id'),
+        Index('idx_backup_tenant_time', 'tenant_id', 'create_time'),
+    )
+
+    @property
+    def component_list_dict(self) -> List[str]:
+        import json as _json
+        try:
+            return _json.loads(self.component_list) if self.component_list else []
+        except (_json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def component_sizes_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.component_sizes) if self.component_sizes else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def checksums_detail_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.checksums_detail) if self.checksums_detail else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def database_dump_info_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.database_dump_info) if self.database_dump_info else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def model_versions_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.model_versions) if self.model_versions else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def config_snapshot_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.config_snapshot) if self.config_snapshot else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    def to_dict(self) -> Dict:
+        return {
+            'id': self.id,
+            'backup_id': self.backup_id,
+            'backup_type': self.backup_type,
+            'backup_scope': self.backup_scope,
+            'status': self.status,
+            'progress_percent': self.progress_percent,
+            'size_bytes': self.size_bytes,
+            'size_mb': round((self.size_bytes or 0) / (1024 * 1024), 2),
+            'compressed_size_bytes': self.compressed_size_bytes,
+            'components': self.component_list_dict,
+            'component_sizes': self.component_sizes_dict,
+            'file_count': self.file_count,
+            'checksum_sha256': self.checksum_sha256,
+            'checksum_md5': self.checksum_md5,
+            'retention_policy': self.retention_policy,
+            'retention_days': self.retention_days,
+            'expire_time': self.expire_time.isoformat() if self.expire_time else None,
+            'base_backup_id': self.base_backup_id,
+            'backup_chain_id': self.backup_chain_id,
+            'incremental_since': self.incremental_since.isoformat() if self.incremental_since else None,
+            'storage_location': self.storage_location,
+            'local_path': self.local_path,
+            'remote_bucket': self.remote_bucket,
+            'remote_object_key': self.remote_object_key,
+            'remote_endpoint': self.remote_endpoint,
+            'remote_upload_status': self.remote_upload_status,
+            'remote_upload_time': self.remote_upload_time.isoformat() if self.remote_upload_time else None,
+            'database_dump_info': self.database_dump_info_dict,
+            'model_versions': self.model_versions_dict,
+            'config_snapshot': self.config_snapshot_dict,
+            'trigger_type': self.trigger_type,
+            'trigger_source': self.trigger_source,
+            'operator_id': self.operator_id,
+            'operator_name': self.operator_name,
+            'error_message': self.error_message,
+            'duration_seconds': self.duration_seconds,
+            'restore_count': self.restore_count,
+            'last_restore_time': self.last_restore_time.isoformat() if self.last_restore_time else None,
+            'pre_restore_snapshot_id': self.pre_restore_snapshot_id,
+            'tenant_id': self.tenant_id,
+            'create_time': self.create_time.isoformat() if self.create_time else None,
+            'complete_time': self.complete_time.isoformat() if self.complete_time else None,
+        }
+
+
+class BackupRestoreLog(Base):
+    """
+    备份恢复日志表模型
+
+    对应数据库表: sc_backup_restore_logs
+    记录每次备份恢复操作的详细日志。
+    """
+    __tablename__ = 'sc_backup_restore_logs'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, comment='主键')
+    restore_id = Column(String(100), unique=True, nullable=False, comment='恢复操作唯一ID')
+    backup_id = Column(String(100), nullable=False, comment='源备份ID')
+    backup_record_id = Column(BigInteger, comment='关联备份记录ID')
+
+    status = Column(String(20), default='pending', comment='状态: pending/pre_snapshot/restoring/refresh_cache/completed/failed')
+    progress_percent = Column(Float, default=0.0, comment='进度百分比')
+
+    restore_scope = Column(String(50), comment='恢复范围: models/config/database/all')
+    restore_options = Column(Text, comment='恢复选项 JSON')
+
+    pre_snapshot_backup_id = Column(String(100), comment='恢复前创建的快照备份ID')
+    pre_snapshot_path = Column(String(500), comment='恢复前快照路径')
+
+    restored_components = Column(Text, comment='已恢复组件 JSON')
+    restored_file_count = Column(Integer, default=0, comment='已恢复文件数')
+    restored_size_bytes = Column(BigInteger, default=0, comment='已恢复数据大小')
+
+    cache_refresh_status = Column(String(20), comment='模型缓存刷新状态: pending/running/success/failed/skipped')
+    cache_refresh_detail = Column(Text, comment='缓存刷新详情 JSON')
+    models_reloaded = Column(Text, comment='重新加载的模型列表 JSON')
+
+    trigger_type = Column(String(20), default='manual', comment='触发类型: manual/auto/drill')
+    operator_id = Column(String(50), comment='操作人ID')
+    operator_name = Column(String(100), comment='操作人姓名')
+    operator_note = Column(String(500), comment='操作备注')
+
+    validation_result = Column(Text, comment='恢复后校验结果 JSON')
+    validation_passed = Column(Boolean, comment='校验是否通过')
+
+    error_message = Column(Text, comment='错误信息')
+    error_stack = Column(Text, comment='错误堆栈')
+    duration_seconds = Column(Integer, comment='执行时长（秒）')
+
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+    complete_time = Column(DateTime, comment='完成时间')
+
+    __table_args__ = (
+        Index('idx_restore_id', 'restore_id'),
+        Index('idx_restore_backup_id', 'backup_id'),
+        Index('idx_restore_status', 'status'),
+        Index('idx_restore_create_time', 'create_time'),
+        Index('idx_restore_tenant', 'tenant_id'),
+    )
+
+    @property
+    def restore_options_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.restore_options) if self.restore_options else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def restored_components_dict(self) -> List[str]:
+        import json as _json
+        try:
+            return _json.loads(self.restored_components) if self.restored_components else []
+        except (_json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def cache_refresh_detail_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.cache_refresh_detail) if self.cache_refresh_detail else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def models_reloaded_list(self) -> List[str]:
+        import json as _json
+        try:
+            return _json.loads(self.models_reloaded) if self.models_reloaded else []
+        except (_json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def validation_result_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.validation_result) if self.validation_result else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    def to_dict(self) -> Dict:
+        return {
+            'id': self.id,
+            'restore_id': self.restore_id,
+            'backup_id': self.backup_id,
+            'status': self.status,
+            'progress_percent': self.progress_percent,
+            'restore_scope': self.restore_scope,
+            'restore_options': self.restore_options_dict,
+            'pre_snapshot_backup_id': self.pre_snapshot_backup_id,
+            'pre_snapshot_path': self.pre_snapshot_path,
+            'restored_components': self.restored_components_dict,
+            'restored_file_count': self.restored_file_count,
+            'restored_size_bytes': self.restored_size_bytes,
+            'cache_refresh_status': self.cache_refresh_status,
+            'cache_refresh_detail': self.cache_refresh_detail_dict,
+            'models_reloaded': self.models_reloaded_list,
+            'trigger_type': self.trigger_type,
+            'operator_id': self.operator_id,
+            'operator_name': self.operator_name,
+            'operator_note': self.operator_note,
+            'validation_result': self.validation_result_dict,
+            'validation_passed': self.validation_passed,
+            'error_message': self.error_message,
+            'duration_seconds': self.duration_seconds,
+            'tenant_id': self.tenant_id,
+            'create_time': self.create_time.isoformat() if self.create_time else None,
+            'complete_time': self.complete_time.isoformat() if self.complete_time else None,
+        }

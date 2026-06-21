@@ -108,6 +108,8 @@ class TaskScheduler:
             'purge_expired_job': 'archive',
             'partition_maintenance_job': 'maintenance',
             'model_drift_job': 'model_drift',
+            'daily_incremental_backup_job': 'backup',
+            'weekly_full_backup_job': 'backup',
         }
 
         self.leader_required = config.get('scheduler.leader_election.required', False)
@@ -120,6 +122,8 @@ class TaskScheduler:
                 'purge_expired_job',
                 'partition_maintenance_job',
                 'model_drift_job',
+                'daily_incremental_backup_job',
+                'weekly_full_backup_job',
             ]
         )
 
@@ -135,6 +139,8 @@ class TaskScheduler:
             'purge_expired_job',
             'partition_maintenance_job',
             'model_drift_job',
+            'daily_incremental_backup_job',
+            'weekly_full_backup_job',
         ]
 
         event_bus.subscribe(
@@ -315,6 +321,33 @@ class TaskScheduler:
                 replace_existing=True
             )
             logger.info(f"模型漂移检测任务已添加: {cron}")
+
+        backup_cfg = config.get('backup', {}) or {}
+        backup_scheduler = backup_cfg.get('scheduler', {}) if backup_cfg else {}
+
+        daily_inc_cfg = backup_scheduler.get('daily_incremental', {})
+        if daily_inc_cfg.get('enabled', True) and backup_cfg.get('enabled', True):
+            cron = daily_inc_cfg.get('cron', '30 2 * * *')
+            self.scheduler.add_job(
+                self._daily_incremental_backup_job,
+                CronTrigger.from_crontab(cron),
+                id='daily_incremental_backup_job',
+                name='每日增量备份任务',
+                replace_existing=True
+            )
+            logger.info(f"每日增量备份任务已添加: {cron}")
+
+        weekly_full_cfg = backup_scheduler.get('weekly_full', {})
+        if weekly_full_cfg.get('enabled', True) and backup_cfg.get('enabled', True):
+            cron = weekly_full_cfg.get('cron', '0 3 * * 0')
+            self.scheduler.add_job(
+                self._weekly_full_backup_job,
+                CronTrigger.from_crontab(cron),
+                id='weekly_full_backup_job',
+                name='每周全量备份任务',
+                replace_existing=True
+            )
+            logger.info(f"每周全量备份任务已添加: {cron}")
 
     def _acquire_leadership_if_needed(self, job_name: str) -> bool:
         """
@@ -1074,6 +1107,103 @@ class TaskScheduler:
         finally:
             self._release_leadership_if_needed(job_name)
 
+    def _daily_incremental_backup_job(self) -> None:
+        """
+        每日增量备份任务（仅模型+配置，支持Leader选举）
+        """
+        job_name = 'daily_incremental_backup_job'
+
+        if not self._acquire_leadership_if_needed(job_name):
+            return
+
+        try:
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.core.backup import get_backup_ops_manager
+
+                backup_mgr = get_backup_ops_manager()
+                logger.info("[Scheduler] 开始执行每日增量备份")
+
+                record = backup_mgr.create_incremental_backup(
+                    trigger_type='scheduled',
+                    trigger_source='scheduler:daily_incremental',
+                    operator_id='system:scheduler',
+                    operator_name='scheduler',
+                )
+
+                if record:
+                    ctx.total_nodes = 1
+                    ctx.success_count = 1
+                    logger.info(
+                        f"[Scheduler] 每日增量备份完成: backup_id={record.backup_id}, "
+                        f"size={record.compressed_size_bytes or record.size_bytes or 0} bytes"
+                    )
+                else:
+                    ctx.failed_count = 1
+                    ctx.record_failure('incremental_backup', "未产生备份记录", "EmptyBackupRecord")
+                    logger.error("[Scheduler] 每日增量备份未产生备份记录")
+
+        except Exception as e:
+            logger.exception(f"每日增量备份任务失败: {e}")
+        finally:
+            self._release_leadership_if_needed(job_name)
+
+    def _weekly_full_backup_job(self) -> None:
+        """
+        每周全量备份任务（包含 DB dump，支持Leader选举）
+        """
+        job_name = 'weekly_full_backup_job'
+
+        if not self._acquire_leadership_if_needed(job_name):
+            return
+
+        try:
+            with job_execution_context(
+                job_name=job_name,
+                job_type=self.job_type_map[job_name],
+                trigger_type='scheduled',
+                service=self.job_execution_service,
+            ) as ctx:
+                from app.core.backup import get_backup_ops_manager
+
+                backup_mgr = get_backup_ops_manager()
+                logger.info("[Scheduler] 开始执行每周全量备份")
+
+                record = backup_mgr.create_full_backup(
+                    trigger_type='scheduled',
+                    trigger_source='scheduler:weekly_full',
+                    operator_id='system:scheduler',
+                    operator_name='scheduler',
+                )
+
+                if record:
+                    ctx.total_nodes = 1
+                    ctx.success_count = 1
+                    logger.info(
+                        f"[Scheduler] 每周全量备份完成: backup_id={record.backup_id}, "
+                        f"size={record.compressed_size_bytes or record.size_bytes or 0} bytes"
+                    )
+                else:
+                    ctx.failed_count = 1
+                    ctx.record_failure('full_backup', "未产生备份记录", "EmptyBackupRecord")
+                    logger.error("[Scheduler] 每周全量备份未产生备份记录")
+
+                try:
+                    purged = backup_mgr.cleanup_expired_backups()
+                    if purged:
+                        logger.info(f"[Scheduler] 过期备份清理完成，共清理 {purged} 条")
+                except Exception as pe:
+                    logger.warning(f"[Scheduler] 过期备份清理异常（不影响主流程）: {pe}")
+
+        except Exception as e:
+            logger.exception(f"每周全量备份任务失败: {e}")
+        finally:
+            self._release_leadership_if_needed(job_name)
+
     def _parse_json_field(self, value: Any, default: Any) -> Any:
         """解析JSON字段"""
         if not value:
@@ -1314,6 +1444,18 @@ class TaskScheduler:
                     self._get_archive_job_config('partition_maintenance', '30 2 * * *'),
                     self._partition_maintenance_job,
                 ),
+                'model_drift_job': (
+                    self.config.get('model_drift_job', {}),
+                    self._model_drift_job,
+                ),
+                'daily_incremental_backup_job': (
+                    self._get_backup_job_config('daily_incremental', '30 2 * * *'),
+                    self._daily_incremental_backup_job,
+                ),
+                'weekly_full_backup_job': (
+                    self._get_backup_job_config('weekly_full', '0 3 * * 0'),
+                    self._weekly_full_backup_job,
+                ),
             }
 
             for job_id, (job_cfg, job_func) in job_configs.items():
@@ -1351,6 +1493,31 @@ class TaskScheduler:
         cron = f'0 4 */{max(1, cleanup_hours // 24)} * *'
         return {
             'enabled': cleanup_enabled,
+            'cron': cron,
+        }
+
+    def _get_backup_job_config(
+        self, job_key: str, default_cron: str
+    ) -> Dict[str, Any]:
+        """
+        获取灾备备份类任务的配置（从 backup.scheduler.{job_key} 读取）
+
+        Args:
+            job_key: daily_incremental / weekly_full
+            default_cron: 默认 cron 表达式
+
+        Returns:
+            {'enabled': bool, 'cron': str}
+        """
+        backup_cfg = config_manager.get('backup', {}) or {}
+        backup_enabled = backup_cfg.get('enabled', True)
+        scheduler_cfg = backup_cfg.get('scheduler', {}) if backup_cfg else {}
+        job_cfg = scheduler_cfg.get(job_key, {})
+
+        enabled = backup_enabled and job_cfg.get('enabled', True)
+        cron = job_cfg.get('cron', default_cron)
+        return {
+            'enabled': enabled,
             'cron': cron,
         }
 
