@@ -351,6 +351,72 @@ class AlertEvent(Base):
     )
 
 
+class MaintenanceWindow(Base):
+    """
+    维护窗口表模型
+
+    对应数据库表: sc_maintenance_windows
+    存储计划检修和临时作业的维护窗口，窗口内告警按策略静默。
+
+    Attributes:
+        id: 主键
+        window_no: 窗口编号
+        window_name: 窗口名称
+        node_scope: 作用范围 device/flange/bolt (装置/法兰/螺栓)
+        node_type: 节点类型 bolt/flange
+        node_ids: 节点ID列表 JSON，空表示该 scope 下全部
+        device_id: 装置ID (当 node_scope=device 时使用)
+        start_time: 开始时间
+        end_time: 结束时间
+        actual_end_time: 实际结束时间（提前结束时设置）
+        window_type: 窗口类型 planned=计划检修 / temporary=临时作业
+        suppress_level: 静默级别 all=全部静默 / non_emergency=仅静默非紧急
+        status: 状态 pending/active/ended/cancelled
+        reason: 维护原因/说明
+        operator_id: 操作人ID
+        operator_name: 操作人姓名
+        suppressed_count: 被静默的告警数量
+        extra_info: 扩展信息 JSON
+        tenant_id: 租户ID
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_maintenance_windows'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    window_no = Column(String(50), unique=True, comment='窗口编号')
+    window_name = Column(String(200), nullable=False, comment='窗口名称')
+    node_scope = Column(String(20), nullable=False, comment='作用范围 device/flange/bolt')
+    node_type = Column(String(20), comment='节点类型 bolt/flange')
+    node_ids = Column(Text, comment='节点ID列表 JSON')
+    device_id = Column(String(100), comment='装置ID')
+    start_time = Column(DateTime, nullable=False, comment='开始时间')
+    end_time = Column(DateTime, nullable=False, comment='结束时间')
+    actual_end_time = Column(DateTime, comment='实际结束时间')
+    window_type = Column(String(20), nullable=False, default='planned', comment='窗口类型 planned/temporary')
+    suppress_level = Column(String(20), nullable=False, default='all', comment='静默级别 all/non_emergency')
+    status = Column(String(20), nullable=False, default='pending', comment='状态 pending/active/ended/cancelled')
+    reason = Column(String(500), comment='维护原因/说明')
+    operator_id = Column(String(50), comment='操作人ID')
+    operator_name = Column(String(100), comment='操作人姓名')
+    suppressed_count = Column(Integer, default=0, comment='被静默的告警数量')
+    extra_info = Column(Text, comment='扩展信息 JSON')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_mw_status', 'status'),
+        Index('idx_mw_scope', 'node_scope'),
+        Index('idx_mw_type', 'window_type'),
+        Index('idx_mw_time_range', 'start_time', 'end_time'),
+        Index('idx_mw_device', 'device_id'),
+        Index('idx_mw_tenant_status', 'tenant_id', 'status'),
+        Index('idx_mw_tenant_time', 'tenant_id', 'start_time', 'end_time'),
+        Index('idx_tenant', 'tenant_id'),
+    )
+
+
 class AlertSubscription(Base):
     """
     告警订阅管理表模型

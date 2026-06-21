@@ -1348,6 +1348,83 @@ class AlertListResponse(BaseModel):
     items: List[AlertEventResponse]
 
 
+# ---------- 维护窗口 ----------
+
+class MaintenanceWindowBase(BaseModel):
+    """维护窗口基础模型"""
+    window_name: str = Field(..., description="窗口名称", max_length=200)
+    node_scope: str = Field(..., description="作用范围 device/flange/bolt")
+    node_type: Optional[str] = Field(None, description="节点类型 bolt/flange")
+    node_ids: Optional[List[str]] = Field(None, description="节点ID列表")
+    device_id: Optional[str] = Field(None, description="装置ID")
+    start_time: datetime = Field(..., description="开始时间")
+    end_time: datetime = Field(..., description="结束时间")
+    window_type: str = Field("planned", description="窗口类型 planned/temporary")
+    suppress_level: str = Field("all", description="静默级别 all/non_emergency")
+    reason: Optional[str] = Field(None, description="维护原因/说明", max_length=500)
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+    extra_info: Optional[Dict[str, Any]] = Field(None, description="扩展信息")
+
+
+class MaintenanceWindowCreate(MaintenanceWindowBase):
+    """创建维护窗口请求"""
+    pass
+
+
+class MaintenanceWindowUpdate(BaseModel):
+    """更新维护窗口请求"""
+    window_name: Optional[str] = Field(None, max_length=200)
+    node_scope: Optional[str] = None
+    node_type: Optional[str] = None
+    node_ids: Optional[List[str]] = None
+    device_id: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    window_type: Optional[str] = None
+    suppress_level: Optional[str] = None
+    reason: Optional[str] = Field(None, max_length=500)
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    extra_info: Optional[Dict[str, Any]] = None
+
+
+class MaintenanceWindowResponse(MaintenanceWindowBase):
+    """维护窗口响应"""
+    id: int
+    window_no: Optional[str] = None
+    status: str
+    actual_end_time: Optional[datetime] = None
+    suppressed_count: int = 0
+    tenant_id: Optional[int] = None
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MaintenanceWindowListResponse(BaseModel):
+    """维护窗口列表响应"""
+    total: int
+    items: List[MaintenanceWindowResponse]
+
+
+class MaintenanceWindowEndRequest(BaseModel):
+    """提前结束维护窗口请求"""
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+    reason: Optional[str] = Field(None, description="提前结束原因")
+
+
+class MaintenanceWindowExtendRequest(BaseModel):
+    """延期维护窗口请求"""
+    new_end_time: datetime = Field(..., description="新的结束时间")
+    operator_id: Optional[str] = Field(None, description="操作人ID")
+    operator_name: Optional[str] = Field(None, description="操作人姓名")
+    reason: Optional[str] = Field(None, description="延期原因")
+
+
 # ---------- 告警订阅 ----------
 
 class AlertSubscriptionBase(BaseModel):

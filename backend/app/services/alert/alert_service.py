@@ -128,6 +128,9 @@ class AlertService:
             )
             return None
 
+        if self._check_maintenance_suppression(node_type, node_id, effective_level):
+            return None
+
         alert = self.create_alert(
             rule=matched_rule,
             node_type=node_type,
@@ -221,6 +224,38 @@ class AlertService:
             ).first()
 
             return silenced is not None
+
+    # ---------- 维护窗口静默 ----------
+
+    def _check_maintenance_suppression(
+        self,
+        node_type: str,
+        node_id: str,
+        alert_level: int,
+    ) -> bool:
+        """
+        检查节点是否处于维护窗口内，决定是否静默告警
+
+        Returns:
+            True 表示应静默该告警
+        """
+        try:
+            from app.services.alert import MaintenanceWindowService
+            mw_service = MaintenanceWindowService()
+            suppressed, _window = mw_service.check_maintenance_suppression(
+                node_type=node_type,
+                node_id=node_id,
+                alert_level=alert_level,
+            )
+            if suppressed:
+                logger.info(
+                    f"告警被维护窗口静默: node={node_type}/{node_id}, "
+                    f"level={alert_level}"
+                )
+            return suppressed
+        except Exception as e:
+            logger.warning(f"维护窗口静默检查失败，跳过: {e}")
+            return False
 
     # ---------- 创建告警 ----------
 

@@ -260,6 +260,41 @@ CREATE TABLE IF NOT EXISTS sc_alert_events (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警事件表';
 
 -- ============================================================
+-- 维护窗口表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_maintenance_windows (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    window_no VARCHAR(50) UNIQUE COMMENT '窗口编号',
+    window_name VARCHAR(200) NOT NULL COMMENT '窗口名称',
+    node_scope VARCHAR(20) NOT NULL COMMENT '作用范围 device/flange/bolt',
+    node_type VARCHAR(20) COMMENT '节点类型 bolt/flange',
+    node_ids TEXT COMMENT '节点ID列表 JSON',
+    device_id VARCHAR(100) COMMENT '装置ID',
+    start_time DATETIME NOT NULL COMMENT '开始时间',
+    end_time DATETIME NOT NULL COMMENT '结束时间',
+    actual_end_time DATETIME COMMENT '实际结束时间',
+    window_type VARCHAR(20) NOT NULL DEFAULT 'planned' COMMENT '窗口类型 planned/temporary',
+    suppress_level VARCHAR(20) NOT NULL DEFAULT 'all' COMMENT '静默级别 all/non_emergency',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' COMMENT '状态 pending/active/ended/cancelled',
+    reason VARCHAR(500) COMMENT '维护原因/说明',
+    operator_id VARCHAR(50) COMMENT '操作人ID',
+    operator_name VARCHAR(100) COMMENT '操作人姓名',
+    suppressed_count INT DEFAULT 0 COMMENT '被静默的告警数量',
+    extra_info TEXT COMMENT '扩展信息 JSON',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_mw_status (status),
+    INDEX idx_mw_scope (node_scope),
+    INDEX idx_mw_type (window_type),
+    INDEX idx_mw_time_range (start_time, end_time),
+    INDEX idx_mw_device (device_id),
+    INDEX idx_mw_tenant_status (tenant_id, status),
+    INDEX idx_mw_tenant_time (tenant_id, start_time, end_time),
+    INDEX idx_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='维护窗口表';
+
+-- ============================================================
 -- 告警订阅管理表
 -- ============================================================
 CREATE TABLE IF NOT EXISTS sc_alert_subscriptions (

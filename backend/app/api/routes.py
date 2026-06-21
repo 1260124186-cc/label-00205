@@ -75,6 +75,8 @@ from app.api.schemas import (
     CmmsSyncLogResponse, CmmsSyncLogListResponse,
     CmmsWebhookResponse,
     AlertUpgradeTriggerResponse,
+    MaintenanceWindowCreate, MaintenanceWindowUpdate, MaintenanceWindowResponse,
+    MaintenanceWindowListResponse, MaintenanceWindowEndRequest, MaintenanceWindowExtendRequest,
     AuditRecordResponse, AuditListResponse,
     AuditRetentionUpdateRequest, AuditCleanupResponse,
     AuditExportRequest, ExplainabilityReportResponse,
@@ -3209,6 +3211,46 @@ def _work_order_to_dict(wo) -> Dict[str, Any]:
     return data
 
 
+def _mw_to_dict(mw) -> Dict[str, Any]:
+    """将维护窗口 ORM 对象转为响应字典"""
+    data = {
+        'id': mw.id,
+        'window_no': mw.window_no,
+        'window_name': mw.window_name,
+        'node_scope': mw.node_scope,
+        'node_type': mw.node_type,
+        'device_id': mw.device_id,
+        'start_time': mw.start_time,
+        'end_time': mw.end_time,
+        'actual_end_time': mw.actual_end_time,
+        'window_type': mw.window_type,
+        'suppress_level': mw.suppress_level,
+        'status': mw.status,
+        'reason': mw.reason,
+        'operator_id': mw.operator_id,
+        'operator_name': mw.operator_name,
+        'suppressed_count': mw.suppressed_count or 0,
+        'tenant_id': mw.tenant_id,
+        'create_time': mw.create_time,
+        'update_time': mw.update_time,
+    }
+    if mw.node_ids:
+        try:
+            data['node_ids'] = json.loads(mw.node_ids)
+        except Exception:
+            data['node_ids'] = []
+    else:
+        data['node_ids'] = []
+    if mw.extra_info:
+        try:
+            data['extra_info'] = json.loads(mw.extra_info)
+        except Exception:
+            data['extra_info'] = {}
+    else:
+        data['extra_info'] = {}
+    return data
+
+
 # ==================== 告警规则管理 ====================
 
 @router.get(
@@ -3418,6 +3460,219 @@ async def trigger_alert_upgrade():
         }
     except Exception as e:
         logger.error(f"手动触发告警升级失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 维护窗口管理 ====================
+
+@router.get(
+    "/alert/maintenance-windows",
+    response_model=MaintenanceWindowListResponse,
+    tags=["维护窗口"],
+    summary="查询维护窗口列表"
+)
+async def list_maintenance_windows(
+    status: Optional[str] = Query(None, description="状态 pending/active/ended/cancelled"),
+    node_scope: Optional[str] = Query(None, description="作用范围 device/flange/bolt"),
+    window_type: Optional[str] = Query(None, description="窗口类型 planned/temporary"),
+    device_id: Optional[str] = Query(None, description="装置ID"),
+    keyword: Optional[str] = Query(None, description="关键词搜索（名称/编号/原因）"),
+    start_from: Optional[datetime] = Query(None, description="开始时间起"),
+    end_to: Optional[datetime] = Query(None, description="结束时间止"),
+    tenant_id: Optional[int] = Query(None, description="租户ID"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=200, description="每页数量"),
+):
+    """查询维护窗口列表（分页）"""
+    try:
+        from app.services.alert import MaintenanceWindowService
+        service = MaintenanceWindowService()
+        total, items = service.list_windows(
+            status=status,
+            node_scope=node_scope,
+            window_type=window_type,
+            device_id=device_id,
+            keyword=keyword,
+            start_from=start_from,
+            end_to=end_to,
+            tenant_id=tenant_id,
+            page=page,
+            page_size=page_size,
+        )
+        return {"total": total, "items": [_mw_to_dict(w) for w in items]}
+    except Exception as e:
+        logger.error(f"查询维护窗口列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/alert/maintenance-windows/{window_id}",
+    response_model=MaintenanceWindowResponse,
+    tags=["维护窗口"],
+    summary="获取维护窗口详情"
+)
+async def get_maintenance_window(window_id: int):
+    """获取单个维护窗口详情"""
+    try:
+        from app.services.alert import MaintenanceWindowService
+        service = MaintenanceWindowService()
+        mw = service.get_window(window_id)
+        if not mw:
+            raise HTTPException(status_code=404, detail="维护窗口不存在")
+        return _mw_to_dict(mw)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取维护窗口详情失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/alert/maintenance-windows",
+    response_model=MaintenanceWindowResponse,
+    tags=["维护窗口"],
+    summary="创建维护窗口"
+)
+async def create_maintenance_window(request: MaintenanceWindowCreate):
+    """创建维护窗口"""
+    try:
+        from app.services.alert import MaintenanceWindowService
+        service = MaintenanceWindowService()
+        data = request.model_dump()
+        mw = service.create_window(**data)
+        return _mw_to_dict(mw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建维护窗口失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/alert/maintenance-windows/{window_id}",
+    response_model=MaintenanceWindowResponse,
+    tags=["维护窗口"],
+    summary="更新维护窗口"
+)
+async def update_maintenance_window(window_id: int, request: MaintenanceWindowUpdate):
+    """更新维护窗口（仅 pending/active 状态）"""
+    try:
+        from app.services.alert import MaintenanceWindowService
+        service = MaintenanceWindowService()
+        data = request.model_dump(exclude_unset=True)
+        mw = service.update_window(window_id, **data)
+        if not mw:
+            raise HTTPException(status_code=404, detail="维护窗口不存在")
+        return _mw_to_dict(mw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新维护窗口失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/alert/maintenance-windows/{window_id}",
+    tags=["维护窗口"],
+    summary="删除维护窗口（逻辑删除）"
+)
+async def delete_maintenance_window(window_id: int):
+    """删除维护窗口（逻辑删除，状态置为 cancelled）"""
+    try:
+        from app.services.alert import MaintenanceWindowService
+        service = MaintenanceWindowService()
+        ok = service.delete_window(window_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="维护窗口不存在")
+        return {"status": "success", "message": "维护窗口已取消"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除维护窗口失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/alert/maintenance-windows/{window_id}/end",
+    response_model=MaintenanceWindowResponse,
+    tags=["维护窗口"],
+    summary="提前结束维护窗口"
+)
+async def end_maintenance_window(window_id: int, request: MaintenanceWindowEndRequest):
+    """提前结束维护窗口（仅 pending/active 状态）"""
+    try:
+        from app.services.alert import MaintenanceWindowService
+        service = MaintenanceWindowService()
+        mw = service.end_window(
+            window_id=window_id,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+            reason=request.reason,
+        )
+        if not mw:
+            raise HTTPException(status_code=404, detail="维护窗口不存在")
+        return _mw_to_dict(mw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"提前结束维护窗口失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/alert/maintenance-windows/{window_id}/extend",
+    response_model=MaintenanceWindowResponse,
+    tags=["维护窗口"],
+    summary="延期维护窗口"
+)
+async def extend_maintenance_window(window_id: int, request: MaintenanceWindowExtendRequest):
+    """延期维护窗口（延长结束时间，仅 pending/active 状态）"""
+    try:
+        from app.services.alert import MaintenanceWindowService
+        service = MaintenanceWindowService()
+        mw = service.extend_window(
+            window_id=window_id,
+            new_end_time=request.new_end_time,
+            operator_id=request.operator_id,
+            operator_name=request.operator_name,
+            reason=request.reason,
+        )
+        if not mw:
+            raise HTTPException(status_code=404, detail="维护窗口不存在")
+        return _mw_to_dict(mw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"延期维护窗口失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/alert/maintenance-windows/refresh-status",
+    tags=["维护窗口"],
+    summary="手动刷新维护窗口状态"
+)
+async def refresh_maintenance_window_status():
+    """手动刷新所有维护窗口状态（pending→active→ended）"""
+    try:
+        from app.services.alert import MaintenanceWindowService
+        service = MaintenanceWindowService()
+        count = service.refresh_all_window_status()
+        return {
+            "status": "success",
+            "changed_count": count,
+            "message": f"已刷新 {count} 个维护窗口状态",
+        }
+    except Exception as e:
+        logger.error(f"刷新维护窗口状态失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
