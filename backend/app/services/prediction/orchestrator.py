@@ -412,6 +412,7 @@ class PredictionOrchestrator:
         version: Optional[str] = None,
         shadow_version: Optional[str] = None,
         generate_diagnosis: bool = False,
+        org_node_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         螺栓状态预测（完整流水线）
@@ -426,6 +427,7 @@ class PredictionOrchestrator:
             version: 使用指定版本的模型（None 表示当前活动版本）
             shadow_version: 影子版本号（Shadow Mode），仅运行预测不写库，用于A/B对比
             generate_diagnosis: 是否生成 LLM 智能诊断报告（默认 False）
+            org_node_id: 组织节点ID（可选）
 
         Returns:
             预测结果字典，包含 shadow_result（如果指定了 shadow_version）和 diagnosis_report（如果启用）
@@ -433,7 +435,7 @@ class PredictionOrchestrator:
         start_time = time.time()
         set_bolt_id(str(bolt_id))
 
-        logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}, version={version or 'active'}, shadow_version={shadow_version}, generate_diagnosis={generate_diagnosis}")
+        logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}, version={version or 'active'}, shadow_version={shadow_version}, generate_diagnosis={generate_diagnosis}, org_node_id={org_node_id}")
 
         # 主版本预测
         main_start = time.time()
@@ -445,6 +447,7 @@ class PredictionOrchestrator:
             save_to_db=save_to_db,
             is_shadow=False,
             generate_diagnosis=generate_diagnosis,
+            org_node_id=org_node_id,
         )
         main_latency_ms = int((time.time() - main_start) * 1000)
 
@@ -460,6 +463,7 @@ class PredictionOrchestrator:
                     save_to_db=False,
                     is_shadow=True,
                     generate_diagnosis=False,
+                    org_node_id=org_node_id,
                 )
                 shadow_latency_ms = int((time.time() - shadow_start) * 1000)
                 main_result['shadow_result'] = shadow_result
@@ -633,6 +637,7 @@ class PredictionOrchestrator:
         save_to_db: bool,
         is_shadow: bool = False,
         generate_diagnosis: bool = False,
+        org_node_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         执行单次螺栓预测（核心预测流水线）
@@ -1166,7 +1171,7 @@ class PredictionOrchestrator:
 
         # Step 6: 持久化（Shadow 模式不写库）
         if save_to_db and not is_shadow:
-            self.repository.save_bolt_prediction(bolt_id, result)
+            self.repository.save_bolt_prediction(bolt_id, result, org_node_id=org_node_id)
 
         # Step 7: 告警评估（Shadow 模式不触发告警）
         if not is_shadow:
@@ -1252,6 +1257,7 @@ class PredictionOrchestrator:
         enable_degradation: bool = True,
         version: Optional[str] = None,
         save_to_db: bool = True,
+        org_node_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         螺栓多变量耦合预测（完整流水线）
@@ -1274,6 +1280,7 @@ class PredictionOrchestrator:
             enable_degradation: 缺失严重时是否降级为单变量预测（默认 True）
             version: 模型版本号
             save_to_db: 是否保存结果到数据库
+            org_node_id: 组织节点ID（可选）
 
         Returns:
             Dict: 包含标准预测字段 + 多变量扩展字段（data_quality / feature_importance / temp_compensation 等）
@@ -1598,7 +1605,7 @@ class PredictionOrchestrator:
 
         if save_to_db:
             try:
-                self.repository.save_bolt_prediction(bolt_id, result)
+                self.repository.save_bolt_prediction(bolt_id, result, org_node_id=org_node_id)
             except Exception as e:
                 logger.warning(f"多变量预测持久化失败: {e}")
 
@@ -1904,6 +1911,7 @@ class PredictionOrchestrator:
         version: Optional[str] = None,
         shadow_version: Optional[str] = None,
         generate_diagnosis: bool = False,
+        org_node_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         法兰面状态预测（完整流水线）
@@ -1921,6 +1929,7 @@ class PredictionOrchestrator:
             version: 使用指定版本的模型（None 表示当前活动版本）
             shadow_version: 影子版本号（Shadow Mode），仅运行预测不写库，用于A/B对比
             generate_diagnosis: 是否生成 LLM 智能诊断报告（默认 False）
+            org_node_id: 组织节点ID（可选）
 
         Returns:
             预测结果字典，包含 shadow_result（如果指定了 shadow_version）和 diagnosis_report（如果启用）
@@ -1930,7 +1939,7 @@ class PredictionOrchestrator:
 
         logger.info(
             f"开始法兰面预测: {flange_id}, 螺栓数: {len(multi_bolt_data) if multi_bolt_data else (len(bolt_data_dict) if bolt_data_dict else 0)}, "
-            f"version={version or 'active'}, shadow_version={shadow_version}, generate_diagnosis={generate_diagnosis}"
+            f"version={version or 'active'}, shadow_version={shadow_version}, generate_diagnosis={generate_diagnosis}, org_node_id={org_node_id}"
         )
 
         # 主版本预测
@@ -1946,6 +1955,7 @@ class PredictionOrchestrator:
             save_to_db=save_to_db,
             is_shadow=False,
             generate_diagnosis=generate_diagnosis,
+            org_node_id=org_node_id,
         )
         main_latency_ms = int((time.time() - main_start) * 1000)
 
@@ -1964,6 +1974,7 @@ class PredictionOrchestrator:
                     save_to_db=False,
                     is_shadow=True,
                     generate_diagnosis=False,
+                    org_node_id=org_node_id,
                 )
                 shadow_latency_ms = int((time.time() - shadow_start) * 1000)
                 main_result['shadow_result'] = shadow_result
@@ -2005,6 +2016,7 @@ class PredictionOrchestrator:
         timestamps: Optional[List[str]] = None,
         is_shadow: bool = False,
         generate_diagnosis: bool = False,
+        org_node_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         执行单次法兰面预测（核心预测流水线）
@@ -2446,7 +2458,7 @@ class PredictionOrchestrator:
 
         # Step 6: 持久化（Shadow 模式不写库）
         if save_to_db and not is_shadow:
-            self.repository.save_flange_prediction(flange_id, result)
+            self.repository.save_flange_prediction(flange_id, result, org_node_id=org_node_id)
 
         # Step 7: 告警评估（Shadow 模式不触发告警）
         if not is_shadow:
@@ -2712,13 +2724,20 @@ class PredictionOrchestrator:
         node_id: str,
         node_type: str,
         days: int = 30,
+        org_node_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         月度 Prophet 趋势预测
 
         流程: 读取 30 天历史 → Prophet 预测 → 持久化
+
+        Args:
+            node_id: 节点ID
+            node_type: 节点类型 ('bolt' / 'flange')
+            days: 预测天数，默认30天
+            org_node_id: 组织节点ID（可选）
         """
-        logger.info(f"开始月度预测: {node_id}, 类型: {node_type}, 天数: {days}")
+        logger.info(f"开始月度预测: {node_id}, 类型: {node_type}, 天数: {days}, org_node_id: {org_node_id}")
 
         # Step 1: 读取历史数据
         if node_type == 'bolt':
@@ -2747,24 +2766,26 @@ class PredictionOrchestrator:
         )
 
         # Step 3: 持久化
-        self.repository.save_monthly_prediction(node_id, node_type, result)
+        self.repository.save_monthly_prediction(node_id, node_type, result, org_node_id=org_node_id)
 
         return result
 
     # ---------- 批量预测（调度器用） ----------
 
-    def batch_predict_from_db(self, node_type: str, specific_bolt_id: Optional[str] = None) -> None:
+    def batch_predict_from_db(self, node_type: str, specific_bolt_id: Optional[str] = None, org_node_id: Optional[int] = None) -> None:
         """
         从数据库批量拉取数据并预测（调度任务入口）
 
         Args:
             node_type: 'bolt' 或 'flange'
             specific_bolt_id: 可选，指定要预测的单个螺栓ID（用于分片执行）
+            org_node_id: 可选，指定组织节点ID范围（含后代）
         """
         from app.utils.db_pool import db_pool
+        from app.middleware import get_effective_tenant_id
 
         task_type = f"batch_{node_type}"
-        logger.info(f"开始批量预测: {node_type}" + (f" (指定螺栓: {specific_bolt_id})" if specific_bolt_id else ""))
+        logger.info(f"开始批量预测: {node_type}" + (f" (指定螺栓: {specific_bolt_id})" if specific_bolt_id else "") + (f" (组织节点: {org_node_id})" if org_node_id else ""))
 
         quota_name = "batch_prediction"
         quota = db_pool.get_quota(quota_name)
@@ -2775,13 +2796,14 @@ class PredictionOrchestrator:
                 logger.warning(f"批量预测连接池配额获取超时 ({quota.current}/{quota.max_connections})")
 
         try:
+            tenant_id = get_effective_tenant_id()
             if node_type == 'bolt':
                 if specific_bolt_id:
-                    self._predict_single_bolt(specific_bolt_id)
+                    self._predict_single_bolt(specific_bolt_id, org_node_id=org_node_id)
                 else:
-                    self._batch_predict_bolts()
+                    self._batch_predict_bolts(tenant_id=tenant_id, org_node_id=org_node_id)
             elif node_type == 'flange':
-                self._batch_predict_flanges()
+                self._batch_predict_flanges(tenant_id=tenant_id, org_node_id=org_node_id)
             else:
                 logger.error(f"未知节点类型: {node_type}")
                 metrics.record_prediction_task(task_type, success=False, error_type="unknown_node_type")
@@ -2797,7 +2819,7 @@ class PredictionOrchestrator:
             if quota and quota_acquired:
                 quota.release()
 
-    def _predict_single_bolt(self, bolt_id: str) -> None:
+    def _predict_single_bolt(self, bolt_id: str, org_node_id: Optional[int] = None) -> None:
         """预测单个螺栓（用于分片执行）"""
         bolt_data = self.repository.fetch_batch_bolt_data(per_bolt_limit=100, bolt_ids=[bolt_id])
 
@@ -2810,22 +2832,38 @@ class PredictionOrchestrator:
             data=np.array(data_dict['data']),
             timestamps=data_dict['timestamps'],
             save_to_db=True,
+            org_node_id=org_node_id,
         )
 
-    def _batch_predict_bolts(self) -> None:
+    def _batch_predict_bolts(self, tenant_id: Optional[int] = None, org_node_id: Optional[int] = None) -> None:
         """批量预测所有螺栓"""
-        bolt_data = self.repository.fetch_batch_bolt_data(per_bolt_limit=100)
+        candidates = None
+        if tenant_id is not None:
+            candidates = self.repository.get_batch_prediction_candidates(
+                tenant_id=tenant_id, org_node_id=org_node_id, node_type='bolt'
+            )
+
+        bolt_id_to_org = {}
+        if candidates:
+            bolt_ids = [str(c[0]) for c in candidates]
+            for sensor_id, org_nid in candidates:
+                bolt_id_to_org[str(sensor_id)] = org_nid
+            bolt_data = self.repository.fetch_batch_bolt_data(per_bolt_limit=100, bolt_ids=bolt_ids)
+        else:
+            bolt_data = self.repository.fetch_batch_bolt_data(per_bolt_limit=100)
 
         success_count = 0
         fail_count = 0
 
         for bolt_id, data_dict in bolt_data.items():
             try:
+                node_org_id = bolt_id_to_org.get(bolt_id, org_node_id)
                 self.predict_bolt(
                     bolt_id=bolt_id,
                     data=np.array(data_dict['data']),
                     timestamps=data_dict['timestamps'],
                     save_to_db=True,
+                    org_node_id=node_org_id,
                 )
                 success_count += 1
             except Exception as e:
@@ -2837,9 +2875,21 @@ class PredictionOrchestrator:
 
         logger.info(f"批量螺栓预测完成，共 {len(bolt_data)} 个，成功 {success_count} 个，失败 {fail_count} 个")
 
-    def _batch_predict_flanges(self) -> None:
+    def _batch_predict_flanges(self, tenant_id: Optional[int] = None, org_node_id: Optional[int] = None) -> None:
         """批量预测所有法兰面"""
-        flange_ids = self.repository.fetch_all_flange_ids()
+        candidates = None
+        if tenant_id is not None:
+            candidates = self.repository.get_batch_prediction_candidates(
+                tenant_id=tenant_id, org_node_id=org_node_id, node_type='flange'
+            )
+
+        flange_id_to_org = {}
+        if candidates:
+            flange_ids = [c[0] for c in candidates]
+            for flange_nid, org_nid in candidates:
+                flange_id_to_org[str(flange_nid)] = org_nid
+        else:
+            flange_ids = self.repository.fetch_all_flange_ids()
 
         success_count = 0
         fail_count = 0
@@ -2855,12 +2905,14 @@ class PredictionOrchestrator:
                     for bid, data in bolt_series.items()
                 }
 
+                node_org_id = flange_id_to_org.get(str(flange_id), org_node_id)
                 self.predict_flange(
                     flange_id=flange_id,
                     multi_bolt_data=[],
                     bolt_data_dict=bolt_data_dict,
                     save_to_db=True,
                     enable_correlation_analysis=True,
+                    org_node_id=node_org_id,
                 )
                 success_count += 1
             except Exception as e:

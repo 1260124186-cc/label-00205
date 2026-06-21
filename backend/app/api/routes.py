@@ -2483,7 +2483,9 @@ async def delete_strategy_override(request: StrategyNodeOverrideDeleteRequest):
 )
 async def batch_predict(
     node_type: str,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    org_node_id: Optional[int] = None,
+    tenant_id: Optional[int] = None,
 ):
     """
     从数据库读取数据并批量预测
@@ -2496,7 +2498,8 @@ async def batch_predict(
         # 在后台执行批量预测
         background_tasks.add_task(
             service.batch_predict_from_db,
-            node_type=node_type
+            node_type=node_type,
+            org_node_id=org_node_id,
         )
 
         return {
@@ -2507,6 +2510,277 @@ async def batch_predict(
 
     except Exception as e:
         logger.error(f"批量预测启动失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/predict/org/{org_node_id}",
+    tags=["预测"],
+    summary="组织节点聚合预测状态",
+)
+async def get_org_node_prediction_summary(org_node_id: int):
+    """
+    获取指定组织节点及其所有子节点的聚合预测状态统计。
+
+    包含健康度分布、预警统计、剩余寿命分布、螺栓/法兰数量统计，
+    以及直接子节点的简要汇总。
+    """
+    try:
+        from sqlalchemy import text, func
+        from app.middleware import get_effective_tenant_id
+        from app.services.tenant.enforcement import (
+            enforce_tenant_access,
+            enforce_org_node_access,
+            resolve_tenant_id_from_org_node,
+            enforce_tenant_query,
+        )
+        from app.utils.database import (
+            get_db,
+            OrganizationNode,
+            BoltHealthHistory,
+            AbnormalPrediction,
+            RULPrediction,
+            BoltMasterData,
+        )
+
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=500, detail="数据库连接失败")
+
+            resolved_tenant_id = resolve_tenant_id_from_org_node(db, org_node_id)
+            if resolved_tenant_id is None:
+                raise HTTPException(status_code=404, detail="组织节点不存在")
+
+            effective_tid = get_effective_tenant_id()
+            if effective_tid is None:
+                raise HTTPException(status_code=401, detail="未认证")
+            enforce_tenant_access(resolved_tenant_id, org_node_id, "OrganizationNode")
+            enforce_org_node_access(org_node_id, org_node_id, "OrganizationNode")
+
+            current_node = (
+                db.query(OrganizationNode)
+                .filter(OrganizationNode.id == org_node_id)
+                .first()
+            )
+            if not current_node:
+                raise HTTPException(status_code=404, detail="组织节点不存在")
+            node_path = current_node.path or f"/{org_node_id}"
+
+            rows = db.execute(
+                text("""
+                    SELECT id, node_name, node_type, parent_id, path
+                    FROM sc_org_nodes
+                    WHERE tenant_id = :tid
+                      AND (id = :nid OR path LIKE CONCAT(:path_pattern, '/%') OR path = :path_exact)
+                """),
+                {
+                    "tid": resolved_tenant_id,
+                    "nid": org_node_id,
+                    "path_pattern": node_path,
+                    "path_exact": node_path,
+                }
+            ).fetchall()
+            all_descendant_ids = [r[0] for r in rows] or [org_node_id]
+
+            health_distribution = {
+                "excellent": 0, "good": 0, "fair": 0, "poor": 0, "critical": 0
+            }
+            try:
+                latest_hh_cte = (
+                    db.query(
+                        BoltHealthHistory.bolt_id,
+                        BoltHealthHistory.hi_level,
+                        BoltHealthHistory.org_node_id,
+                        BoltHealthHistory.create_time,
+                        func.row_number().over(
+                            partition_by=BoltHealthHistory.bolt_id,
+                            order_by=BoltHealthHistory.create_time.desc()
+                        ).label("rn")
+                    )
+                    .filter(BoltHealthHistory.org_node_id.in_(all_descendant_ids))
+                ).cte("latest_hh")
+                health_rows = (
+                    db.query(latest_hh_cte.c.hi_level, func.count())
+                    .filter(latest_hh_cte.c.rn == 1)
+                    .group_by(latest_hh_cte.c.hi_level)
+                    .all()
+                )
+                for lvl, cnt in health_rows:
+                    key = (lvl or "").lower()
+                    if key in health_distribution:
+                        health_distribution[key] = int(cnt or 0)
+            except Exception as he:
+                logger.warning(f"健康度统计异常: {he}")
+
+            active_warnings: Dict[str, int] = {}
+            try:
+                recent_cutoff = datetime.now() - timedelta(days=30)
+                warn_rows = (
+                    db.query(AbnormalPrediction.pw_type, func.count())
+                    .filter(
+                        AbnormalPrediction.org_node_id.in_(all_descendant_ids),
+                        AbnormalPrediction.recent_time >= recent_cutoff,
+                    )
+                    .group_by(AbnormalPrediction.pw_type)
+                    .all()
+                )
+                for pw, cnt in warn_rows:
+                    active_warnings[pw or "unknown"] = int(cnt or 0)
+            except Exception as we:
+                logger.warning(f"预警统计异常: {we}")
+
+            rul_distribution = {
+                "over_365": 0, "91_365": 0, "31_90": 0, "0_30": 0, "overdue": 0
+            }
+            try:
+                latest_rul_cte = (
+                    db.query(
+                        RULPrediction.node_id,
+                        RULPrediction.node_type,
+                        RULPrediction.rul_days,
+                        RULPrediction.org_node_id,
+                        func.row_number().over(
+                            partition_by=[RULPrediction.node_id, RULPrediction.node_type],
+                            order_by=RULPrediction.prediction_date.desc()
+                        ).label("rn")
+                    )
+                    .filter(RULPrediction.org_node_id.in_(all_descendant_ids))
+                ).cte("latest_rul")
+                rul_rows = (
+                    db.query(latest_rul_cte.c.rul_days)
+                    .filter(latest_rul_cte.c.rn == 1)
+                    .all()
+                )
+                for (rul_days,) in rul_rows:
+                    if rul_days is None:
+                        continue
+                    if rul_days < 0:
+                        rul_distribution["overdue"] += 1
+                    elif rul_days <= 30:
+                        rul_distribution["0_30"] += 1
+                    elif rul_days <= 90:
+                        rul_distribution["31_90"] += 1
+                    elif rul_days <= 365:
+                        rul_distribution["91_365"] += 1
+                    else:
+                        rul_distribution["over_365"] += 1
+            except Exception as re:
+                logger.warning(f"RUL分布统计异常: {re}")
+
+            total_bolts = 0
+            total_flanges = 0
+            try:
+                node_type_rows = (
+                    db.query(OrganizationNode.node_type, func.count())
+                    .filter(OrganizationNode.id.in_(all_descendant_ids))
+                    .group_by(OrganizationNode.node_type)
+                    .all()
+                )
+                for nt, cnt in node_type_rows:
+                    nt_lower = (nt or "").lower()
+                    if nt_lower == "bolt":
+                        total_bolts = int(cnt or 0)
+                    elif nt_lower == "flange":
+                        total_flanges = int(cnt or 0)
+            except Exception as ce:
+                logger.warning(f"节点数量统计异常: {ce}")
+
+            children_summary: List[Dict[str, Any]] = []
+            try:
+                direct_children = (
+                    db.query(OrganizationNode)
+                    .filter(
+                        OrganizationNode.parent_id == org_node_id,
+                        OrganizationNode.tenant_id == resolved_tenant_id,
+                    )
+                    .order_by(OrganizationNode.sort_order, OrganizationNode.id)
+                    .all()
+                )
+                for child in direct_children:
+                    child_descendant_rows = db.execute(
+                        text("""
+                            SELECT id FROM sc_org_nodes
+                            WHERE tenant_id = :tid
+                              AND (id = :nid OR path LIKE CONCAT('%/', :nid, '/%'))
+                        """),
+                        {"tid": resolved_tenant_id, "nid": child.id}
+                    ).fetchall()
+                    child_ids = [r[0] for r in child_descendant_rows] or [child.id]
+
+                    child_hi_level = None
+                    try:
+                        child_hh_cte = (
+                            db.query(
+                                BoltHealthHistory.bolt_id,
+                                BoltHealthHistory.hi_level,
+                                BoltHealthHistory.hi_score,
+                                func.row_number().over(
+                                    partition_by=BoltHealthHistory.bolt_id,
+                                    order_by=BoltHealthHistory.create_time.desc()
+                                ).label("rn")
+                            )
+                            .filter(BoltHealthHistory.org_node_id.in_(child_ids))
+                        ).cte("child_hh")
+                        avg_hi_row = (
+                            db.query(func.avg(child_hh_cte.c.hi_score))
+                            .filter(child_hh_cte.c.rn == 1)
+                            .first()
+                        )
+                        avg_hi = avg_hi_row[0] if avg_hi_row and avg_hi_row[0] is not None else None
+                        if avg_hi is not None:
+                            if avg_hi >= 90:
+                                child_hi_level = "excellent"
+                            elif avg_hi >= 75:
+                                child_hi_level = "good"
+                            elif avg_hi >= 60:
+                                child_hi_level = "fair"
+                            elif avg_hi >= 40:
+                                child_hi_level = "poor"
+                            else:
+                                child_hi_level = "critical"
+                    except Exception:
+                        child_hi_level = None
+
+                    child_warn_count = 0
+                    try:
+                        recent_cutoff = datetime.now() - timedelta(days=30)
+                        warn_count_row = (
+                            db.query(func.count(AbnormalPrediction.id))
+                            .filter(
+                                AbnormalPrediction.org_node_id.in_(child_ids),
+                                AbnormalPrediction.recent_time >= recent_cutoff,
+                            )
+                            .first()
+                        )
+                        child_warn_count = int(warn_count_row[0] or 0) if warn_count_row else 0
+                    except Exception:
+                        child_warn_count = 0
+
+                    children_summary.append({
+                        "id": child.id,
+                        "name": child.node_name,
+                        "node_type": child.node_type,
+                        "hi_level": child_hi_level,
+                        "warning_count": child_warn_count,
+                    })
+            except Exception as che:
+                logger.warning(f"子节点摘要统计异常: {che}")
+
+        return {
+            "org_node_id": org_node_id,
+            "tenant_id": resolved_tenant_id,
+            "total_bolts": total_bolts,
+            "total_flanges": total_flanges,
+            "health_distribution": health_distribution,
+            "active_warnings": active_warnings,
+            "rul_distribution": rul_distribution,
+            "aggregated_at": datetime.now(),
+            "children_summary": children_summary,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"组织节点聚合预测状态查询失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -6257,6 +6531,40 @@ def _org_node_to_dict(n) -> Dict[str, Any]:
     return data
 
 
+def _bolt_master_data_to_dict(m) -> Dict[str, Any]:
+    extra = None
+    if m.extra_info:
+        try:
+            extra = json.loads(m.extra_info)
+        except Exception:
+            extra = None
+    return {
+        'id': m.id,
+        'tenant_id': m.tenant_id,
+        'org_node_id': m.org_node_id,
+        'sensor_id': m.sensor_id,
+        'bolt_spec': m.bolt_spec,
+        'material_grade': m.material_grade,
+        'design_preload_kn': m.design_preload_kn,
+        'design_torque_nm': m.design_torque_nm,
+        'lubrication_method': m.lubrication_method,
+        'commissioning_date': str(m.commissioning_date) if m.commissioning_date else None,
+        'last_tightening_date': str(m.last_tightening_date) if m.last_tightening_date else None,
+        'torque_curve_id': m.torque_curve_id,
+        'flange_id': m.flange_id,
+        'flange_org_node_id': m.flange_org_node_id,
+        'bolt_position': m.bolt_position,
+        'thread_type': m.thread_type,
+        'surface_treatment': m.surface_treatment,
+        'standard_code': m.standard_code,
+        'manufacturer': m.manufacturer,
+        'extra_info': extra,
+        'status': m.status,
+        'create_time': m.create_time,
+        'update_time': m.update_time,
+    }
+
+
 def _quota_to_dict(q) -> Dict[str, Any]:
     return {
         'tenant_id': q.tenant_id,
@@ -6731,6 +7039,242 @@ async def get_org_descendants(tenant_id: int, node_id: int):
         return [_org_node_to_dict(d) for d in descendants]
     except Exception as e:
         logger.error(f"获取后代节点失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 螺栓主数据 ----------
+
+@router.post(
+    "/bolt-master-data",
+    tags=["螺栓主数据"],
+    summary="创建螺栓主数据",
+)
+async def create_bolt_master_data(request: Request = Body(...)):
+    """创建螺栓主数据（与组织树bolt节点绑定）"""
+    try:
+        from app.services.tenant import BoltMasterDataService
+        from app.services.tenant.enforcement import (
+            enforce_tenant_access,
+            resolve_tenant_id_from_org_node,
+        )
+        from app.utils.database import get_db
+
+        body = await request.json()
+        org_node_id = body.get("org_node_id")
+        if org_node_id is None:
+            raise HTTPException(status_code=400, detail="org_node_id is required")
+
+        with get_db() as db:
+            tenant_id = resolve_tenant_id_from_org_node(db, org_node_id)
+        if tenant_id is None:
+            raise HTTPException(status_code=404, detail="组织节点不存在")
+        enforce_tenant_access(tenant_id, org_node_id, "OrganizationNode")
+
+        svc = BoltMasterDataService()
+        kwargs = {k: v for k, v in body.items() if k != "org_node_id"}
+        data = svc.create(tenant_id=tenant_id, org_node_id=org_node_id, **kwargs)
+        if not data:
+            raise HTTPException(status_code=500, detail="创建螺栓主数据失败")
+        return _bolt_master_data_to_dict(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建螺栓主数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/bolt-master-data/{master_id}",
+    tags=["螺栓主数据"],
+    summary="获取螺栓主数据详情",
+)
+async def get_bolt_master_data(master_id: int):
+    """获取螺栓主数据详情"""
+    try:
+        from app.middleware import get_effective_tenant_id
+        from app.services.tenant import BoltMasterDataService
+        from app.services.tenant.enforcement import (
+            enforce_tenant_access,
+            enforce_org_node_access,
+        )
+
+        effective_tid = get_effective_tenant_id()
+        if effective_tid is None:
+            raise HTTPException(status_code=401, detail="未认证")
+
+        svc = BoltMasterDataService()
+        data = svc.get(effective_tid, master_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="螺栓主数据不存在")
+
+        enforce_tenant_access(data.tenant_id, data.id, "BoltMasterData")
+        enforce_org_node_access(data.org_node_id, data.id, "BoltMasterData")
+
+        return _bolt_master_data_to_dict(data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取螺栓主数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/bolt-master-data",
+    tags=["螺栓主数据"],
+    summary="查询螺栓主数据列表",
+)
+async def list_bolt_master_data(
+    org_node_id: Optional[int] = Query(None, description="组织节点ID(含后代)"),
+    status: Optional[str] = Query(None, description="状态"),
+    flange_id: Optional[str] = Query(None, description="法兰面ID"),
+    page: int = Query(1, description="页码", ge=1),
+    page_size: int = Query(50, description="每页数量", ge=1, le=500),
+):
+    """查询螺栓主数据列表（自动按用户权限过滤可见范围）"""
+    try:
+        from sqlalchemy import text
+        from app.middleware import get_effective_tenant_id
+        from app.services.tenant import BoltMasterDataService
+        from app.services.tenant.enforcement import (
+            resolve_tenant_id_from_org_node,
+            enforce_tenant_query,
+            enforce_org_query,
+        )
+        from app.utils.database import get_db, BoltMasterData
+
+        effective_tid = get_effective_tenant_id()
+        if effective_tid is None:
+            raise HTTPException(status_code=401, detail="未认证")
+
+        resolved_tenant_id = effective_tid
+        if org_node_id is not None:
+            with get_db() as db:
+                resolved_tenant_id = resolve_tenant_id_from_org_node(db, org_node_id)
+            if resolved_tenant_id is None:
+                raise HTTPException(status_code=404, detail="组织节点不存在")
+            if resolved_tenant_id != effective_tid:
+                from app.services.tenant.enforcement import enforce_tenant_access
+                enforce_tenant_access(resolved_tenant_id, org_node_id, "OrganizationNode")
+
+        with get_db() as db:
+            if db is None:
+                raise HTTPException(status_code=500, detail="数据库连接失败")
+            q = db.query(BoltMasterData)
+            q = enforce_tenant_query(q, BoltMasterData, tenant_id=resolved_tenant_id)
+            q = enforce_org_query(q, BoltMasterData, tenant_id=resolved_tenant_id)
+            if org_node_id:
+                rows = db.execute(
+                    text("""
+                        SELECT id FROM sc_org_nodes
+                        WHERE tenant_id = :tid
+                          AND (id = :nid OR path LIKE CONCAT('%/', :nid, '/%'))
+                    """),
+                    {"tid": resolved_tenant_id, "nid": org_node_id}
+                ).fetchall()
+                descendant_ids = [r[0] for r in rows] or [org_node_id]
+                q = q.filter(BoltMasterData.org_node_id.in_(descendant_ids))
+            if status:
+                q = q.filter(BoltMasterData.status == status)
+            if flange_id:
+                q = q.filter(BoltMasterData.flange_id == flange_id)
+            total = q.count()
+            items = (
+                q.order_by(BoltMasterData.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+                .all()
+            )
+        return {
+            "items": [_bolt_master_data_to_dict(i) for i in items],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询螺栓主数据列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put(
+    "/bolt-master-data/{master_id}",
+    tags=["螺栓主数据"],
+    summary="更新螺栓主数据",
+)
+async def update_bolt_master_data(master_id: int, request: Request = Body(...)):
+    """更新螺栓主数据"""
+    try:
+        from app.middleware import get_effective_tenant_id
+        from app.services.tenant import BoltMasterDataService
+        from app.services.tenant.enforcement import (
+            enforce_tenant_access,
+            enforce_org_node_access,
+        )
+
+        effective_tid = get_effective_tenant_id()
+        if effective_tid is None:
+            raise HTTPException(status_code=401, detail="未认证")
+
+        svc = BoltMasterDataService()
+        existing = svc.get(effective_tid, master_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="螺栓主数据不存在")
+
+        enforce_tenant_access(existing.tenant_id, existing.id, "BoltMasterData")
+        enforce_org_node_access(existing.org_node_id, existing.id, "BoltMasterData")
+
+        body = await request.json()
+        data = svc.update(tenant_id=effective_tid, master_id=master_id, **body)
+        if not data:
+            raise HTTPException(status_code=404, detail="螺栓主数据不存在")
+        return _bolt_master_data_to_dict(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新螺栓主数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/bolt-master-data/{master_id}",
+    tags=["螺栓主数据"],
+    summary="删除螺栓主数据",
+)
+async def delete_bolt_master_data(master_id: int):
+    """删除螺栓主数据"""
+    try:
+        from app.middleware import get_effective_tenant_id
+        from app.services.tenant import BoltMasterDataService
+        from app.services.tenant.enforcement import (
+            enforce_tenant_access,
+            enforce_org_node_access,
+        )
+
+        effective_tid = get_effective_tenant_id()
+        if effective_tid is None:
+            raise HTTPException(status_code=401, detail="未认证")
+
+        svc = BoltMasterDataService()
+        existing = svc.get(effective_tid, master_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="螺栓主数据不存在")
+
+        enforce_tenant_access(existing.tenant_id, existing.id, "BoltMasterData")
+        enforce_org_node_access(existing.org_node_id, existing.id, "BoltMasterData")
+
+        ok = svc.delete(tenant_id=effective_tid, master_id=master_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="螺栓主数据不存在")
+        return {"status": "success", "message": "螺栓主数据已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除螺栓主数据失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -60,6 +60,7 @@ class BoltData(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, comment='租户ID')
+    org_node_id = Column(BigInteger, comment='组织节点ID')
     sensor_id = Column(BigInteger, nullable=False, comment='通道ID/螺栓ID')
     collector_id = Column(BigInteger, comment='采集器ID')
     splitter_num = Column(BigInteger, comment='分线器ID')
@@ -80,6 +81,8 @@ class BoltData(Base):
         Index('idx_sensor_time', 'sensor_id', 'create_time'),
         Index('idx_data_quality', 'data_quality'),
         Index('idx_tenant', 'tenant_id'),
+        Index('idx_org_node', 'org_node_id'),
+        Index('idx_tenant_org', 'tenant_id', 'org_node_id'),
     )
 
     @property
@@ -158,6 +161,7 @@ class AbnormalPrediction(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, comment='租户ID')
+    org_node_id = Column(BigInteger, comment='组织节点ID')
     bolt_id = Column(BigInteger, comment='螺栓编码')
     flm_id = Column(String(100), comment='法兰面组编码')
     node_type = Column(String(6), comment='节点类型')
@@ -183,6 +187,8 @@ class AbnormalPrediction(Base):
         Index('idx_bolt_id', 'bolt_id'),
         Index('idx_flm_id', 'flm_id'),
         Index('idx_tenant', 'tenant_id'),
+        Index('idx_org_node', 'org_node_id'),
+        Index('idx_tenant_org', 'tenant_id', 'org_node_id'),
     )
 
 
@@ -200,6 +206,7 @@ class MonthPrediction(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     tenant_id = Column(BigInteger, comment='租户ID')
+    org_node_id = Column(BigInteger, comment='组织节点ID')
     bolt_id = Column(BigInteger, comment='螺栓编码')
     flm_id = Column(String(100), comment='法兰面组编码')
     node_type = Column(String(6), comment='节点类型')
@@ -219,6 +226,8 @@ class MonthPrediction(Base):
         Index('idx_tenant_bolt', 'tenant_id', 'bolt_id'),
         Index('idx_tenant_flm', 'tenant_id', 'flm_id'),
         Index('idx_tenant', 'tenant_id'),
+        Index('idx_org_node', 'org_node_id'),
+        Index('idx_tenant_org', 'tenant_id', 'org_node_id'),
     )
 
 
@@ -1445,6 +1454,7 @@ class BoltHealthHistory(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     bolt_id = Column(String(50), nullable=False, comment='螺栓ID')
     flange_id = Column(String(100), comment='法兰面ID')
+    org_node_id = Column(BigInteger, comment='组织节点ID')
     hi_score = Column(Float, nullable=False, comment='综合健康度指数 0-100')
     hi_level = Column(String(20), nullable=False, comment='健康等级')
     preload_stability_score = Column(Float, comment='预紧力稳定性得分')
@@ -1471,6 +1481,8 @@ class BoltHealthHistory(Base):
         Index('idx_bolt_health_score', 'hi_score'),
         Index('idx_bolt_health_level', 'hi_level'),
         Index('idx_tenant', 'tenant_id'),
+        Index('idx_org_node', 'org_node_id'),
+        Index('idx_tenant_org', 'tenant_id', 'org_node_id'),
     )
 
 
@@ -1521,6 +1533,7 @@ class RULPrediction(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     node_id = Column(String(100), nullable=False, comment='节点ID')
     node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    org_node_id = Column(BigInteger, comment='组织节点ID')
     current_hi = Column(Float, comment='当前健康度')
     rul_days = Column(Float, comment='预测剩余使用寿命（天）')
     rul_lower_bound = Column(Float, comment='RUL下限（天）')
@@ -1543,6 +1556,8 @@ class RULPrediction(Base):
         Index('idx_rul_time', 'prediction_date'),
         Index('idx_rul_rul', 'rul_days'),
         Index('idx_tenant', 'tenant_id'),
+        Index('idx_org_node', 'org_node_id'),
+        Index('idx_tenant_org', 'tenant_id', 'org_node_id'),
     )
 
 
@@ -2320,6 +2335,108 @@ class MultivariateTrainingConfig(Base):
             return json.loads(self.input_channels)
         except (json.JSONDecodeError, TypeError):
             return ['preload']
+
+
+# ============================================================
+# 螺栓设备主数据扩展表 ORM 模型
+# ============================================================
+
+class BoltMasterData(Base):
+    """
+    螺栓设备主数据扩展表模型
+
+    对应数据库表: sc_bolt_master_data
+    存储螺栓的工程主数据，与组织树节点（bolt级别）一一绑定。
+
+    Attributes:
+        id: 主键
+        tenant_id: 租户ID
+        org_node_id: 关联组织节点ID（sc_org_nodes中node_type=bolt的节点）
+        sensor_id: 通道ID/螺栓ID（与BoltData.sensor_id对应）
+        bolt_spec: 螺栓规格，如"M36×3"
+        material_grade: 材质等级，如"10.9级"、"8.8级"、"A193-B7"
+        design_preload_kn: 设计预紧力（kN）
+        lubrication_method: 润滑方式，如"二硫化钼"、"石墨"、"无润滑"
+        lubrication_method: 润滑方式（兼容字段）
+        commissioning_date: 投运日期
+        last_tightening_date: 上次紧固日期
+        torque_curve_id: 设计扭矩曲线ID
+        flange_id: 所属法兰面ID
+        flange_org_node_id: 所属法兰面组织节点ID
+        bolt_position: 螺栓在法兰面的位置编号
+        design_torque_nm: 设计扭矩值（N·m）
+        thread_type: 螺纹类型，如"公制粗牙"、"公制细牙"、"UNC"、"UNF"
+        surface_treatment: 表面处理，如"发黑"、"镀锌"、"热镀锌"、"达克罗"
+        standard_code: 执行标准，如"GB/T 5782"、"ASTM A325"、"ISO 4014"
+        manufacturer: 生产厂家
+        extra_info: 扩展字段（JSON）
+        status: 状态 active/inactive/decommissioned
+        create_time: 创建时间
+        update_time: 更新时间
+    """
+    __tablename__ = 'sc_bolt_master_data'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, nullable=False, comment='租户ID')
+    org_node_id = Column(BigInteger, nullable=False, comment='关联组织节点ID')
+    sensor_id = Column(BigInteger, nullable=False, comment='通道ID/螺栓ID')
+    bolt_spec = Column(String(50), comment='螺栓规格，如M36×3')
+    material_grade = Column(String(50), comment='材质等级，如10.9级')
+    design_preload_kn = Column(Float, comment='设计预紧力（kN）')
+    design_torque_nm = Column(Float, comment='设计扭矩值（N·m）')
+    lubrication_method = Column(String(100), comment='润滑方式')
+    commissioning_date = Column(Date, comment='投运日期')
+    last_tightening_date = Column(DateTime, comment='上次紧固日期')
+    torque_curve_id = Column(String(64), comment='设计扭矩曲线ID')
+    flange_id = Column(String(100), comment='所属法兰面ID')
+    flange_org_node_id = Column(BigInteger, comment='所属法兰面组织节点ID')
+    bolt_position = Column(Integer, comment='螺栓在法兰面的位置编号')
+    thread_type = Column(String(20), comment='螺纹类型')
+    surface_treatment = Column(String(50), comment='表面处理')
+    standard_code = Column(String(50), comment='执行标准')
+    manufacturer = Column(String(200), comment='生产厂家')
+    extra_info = Column(Text, comment='扩展字段 JSON')
+    status = Column(String(20), default='active', comment='状态 active/inactive/decommissioned')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_master_tenant_sensor', 'tenant_id', 'sensor_id', unique=True),
+        Index('idx_master_org_node', 'org_node_id', unique=True),
+        Index('idx_master_flange', 'flange_id'),
+        Index('idx_master_status', 'status'),
+        Index('idx_master_bolt_spec', 'bolt_spec'),
+        Index('idx_master_material', 'material_grade'),
+        Index('idx_master_tenant', 'tenant_id'),
+    )
+
+    def to_dict(self) -> Dict:
+        import json
+        return {
+            'id': self.id,
+            'tenant_id': self.tenant_id,
+            'org_node_id': self.org_node_id,
+            'sensor_id': self.sensor_id,
+            'bolt_spec': self.bolt_spec,
+            'material_grade': self.material_grade,
+            'design_preload_kn': self.design_preload_kn,
+            'design_torque_nm': self.design_torque_nm,
+            'lubrication_method': self.lubrication_method,
+            'commissioning_date': str(self.commissioning_date) if self.commissioning_date else None,
+            'last_tightening_date': str(self.last_tightening_date) if self.last_tightening_date else None,
+            'torque_curve_id': self.torque_curve_id,
+            'flange_id': self.flange_id,
+            'flange_org_node_id': self.flange_org_node_id,
+            'bolt_position': self.bolt_position,
+            'thread_type': self.thread_type,
+            'surface_treatment': self.surface_treatment,
+            'standard_code': self.standard_code,
+            'manufacturer': self.manufacturer,
+            'extra_info': json.loads(self.extra_info) if self.extra_info else None,
+            'status': self.status,
+            'create_time': str(self.create_time),
+            'update_time': str(self.update_time),
+        }
 
 
 # ============================================================

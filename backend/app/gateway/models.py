@@ -114,6 +114,11 @@ class PointConfig:
     description: str = ""
     protocol_config: Dict[str, Any] = field(default_factory=dict)
     tags: Dict[str, str] = field(default_factory=dict)
+    collector_id: Optional[int] = None
+    splitter_num: Optional[int] = None
+    position: str = ""
+    org_node_id: Optional[int] = None
+    tenant_id: Optional[int] = None
 
     def convert_value(self, raw_value: Any) -> float:
         """将原始值转换为实际工程值"""
@@ -221,6 +226,11 @@ class DataPoint:
     timestamp: datetime
     quality: str = "good"
     unit: str = ""
+    collector_id: Optional[int] = None
+    splitter_num: Optional[int] = None
+    position: str = ""
+    org_node_id: Optional[int] = None
+    tenant_id: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -232,6 +242,11 @@ class DataPoint:
             "timestamp": self.timestamp.isoformat(),
             "quality": self.quality,
             "unit": self.unit,
+            "collector_id": self.collector_id,
+            "splitter_num": self.splitter_num,
+            "position": self.position,
+            "org_node_id": self.org_node_id,
+            "tenant_id": self.tenant_id,
         }
 
 

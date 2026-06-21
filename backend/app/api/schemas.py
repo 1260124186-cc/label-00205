@@ -10,7 +10,7 @@ API请求和响应模型定义
 - 模型训练请求/响应
 """
 
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field, field_serializer
 
@@ -49,6 +49,7 @@ class BoltPredictionRequest(BaseModel):
         data: 预紧力时序数据 [[时间, 预紧力], ...]
     """
     螺栓id: str = Field(..., description="螺栓唯一标识", alias="bolt_id")
+    org_node_id: Optional[int] = Field(None, description="组织节点ID")
     data: List[List[Any]] = Field(
         ...,
         description="预紧力时序数据，每个元素为[时间字符串, 预紧力值]",
@@ -618,6 +619,7 @@ class MonthlyForecastRequest(BaseModel):
     """月度预测请求"""
     node_id: str
     node_type: str
+    org_node_id: Optional[int] = Field(None, description="组织节点ID")
     forecast_days: int = Field(default=30, ge=1, le=90)
 
 
@@ -2361,6 +2363,83 @@ class OrgNodeResponse(BaseModel):
 class OrgTreeResponse(BaseModel):
     tenant_id: int
     nodes: List[OrgNodeResponse]
+
+
+class BoltMasterDataCreateRequest(BaseModel):
+    tenant_id: int = Field(..., description="租户ID")
+    org_node_id: int = Field(..., description="关联组织节点ID")
+    sensor_id: int = Field(..., description="通道ID/螺栓ID")
+    bolt_spec: Optional[str] = Field(None, max_length=50, description="螺栓规格，如M36×3")
+    material_grade: Optional[str] = Field(None, max_length=50, description="材质等级，如10.9级")
+    design_preload_kn: Optional[float] = Field(None, description="设计预紧力（kN）")
+    design_torque_nm: Optional[float] = Field(None, description="设计扭矩值（N·m）")
+    lubrication_method: Optional[str] = Field(None, max_length=100, description="润滑方式")
+    commissioning_date: Optional[date] = Field(None, description="投运日期")
+    last_tightening_date: Optional[datetime] = Field(None, description="上次紧固日期")
+    torque_curve_id: Optional[str] = Field(None, max_length=64, description="设计扭矩曲线ID")
+    flange_id: Optional[str] = Field(None, max_length=100, description="所属法兰面ID")
+    flange_org_node_id: Optional[int] = Field(None, description="所属法兰面组织节点ID")
+    bolt_position: Optional[int] = Field(None, description="螺栓在法兰面的位置编号")
+    thread_type: Optional[str] = Field(None, max_length=20, description="螺纹类型")
+    surface_treatment: Optional[str] = Field(None, max_length=50, description="表面处理")
+    standard_code: Optional[str] = Field(None, max_length=50, description="执行标准")
+    manufacturer: Optional[str] = Field(None, max_length=200, description="生产厂家")
+    extra_info: Optional[Dict[str, Any]] = Field(None, description="扩展字段")
+    status: Optional[str] = Field("active", max_length=20, description="状态 active/inactive/decommissioned")
+
+
+class BoltMasterDataUpdateRequest(BaseModel):
+    bolt_spec: Optional[str] = Field(None, max_length=50)
+    material_grade: Optional[str] = Field(None, max_length=50)
+    design_preload_kn: Optional[float] = None
+    design_torque_nm: Optional[float] = None
+    lubrication_method: Optional[str] = Field(None, max_length=100)
+    commissioning_date: Optional[date] = None
+    last_tightening_date: Optional[datetime] = None
+    torque_curve_id: Optional[str] = Field(None, max_length=64)
+    flange_id: Optional[str] = Field(None, max_length=100)
+    flange_org_node_id: Optional[int] = None
+    bolt_position: Optional[int] = None
+    thread_type: Optional[str] = Field(None, max_length=20)
+    surface_treatment: Optional[str] = Field(None, max_length=50)
+    standard_code: Optional[str] = Field(None, max_length=50)
+    manufacturer: Optional[str] = Field(None, max_length=200)
+    extra_info: Optional[Dict[str, Any]] = None
+    status: Optional[str] = Field(None, max_length=20, description="状态 active/inactive/decommissioned")
+
+
+class BoltMasterDataResponse(BaseModel):
+    id: int
+    tenant_id: int
+    org_node_id: int
+    sensor_id: int
+    bolt_spec: Optional[str] = None
+    material_grade: Optional[str] = None
+    design_preload_kn: Optional[float] = None
+    design_torque_nm: Optional[float] = None
+    lubrication_method: Optional[str] = None
+    commissioning_date: Optional[date] = None
+    last_tightening_date: Optional[datetime] = None
+    torque_curve_id: Optional[str] = None
+    flange_id: Optional[str] = None
+    flange_org_node_id: Optional[int] = None
+    bolt_position: Optional[int] = None
+    thread_type: Optional[str] = None
+    surface_treatment: Optional[str] = None
+    standard_code: Optional[str] = None
+    manufacturer: Optional[str] = None
+    extra_info: Optional[Dict[str, Any]] = None
+    status: str
+    create_time: datetime
+    update_time: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BoltMasterDataListResponse(BaseModel):
+    total: int
+    items: List[BoltMasterDataResponse]
 
 
 class QuotaUpdateRequest(BaseModel):

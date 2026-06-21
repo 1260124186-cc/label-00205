@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from sqlalchemy import text
+
 from app.utils.database import (
     get_db,
     Tenant,
@@ -14,6 +16,7 @@ from app.utils.database import (
     TenantQuota,
     TenantUser,
     OrganizationNode,
+    BoltMasterData,
 )
 
 
@@ -700,7 +703,45 @@ class TenantUserService:
                 "user_id": user.id,
                 "username": user.username,
                 "role": user.role,
+                "org_node_id": getattr(user, "org_node_id", None),
             }
+
+    @staticmethod
+    def resolve_accessible_org_node_ids(
+        tenant_id: int,
+        user_role: str,
+        user_org_node_id: Optional[int],
+    ) -> Optional[List[int]]:
+        """
+        根据用户角色+绑定节点解析可访问的组织节点ID列表（与enforcement模块对齐，独立DB查询版本）。
+
+        tenant_admin/admin -> None（表示无限制）
+        operator/viewer且绑定节点 -> [自身 + 所有后代]
+        operator/viewer无绑定 -> []（无权限）
+        """
+        restricted = {"operator", "viewer"}
+        role = (user_role or "").lower()
+        if role not in restricted:
+            return None
+        if not user_org_node_id:
+            return []
+        try:
+            from app.utils.database import get_db as _get_db
+            with _get_db() as db:
+                if db is None:
+                    return [user_org_node_id]
+                rows = db.execute(
+                    text("""
+                        SELECT id FROM sc_org_nodes
+                        WHERE tenant_id = :tid
+                          AND (id = :nid OR path LIKE CONCAT('%/', :nid, '/%'))
+                    """),
+                    {"tid": tenant_id, "nid": user_org_node_id}
+                ).fetchall()
+                return [r[0] for r in rows]
+        except Exception as e:
+            logger.warning(f"resolve_accessible_org_node_ids失败: {e}")
+            return [user_org_node_id]
 
 
 class TenantAPIKeyService:
@@ -852,3 +893,182 @@ class TenantAPIKeyService:
                 "rate_limit": api_key.rate_limit,
                 "user_id": api_key.user_id,
             }
+
+
+class BoltMasterDataService:
+    """螺栓主数据CRUD服务（与组织树bolt节点一一绑定）"""
+
+    VALID_STATUS = {"active", "inactive", "decommissioned"}
+
+    def create(
+        self,
+        tenant_id: int,
+        org_node_id: int,
+        sensor_id: int,
+        **kwargs,
+    ) -> Optional[BoltMasterData]:
+        with get_db() as db:
+            if db is None:
+                return None
+            node = (
+                db.query(OrganizationNode)
+                .filter(
+                    OrganizationNode.id == org_node_id,
+                    OrganizationNode.tenant_id == tenant_id,
+                )
+                .first()
+            )
+            if not node:
+                raise ValueError(f"组织节点不存在: {org_node_id}")
+            if node.node_type != "bolt":
+                raise ValueError(f"组织节点类型必须为bolt，实际: {node.node_type}")
+
+            existing = (
+                db.query(BoltMasterData)
+                .filter(
+                    BoltMasterData.tenant_id == tenant_id,
+                    BoltMasterData.sensor_id == sensor_id,
+                )
+                .first()
+            )
+            if existing:
+                raise ValueError(f"传感器ID已绑定主数据: sensor_id={sensor_id}")
+            existing_node = (
+                db.query(BoltMasterData)
+                .filter(BoltMasterData.org_node_id == org_node_id)
+                .first()
+            )
+            if existing_node:
+                raise ValueError(f"组织节点已绑定主数据: org_node_id={org_node_id}")
+
+            data = BoltMasterData(
+                tenant_id=tenant_id,
+                org_node_id=org_node_id,
+                sensor_id=sensor_id,
+            )
+            for k, v in kwargs.items():
+                if v is not None and hasattr(data, k):
+                    setattr(data, k, v)
+            if kwargs.get("status") and kwargs["status"] not in self.VALID_STATUS:
+                raise ValueError(f"status取值范围: {self.VALID_STATUS}")
+            db.add(data)
+            db.flush()
+            try:
+                from app.services.tenant.enforcement import clear_org_permission_cache
+                clear_org_permission_cache()
+            except Exception:
+                pass
+            return data
+
+    def get(self, tenant_id: int, master_id: int) -> Optional[BoltMasterData]:
+        with get_db() as db:
+            if db is None:
+                return None
+            return (
+                db.query(BoltMasterData)
+                .filter(
+                    BoltMasterData.id == master_id,
+                    BoltMasterData.tenant_id == tenant_id,
+                )
+                .first()
+            )
+
+    def get_by_sensor(self, tenant_id: int, sensor_id: int) -> Optional[BoltMasterData]:
+        with get_db() as db:
+            if db is None:
+                return None
+            return (
+                db.query(BoltMasterData)
+                .filter(
+                    BoltMasterData.tenant_id == tenant_id,
+                    BoltMasterData.sensor_id == sensor_id,
+                )
+                .first()
+            )
+
+    def list(
+        self,
+        tenant_id: int,
+        org_node_id: Optional[int] = None,
+        status: Optional[str] = None,
+        flange_id: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> Dict[str, Any]:
+        with get_db() as db:
+            if db is None:
+                return {"items": [], "total": 0, "page": page, "page_size": page_size}
+            q = db.query(BoltMasterData).filter(BoltMasterData.tenant_id == tenant_id)
+            if org_node_id:
+                descendant_ids = [org_node_id]
+                try:
+                    rows = db.execute(
+                        text("""
+                            SELECT id FROM sc_org_nodes
+                            WHERE tenant_id = :tid
+                              AND (id = :nid OR path LIKE CONCAT('%/', :nid, '/%'))
+                        """),
+                        {"tid": tenant_id, "nid": org_node_id}
+                    ).fetchall()
+                    descendant_ids = [r[0] for r in rows] or [org_node_id]
+                except Exception:
+                    pass
+                q = q.filter(BoltMasterData.org_node_id.in_(descendant_ids))
+            if status:
+                q = q.filter(BoltMasterData.status == status)
+            if flange_id:
+                q = q.filter(BoltMasterData.flange_id == flange_id)
+            total = q.count()
+            items = (
+                q.order_by(BoltMasterData.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+                .all()
+            )
+            return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    def update(
+        self,
+        tenant_id: int,
+        master_id: int,
+        **kwargs,
+    ) -> Optional[BoltMasterData]:
+        with get_db() as db:
+            if db is None:
+                return None
+            data = (
+                db.query(BoltMasterData)
+                .filter(
+                    BoltMasterData.id == master_id,
+                    BoltMasterData.tenant_id == tenant_id,
+                )
+                .first()
+            )
+            if not data:
+                return None
+            if "status" in kwargs and kwargs["status"] not in self.VALID_STATUS:
+                raise ValueError(f"status取值范围: {self.VALID_STATUS}")
+            for k, v in kwargs.items():
+                if v is not None and hasattr(data, k):
+                    setattr(data, k, v)
+            data.update_time = datetime.now()
+            db.flush()
+            return data
+
+    def delete(self, tenant_id: int, master_id: int) -> bool:
+        with get_db() as db:
+            if db is None:
+                return False
+            data = (
+                db.query(BoltMasterData)
+                .filter(
+                    BoltMasterData.id == master_id,
+                    BoltMasterData.tenant_id == tenant_id,
+                )
+                .first()
+            )
+            if not data:
+                return False
+            db.delete(data)
+            db.flush()
+            return True

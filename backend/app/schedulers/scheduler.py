@@ -460,11 +460,31 @@ class TaskScheduler:
                 service = PredictionService()
                 training_service = TrainingService()
 
+                bolt_ids = []
                 try:
-                    with get_db() as db:
-                        bolt_ids = [str(r[0]) for r in db.query(distinct(BoltData.sensor_id)).all()]
-                except Exception:
-                    bolt_ids = training_service._get_all_bolt_ids()
+                    from app.services.prediction.repository import PredictionRepository
+                    pred_repo = PredictionRepository()
+                    tenant_ids = self._get_all_tenant_ids()
+                    for tid in tenant_ids:
+                        candidates = pred_repo.get_batch_prediction_candidates(
+                            tenant_id=tid,
+                            org_node_id=None,
+                            node_type='bolt'
+                        )
+                        for c in candidates:
+                            if c and c[0] is not None:
+                                bolt_ids.append(str(c[0]))
+                    bolt_ids = list(dict.fromkeys(bolt_ids))
+                    logger.info(f"从PredictionRepository获取到 {len(bolt_ids)} 个螺栓ID候选")
+                except Exception as e:
+                    logger.warning(f"从PredictionRepository获取螺栓候选失败，回退到原有逻辑: {e}")
+
+                if not bolt_ids:
+                    try:
+                        with get_db() as db:
+                            bolt_ids = [str(r[0]) for r in db.query(distinct(BoltData.sensor_id)).all()]
+                    except Exception:
+                        bolt_ids = training_service._get_all_bolt_ids()
 
                 if not bolt_ids:
                     logger.info("没有可用的螺栓ID，跳过预测")
@@ -513,11 +533,43 @@ class TaskScheduler:
                 )
 
                 logger.info("开始法兰面预测")
+                flange_candidates = []
                 try:
-                    service.batch_predict_from_db('flange')
-                    logger.info("法兰面预测完成")
+                    from app.services.prediction.repository import PredictionRepository
+                    pred_repo = PredictionRepository()
+                    tenant_ids = self._get_all_tenant_ids()
+                    for tid in tenant_ids:
+                        candidates = pred_repo.get_batch_prediction_candidates(
+                            tenant_id=tid,
+                            org_node_id=None,
+                            node_type='flange'
+                        )
+                        for c in candidates:
+                            if c and c[0] is not None:
+                                flange_candidates.append(str(c[0]))
+                    flange_candidates = list(dict.fromkeys(flange_candidates))
+                    logger.info(f"从PredictionRepository获取到 {len(flange_candidates)} 个法兰面ID候选")
                 except Exception as e:
-                    logger.error(f"法兰面预测失败: {e}")
+                    logger.warning(f"从PredictionRepository获取法兰面候选失败: {e}")
+                    flange_candidates = []
+
+                if flange_candidates:
+                    flange_success = 0
+                    flange_failed = 0
+                    for flange_id in flange_candidates:
+                        try:
+                            service.batch_predict_from_db('flange', specific_bolt_id=flange_id)
+                            flange_success += 1
+                        except Exception as e:
+                            flange_failed += 1
+                            logger.error(f"法兰面 {flange_id} 预测失败: {e}")
+                    logger.info(f"法兰面预测完成: 成功={flange_success}, 失败={flange_failed}")
+                else:
+                    try:
+                        service.batch_predict_from_db('flange')
+                        logger.info("法兰面预测完成")
+                    except Exception as e:
+                        logger.error(f"法兰面预测失败: {e}")
 
                 logger.info("预测任务执行完成")
 

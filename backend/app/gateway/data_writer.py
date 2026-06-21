@@ -13,6 +13,7 @@ import threading
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple, Callable
 from queue import Queue, Empty
+from functools import lru_cache
 from loguru import logger
 import httpx
 
@@ -355,9 +356,86 @@ class GatewayDataWriter:
 
     # ============ 数据库写入 ============
 
+    @staticmethod
+    @lru_cache(maxsize=4096)
+    def _resolve_org_node_by_sensor(sensor_id: int) -> Optional[Tuple[int, int]]:
+        """
+        根据 sensor_id 查找 (org_node_id, tenant_id)。
+        使用 LRU 缓存，减少数据库查询。
+        """
+        try:
+            from app.utils.database import get_db, BoltMasterData
+            with get_db() as db:
+                if db is None:
+                    return None
+                master = (
+                    db.query(BoltMasterData)
+                    .filter(BoltMasterData.sensor_id == sensor_id)
+                    .filter(BoltMasterData.status == 'active')
+                    .first()
+                )
+                if master and master.org_node_id:
+                    return (master.org_node_id, master.tenant_id)
+                return None
+        except Exception as e:
+            logger.warning(f"按sensor_id={sensor_id}查询org_node绑定失败: {e}")
+            return None
+
+    def _resolve_org_node_for_point(self, db, point: DataPoint, sensor_id_int: int) -> Optional[Tuple[int, int]]:
+        """
+        为单个数据点解析 (org_node_id, tenant_id)。
+        优先级:
+        1. point 自身已携带 org_node_id & tenant_id
+        2. sensor_id 命中主数据表(sc_bolt_master_data)
+        3. collector_id + splitter_num + position 匹配 org_nodes.extra_info
+        """
+        if point.org_node_id and point.tenant_id:
+            return (point.org_node_id, point.tenant_id)
+
+        cached = self._resolve_org_node_by_sensor(sensor_id_int)
+        if cached:
+            return cached
+
+        try:
+            from app.utils.database import OrganizationNode
+            from sqlalchemy import text
+
+            if point.collector_id is not None and point.splitter_num is not None:
+                json_match = json.dumps({
+                    "collector_id": point.collector_id,
+                    "splitter_num": point.splitter_num,
+                }, ensure_ascii=False).rstrip('}')
+                row = db.execute(
+                    text("""
+                        SELECT id, tenant_id
+                        FROM sc_org_nodes
+                        WHERE node_type = 'bolt'
+                          AND extra_info LIKE CONCAT('%', :extra, '%')
+                          AND (:pos = '' OR extra_info LIKE CONCAT('%"position":"', :pos, '"%'))
+                        LIMIT 1
+                    """),
+                    {
+                        "extra": json_match.strip(),
+                        "pos": point.position or "",
+                    }
+                ).fetchone()
+                if row:
+                    result = (row[0], row[1])
+                    try:
+                        self._resolve_org_node_by_sensor.cache_clear()
+                    except Exception:
+                        pass
+                    return result
+        except Exception as e:
+            logger.debug(f"按collector/splitter匹配org_node失败(sensor={sensor_id_int}): {e}")
+
+        if point.tenant_id:
+            return (None, point.tenant_id)
+        return None
+
     def _write_to_database(self, points: List[DataPoint]) -> bool:
         """
-        写入到 sc_bolt_data 表
+        写入到 sc_bolt_data 表，并自动解析绑定 org_node_id。
 
         Args:
             points: 数据点列表
@@ -374,16 +452,29 @@ class GatewayDataWriter:
                     logger.warning("数据库连接不可用")
                     return False
 
-                # 按 sensor_id 分组，批量插入
                 bolt_data_list = []
+                bound_count = 0
                 for point in points:
                     try:
                         sensor_id = int(point.sensor_id) if str(point.sensor_id).isdigit() else 0
                     except (ValueError, TypeError):
                         sensor_id = 0
 
+                    org_node_id = None
+                    tenant_id = None
+                    resolved = self._resolve_org_node_for_point(db, point, sensor_id)
+                    if resolved:
+                        org_node_id, tenant_id = resolved
+                        if org_node_id:
+                            bound_count += 1
+
                     bolt_data = BoltData(
+                        tenant_id=tenant_id if tenant_id else getattr(point, 'tenant_id', None),
+                        org_node_id=org_node_id,
                         sensor_id=sensor_id,
+                        collector_id=point.collector_id,
+                        splitter_num=point.splitter_num,
+                        position=point.position or None,
                         ptf=point.value,
                         data_quality=point.quality,
                         create_time=point.timestamp,
@@ -393,7 +484,10 @@ class GatewayDataWriter:
                 if bolt_data_list:
                     db.bulk_save_objects(bolt_data_list)
                     db.commit()
-                    logger.debug(f"数据库写入成功: {len(bolt_data_list)} 条")
+                    logger.debug(
+                        f"数据库写入成功: {len(bolt_data_list)} 条, "
+                        f"已绑定org_node: {bound_count}"
+                    )
                     return True
 
                 return False

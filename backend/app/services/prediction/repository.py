@@ -15,7 +15,7 @@
 import numpy as np
 import json
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from loguru import logger
 from sqlalchemy import text
 
@@ -479,6 +479,275 @@ class PredictionRepository:
             result = db.execute(query)
             return [row.flange_id for row in result.fetchall()]
 
+    def get_bolt_ids_by_org_node(
+        self,
+        tenant_id: int,
+        org_node_id: int
+    ) -> List[int]:
+        """
+        根据组织节点ID获取其下所有螺栓的sensor_id列表
+
+        优先从sc_bolt_master_data查询，无主数据时回退到sc_org_nodes的bolt节点
+
+        Args:
+            tenant_id: 租户ID
+            org_node_id: 组织节点ID
+
+        Returns:
+            List[int]: sensor_id列表
+        """
+        try:
+            with get_db() as db:
+                if db is None:
+                    return []
+
+                rows = db.execute(
+                    text("""
+                        SELECT id FROM sc_org_nodes
+                        WHERE tenant_id = :tid
+                          AND (id = :nid OR path LIKE CONCAT('%/', :nid, '/%'))
+                    """),
+                    {"tid": tenant_id, "nid": org_node_id}
+                ).fetchall()
+                descendant_ids = [r[0] for r in rows] or [org_node_id]
+
+                if not descendant_ids:
+                    return []
+
+                sensor_ids = []
+                try:
+                    placeholders = ', '.join([f':oid_{i}' for i in range(len(descendant_ids))])
+                    params = {'tid': tenant_id}
+                    for i, oid in enumerate(descendant_ids):
+                        params[f'oid_{i}'] = oid
+                    md_rows = db.execute(
+                        text(f"""
+                            SELECT DISTINCT sensor_id FROM sc_bolt_master_data
+                            WHERE tenant_id = :tid
+                              AND org_node_id IN ({placeholders})
+                              AND sensor_id IS NOT NULL
+                        """),
+                        params
+                    ).fetchall()
+                    sensor_ids = [int(r[0]) for r in md_rows if r[0] is not None]
+                except Exception as e:
+                    logger.warning(f"从sc_bolt_master_data查询sensor_id失败，回退: {e}")
+
+                if not sensor_ids:
+                    placeholders = ', '.join([f':oid_{i}' for i in range(len(descendant_ids))])
+                    params = {'tid': tenant_id}
+                    for i, oid in enumerate(descendant_ids):
+                        params[f'oid_{i}'] = oid
+                    try:
+                        md_rows = db.execute(
+                            text(f"""
+                                SELECT id, extra_info FROM sc_org_nodes
+                                WHERE tenant_id = :tid
+                                  AND id IN ({placeholders})
+                                  AND node_type = 'bolt'
+                            """),
+                            params
+                        ).fetchall()
+                        for r in md_rows:
+                            try:
+                                extra = json.loads(r[1]) if r[1] else {}
+                                sid = extra.get('sensor_id')
+                                if sid is not None:
+                                    sensor_ids.append(int(sid))
+                            except Exception:
+                                continue
+                    except Exception as e:
+                        logger.warning(f"从sc_org_nodes回退查询sensor_id失败: {e}")
+
+                return list(set(sensor_ids))
+        except Exception as e:
+            logger.warning(f"get_bolt_ids_by_org_node失败: {e}")
+            return []
+
+    def get_batch_prediction_candidates(
+        self,
+        tenant_id: int,
+        org_node_id: Optional[int] = None,
+        node_type: str = 'bolt'
+    ) -> List[Tuple]:
+        """
+        获取批量预测候选节点列表
+
+        Args:
+            tenant_id: 租户ID
+            org_node_id: 可选，指定组织节点ID范围（含后代）
+            node_type: 'bolt' 或 'flange'
+
+        Returns:
+            node_type='bolt': List[Tuple[sensor_id, org_node_id]]
+            node_type='flange': List[Tuple[flange_id, org_node_id]]
+        """
+        try:
+            with get_db() as db:
+                if db is None:
+                    return []
+
+                if node_type == 'bolt':
+                    if org_node_id is not None:
+                        rows = db.execute(
+                            text("""
+                                SELECT id FROM sc_org_nodes
+                                WHERE tenant_id = :tid
+                                  AND (id = :nid OR path LIKE CONCAT('%/', :nid, '/%'))
+                            """),
+                            {"tid": tenant_id, "nid": org_node_id}
+                        ).fetchall()
+                        descendant_ids = [r[0] for r in rows] or [org_node_id]
+                        if not descendant_ids:
+                            return []
+                        placeholders = ', '.join([f':oid_{i}' for i in range(len(descendant_ids))])
+                        params = {'tid': tenant_id}
+                        for i, oid in enumerate(descendant_ids):
+                            params[f'oid_{i}'] = oid
+                        try:
+                            bolt_rows = db.execute(
+                                text(f"""
+                                    SELECT DISTINCT sensor_id, org_node_id
+                                    FROM sc_bolt_master_data
+                                    WHERE tenant_id = :tid
+                                      AND org_node_id IN ({placeholders})
+                                      AND sensor_id IS NOT NULL
+                                """),
+                                params
+                            ).fetchall()
+                            candidates = [
+                                (int(r[0]), int(r[1]))
+                                for r in bolt_rows if r[0] is not None
+                            ]
+                            if candidates:
+                                return list(set(candidates))
+                        except Exception as e:
+                            logger.warning(f"从sc_bolt_master_data查询bolt候选失败: {e}")
+
+                        try:
+                            candidates = []
+                            bolt_rows = db.execute(
+                                text(f"""
+                                    SELECT id, extra_info FROM sc_org_nodes
+                                    WHERE tenant_id = :tid
+                                      AND id IN ({placeholders})
+                                      AND node_type = 'bolt'
+                                """),
+                                params
+                            ).fetchall()
+                            for r in bolt_rows:
+                                try:
+                                    extra = json.loads(r[1]) if r[1] else {}
+                                    sid = extra.get('sensor_id')
+                                    if sid is not None:
+                                        candidates.append((int(sid), int(r[0])))
+                                except Exception:
+                                    continue
+                            return list(set(candidates))
+                        except Exception as e:
+                            logger.warning(f"从sc_org_nodes回退查询bolt候选失败: {e}")
+                            return []
+                    else:
+                        try:
+                            bolt_rows = db.execute(
+                                text("""
+                                    SELECT DISTINCT sensor_id, org_node_id
+                                    FROM sc_bolt_master_data
+                                    WHERE tenant_id = :tid
+                                      AND sensor_id IS NOT NULL
+                                """),
+                                {"tid": tenant_id}
+                            ).fetchall()
+                            candidates = [
+                                (int(r[0]), int(r[1])) if r[1] is not None else (int(r[0]), None)
+                                for r in bolt_rows if r[0] is not None
+                            ]
+                            if candidates:
+                                return list(set(candidates))
+                        except Exception as e:
+                            logger.warning(f"从sc_bolt_master_data查询全部bolt候选失败: {e}")
+
+                        try:
+                            bolt_rows = db.execute(
+                                text("""
+                                    SELECT id, extra_info FROM sc_org_nodes
+                                    WHERE tenant_id = :tid
+                                      AND node_type = 'bolt'
+                                """),
+                                {"tid": tenant_id}
+                            ).fetchall()
+                            candidates = []
+                            for r in bolt_rows:
+                                try:
+                                    extra = json.loads(r[1]) if r[1] else {}
+                                    sid = extra.get('sensor_id')
+                                    if sid is not None:
+                                        candidates.append((int(sid), int(r[0])))
+                                except Exception:
+                                    continue
+                            return list(set(candidates))
+                        except Exception as e:
+                            logger.warning(f"从sc_org_nodes回退查询全部bolt候选失败: {e}")
+                            return []
+
+                elif node_type == 'flange':
+                    if org_node_id is not None:
+                        rows = db.execute(
+                            text("""
+                                SELECT id FROM sc_org_nodes
+                                WHERE tenant_id = :tid
+                                  AND (id = :nid OR path LIKE CONCAT('%/', :nid, '/%'))
+                            """),
+                            {"tid": tenant_id, "nid": org_node_id}
+                        ).fetchall()
+                        descendant_ids = [r[0] for r in rows] or [org_node_id]
+                        if not descendant_ids:
+                            return []
+                        placeholders = ', '.join([f':oid_{i}' for i in range(len(descendant_ids))])
+                        params = {'tid': tenant_id}
+                        for i, oid in enumerate(descendant_ids):
+                            params[f'oid_{i}'] = oid
+                        try:
+                            flange_rows = db.execute(
+                                text(f"""
+                                    SELECT DISTINCT CONCAT(collector_id, '-', splitter_num, '-', position) as flange_id, org_node_id
+                                    FROM sc_bolt_master_data
+                                    WHERE tenant_id = :tid
+                                      AND org_node_id IN ({placeholders})
+                                      AND collector_id IS NOT NULL
+                                      AND splitter_num IS NOT NULL
+                                      AND position IS NOT NULL
+                                """),
+                                params
+                            ).fetchall()
+                            candidates = [
+                                (str(r[0]), int(r[1]))
+                                for r in flange_rows if r[0] is not None
+                            ]
+                            if candidates:
+                                return list(set(candidates))
+                        except Exception as e:
+                            logger.warning(f"从sc_bolt_master_data查询flange候选失败: {e}")
+
+                    try:
+                        flange_rows = db.execute(
+                            text("""
+                                SELECT DISTINCT CONCAT(collector_id, '-', splitter_num, '-', position) as flange_id
+                                FROM sc_bolt_data
+                            """)
+                        ).fetchall()
+                        return [(str(r[0]), None) for r in flange_rows if r[0] is not None]
+                    except Exception as e:
+                        logger.warning(f"查询全部flange候选失败: {e}")
+                        return []
+
+                else:
+                    logger.error(f"未知节点类型: {node_type}")
+                    return []
+        except Exception as e:
+            logger.warning(f"get_batch_prediction_candidates失败: {e}")
+            return []
+
     def fetch_flange_bolt_data(
         self,
         flange_id: str
@@ -507,7 +776,7 @@ class PredictionRepository:
 
     # ---------- 结果持久化 ----------
 
-    def save_bolt_prediction(self, bolt_id: str, result: Dict[str, Any]) -> None:
+    def save_bolt_prediction(self, bolt_id: str, result: Dict[str, Any], org_node_id: Optional[int] = None) -> None:
         try:
             with get_db() as db:
                 fault_detail = result.get('fault_detail')
@@ -528,6 +797,7 @@ class PredictionRepository:
 
                 prediction = AbnormalPrediction(
                     bolt_id=int(bolt_id) if bolt_id.isdigit() else None,
+                    org_node_id=org_node_id,
                     node_type='螺栓',
                     year_month=datetime.now().strftime('%Y%m'),
                     pw_type=result['status'],
@@ -544,7 +814,7 @@ class PredictionRepository:
         except Exception as e:
             logger.error(f"保存螺栓预测失败 [{bolt_id}]: {e}")
 
-    def save_flange_prediction(self, flange_id: str, result: Dict[str, Any]) -> None:
+    def save_flange_prediction(self, flange_id: str, result: Dict[str, Any], org_node_id: Optional[int] = None) -> None:
         try:
             with get_db() as db:
                 recommendations = result.get('recommendations', [])
@@ -577,6 +847,7 @@ class PredictionRepository:
 
                 prediction = AbnormalPrediction(
                     flm_id=flange_id,
+                    org_node_id=org_node_id,
                     node_type='法兰面',
                     year_month=datetime.now().strftime('%Y%m'),
                     pw_type=result['status'],
@@ -596,7 +867,8 @@ class PredictionRepository:
         self,
         node_id: str,
         node_type: str,
-        result: Dict[str, Any]
+        result: Dict[str, Any],
+        org_node_id: Optional[int] = None
     ) -> None:
         """
         保存月度预测结果
@@ -605,12 +877,14 @@ class PredictionRepository:
             node_id: 节点ID
             node_type: 节点类型 ('bolt' / 'flange')
             result: 月度预测结果字典
+            org_node_id: 组织节点ID（可选）
         """
         try:
             with get_db() as db:
                 prediction = MonthPrediction(
                     bolt_id=int(node_id) if node_type == 'bolt' and node_id.isdigit() else None,
                     flm_id=node_id if node_type == 'flange' else None,
+                    org_node_id=org_node_id,
                     node_type='螺栓' if node_type == 'bolt' else '法兰面',
                     year_month=datetime.now().strftime('%Y%m'),
                     pw_type=result['pw_type'],

@@ -3162,3 +3162,118 @@ INSERT INTO sc_node_thresholds (node_type, node_id, scope, source, threshold_typ
 -- 显示阈值模块新增的表
 SHOW TABLES LIKE '%node_threshold%';
 SHOW TABLES LIKE '%threshold_audit%';
+
+-- ============================================================
+-- 螺栓设备主数据与组织树绑定模块
+-- ============================================================
+
+-- ============================================================
+-- 螺栓设备主数据扩展表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_bolt_master_data (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT NOT NULL COMMENT '租户ID',
+    org_node_id BIGINT NOT NULL COMMENT '关联组织节点ID（sc_org_nodes中node_type=bolt）',
+    sensor_id BIGINT NOT NULL COMMENT '通道ID/螺栓ID',
+    bolt_spec VARCHAR(50) COMMENT '螺栓规格，如M36×3',
+    material_grade VARCHAR(50) COMMENT '材质等级，如10.9级',
+    design_preload_kn FLOAT COMMENT '设计预紧力（kN）',
+    design_torque_nm FLOAT COMMENT '设计扭矩值（N·m）',
+    lubrication_method VARCHAR(100) COMMENT '润滑方式',
+    commissioning_date DATE COMMENT '投运日期',
+    last_tightening_date DATETIME COMMENT '上次紧固日期',
+    torque_curve_id VARCHAR(64) COMMENT '设计扭矩曲线ID',
+    flange_id VARCHAR(100) COMMENT '所属法兰面ID',
+    flange_org_node_id BIGINT COMMENT '所属法兰面组织节点ID',
+    bolt_position INT COMMENT '螺栓在法兰面的位置编号',
+    thread_type VARCHAR(20) COMMENT '螺纹类型',
+    surface_treatment VARCHAR(50) COMMENT '表面处理',
+    standard_code VARCHAR(50) COMMENT '执行标准',
+    manufacturer VARCHAR(200) COMMENT '生产厂家',
+    extra_info TEXT COMMENT '扩展字段 JSON',
+    status VARCHAR(20) DEFAULT 'active' COMMENT '状态 active/inactive/decommissioned',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY uk_master_tenant_sensor (tenant_id, sensor_id),
+    UNIQUE KEY uk_master_org_node (org_node_id),
+    INDEX idx_master_flange (flange_id),
+    INDEX idx_master_status (status),
+    INDEX idx_master_bolt_spec (bolt_spec),
+    INDEX idx_master_material (material_grade),
+    INDEX idx_master_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='螺栓设备主数据扩展表';
+
+-- ============================================================
+-- 为现有表增加 org_node_id 字段与索引
+-- 使用存储过程 + information_schema 检查，避免重复执行错误
+-- ============================================================
+DELIMITER //
+
+DROP PROCEDURE IF EXISTS AddOrgNodeIdIfMissing //
+CREATE PROCEDURE AddOrgNodeIdIfMissing(
+    IN p_table_name VARCHAR(64),
+    IN p_index_prefix VARCHAR(50)
+)
+BEGIN
+    -- 检查 org_node_id 列是否存在
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = p_table_name
+          AND COLUMN_NAME = 'org_node_id'
+    ) THEN
+        SET @sql = CONCAT('ALTER TABLE `', p_table_name, '` ADD COLUMN org_node_id BIGINT COMMENT ''组织节点ID''');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+
+    -- 检查 idx_org_node 索引是否存在
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = p_table_name
+          AND INDEX_NAME = 'idx_org_node'
+    ) THEN
+        SET @sql = CONCAT('ALTER TABLE `', p_table_name, '` ADD INDEX idx_org_node (org_node_id)');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+
+    -- 检查 idx_tenant_org 复合索引是否存在
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = p_table_name
+          AND INDEX_NAME = 'idx_tenant_org'
+    ) THEN
+        SET @sql = CONCAT('ALTER TABLE `', p_table_name, '` ADD INDEX idx_tenant_org (tenant_id, org_node_id)');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END //
+
+DELIMITER ;
+
+-- 批量为各表添加 org_node_id
+CALL AddOrgNodeIdIfMissing('sc_bolt_data', 'bolt_data');
+CALL AddOrgNodeIdIfMissing('sci_abnormal_prediction', 'abnormal');
+CALL AddOrgNodeIdIfMissing('ci_month_prediction_details', 'monthly');
+CALL AddOrgNodeIdIfMissing('sc_bolt_health_history', 'health');
+CALL AddOrgNodeIdIfMissing('sc_rul_predictions', 'rul');
+
+DROP PROCEDURE IF EXISTS AddOrgNodeIdIfMissing;
+
+-- 显示主数据表
+SHOW TABLES LIKE '%bolt_master%';
+
+-- ============================================================
+-- 组织节点 extra_info 字段用于存储 bolt/flange 元数据绑定
+-- ============================================================
+-- sc_org_nodes.extra_info 约定 JSON 结构:
+-- bolt节点: {"sensor_id": 1001, "collector_id": 1, "splitter_num": 2, "position": "A01",
+--            "flange_id": "1-2-A01", "bolt_position": 5}
+-- flange节点: {"collector_id": 1, "splitter_num": 2, "position": "A01"}
+-- unit节点: {"line_code": " CDU-01", "process_type": "常减压"}

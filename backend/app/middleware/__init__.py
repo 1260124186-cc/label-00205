@@ -38,6 +38,7 @@ _request_start_time_var: contextvars.ContextVar[float] = contextvars.ContextVar(
 _tenant_id_var: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar('tenant_id', default=None)
 _user_id_var: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar('user_id', default=None)
 _user_role_var: contextvars.ContextVar[str] = contextvars.ContextVar('user_role', default='')
+_user_org_node_id_var: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar('user_org_node_id', default=None)
 _is_super_admin_var: contextvars.ContextVar[bool] = contextvars.ContextVar('is_super_admin', default=False)
 _is_audit_mode_var: contextvars.ContextVar[bool] = contextvars.ContextVar('is_audit_mode', default=False)
 _audit_tenant_id_var: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar('audit_tenant_id', default=None)
@@ -95,6 +96,26 @@ def set_user_role(role: str) -> None:
     _user_role_var.set(role)
 
 
+def get_user_org_node_id() -> Optional[int]:
+    """获取当前请求用户关联的组织节点ID"""
+    return _user_org_node_id_var.get()
+
+
+def set_user_org_node_id(org_node_id: Optional[int]) -> None:
+    """设置当前请求用户关联的组织节点ID"""
+    _user_org_node_id_var.set(org_node_id)
+
+
+def get_current_user_role() -> str:
+    """别名函数：获取当前请求的 user_role（兼容enforcement命名）"""
+    return get_user_role()
+
+
+def get_current_user_org_node_id() -> Optional[int]:
+    """别名函数：获取当前用户的组织节点ID（兼容enforcement命名）"""
+    return get_user_org_node_id()
+
+
 def is_super_admin() -> bool:
     """检查当前用户是否为超级管理员"""
     return _is_super_admin_var.get()
@@ -140,6 +161,7 @@ def get_request_context() -> Dict[str, Any]:
         'tenant_id': get_effective_tenant_id(),
         'user_id': get_user_id(),
         'user_role': get_user_role(),
+        'user_org_node_id': get_user_org_node_id(),
         'is_super_admin': is_super_admin(),
         'is_audit_mode': is_audit_mode(),
     }
@@ -150,12 +172,14 @@ def set_tenant_context(
     user_id: Optional[int] = None,
     role: str = '',
     is_super_admin: bool = False,
+    org_node_id: Optional[int] = None,
 ) -> None:
     """批量设置租户上下文"""
     set_tenant_id(tenant_id)
     set_user_id(user_id)
     set_user_role(role)
     set_is_super_admin(is_super_admin)
+    set_user_org_node_id(org_node_id)
 
 
 def clear_tenant_context() -> None:
@@ -164,6 +188,7 @@ def clear_tenant_context() -> None:
     set_user_id(None)
     set_user_role('')
     set_is_super_admin(False)
+    set_user_org_node_id(None)
     clear_audit_mode()
 
 
@@ -321,7 +346,26 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
                     )
 
             if tenant_id:
-                set_tenant_context(tenant_id, user_id, user_role, is_super_admin_flag)
+                user_org_node_id = None
+                if not is_super_admin_flag and user_id is not None:
+                    try:
+                        from app.utils.database import get_db, TenantUser
+                        with get_db() as db_:
+                            if db_ is not None:
+                                tu = (
+                                    db_.query(TenantUser)
+                                    .filter(
+                                        TenantUser.tenant_id == tenant_id,
+                                        TenantUser.id == user_id,
+                                    )
+                                    .first()
+                                )
+                                if tu and tu.org_node_id:
+                                    user_org_node_id = tu.org_node_id
+                    except Exception as e_org:
+                        logger.warning(f"查询用户org_node_id失败: {e_org}")
+
+                set_tenant_context(tenant_id, user_id, user_role, is_super_admin_flag, user_org_node_id)
 
                 audit_tenant_id_header = request.headers.get("X-Audit-Tenant-Id")
                 if audit_tenant_id_header and is_super_admin_flag:

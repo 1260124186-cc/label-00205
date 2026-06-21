@@ -36,6 +36,8 @@ from app.middleware import (
     get_effective_tenant_id,
     is_super_admin,
     is_audit_mode,
+    get_current_user_role,
+    get_current_user_org_node_id,
 )
 from app.utils.config import config
 from app.utils.database import (
@@ -45,6 +47,7 @@ from app.utils.database import (
     OrganizationNode,
     ModelVersionORM,
     TrainingLog,
+    BoltMasterData,
 )
 
 
@@ -728,4 +731,191 @@ def get_one_or_404(
             resource_type=model_class.__name__,
         )
 
+    if hasattr(model_class, "org_node_id") and getattr(record, "org_node_id") is not None:
+        enforce_org_node_access(
+            resource_org_node_id=getattr(record, "org_node_id"),
+            resource_id=record_id,
+            resource_type=model_class.__name__,
+        )
+
     return record
+
+
+# ============================================================
+# 组织节点级权限控制（数据行级隔离）
+# ============================================================
+
+ORG_RESTRICTED_ROLES = {"operator", "viewer"}
+
+ALL_DESCENDANTS_CACHE: Dict[Tuple[int, int], List[int]] = {}
+_ALL_DESCENDANTS_CACHE_LOCK = threading.Lock()
+
+
+def clear_org_permission_cache() -> None:
+    """清空组织权限缓存（用户变动/组织树变动时调用）"""
+    with _ALL_DESCENDANTS_CACHE_LOCK:
+        ALL_DESCENDANTS_CACHE.clear()
+
+
+def _get_descendant_ids(
+    db: Session,
+    tenant_id: int,
+    root_node_id: int,
+) -> List[int]:
+    """
+    获取指定组织节点的所有后代节点ID（含自身）。
+    带内存缓存（按tenant_id+root_node_id键）。
+    """
+    cache_key = (tenant_id, root_node_id)
+    with _ALL_DESCENDANTS_CACHE_LOCK:
+        cached = ALL_DESCENDANTS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    try:
+        rows = db.execute(
+            text("""
+                SELECT id FROM sc_org_nodes
+                WHERE tenant_id = :tid
+                  AND (id = :nid OR path LIKE CONCAT('%/', :nid, '/%'))
+            """),
+            {"tid": tenant_id, "nid": root_node_id}
+        ).fetchall()
+        ids = [r[0] for r in rows]
+    except Exception as e:
+        logger.warning(f"查询后代节点ID失败(tenant={tenant_id}, node={root_node_id}): {e}")
+        ids = [root_node_id]
+
+    with _ALL_DESCENDANTS_CACHE_LOCK:
+        ALL_DESCENDANTS_CACHE[cache_key] = ids
+    return ids
+
+
+def resolve_user_accessible_org_node_ids(
+    db: Session,
+    tenant_id: int,
+    user_role: str,
+    user_org_node_id: Optional[int],
+) -> Optional[List[int]]:
+    """
+    根据用户角色 + 绑定的 org_node_id，解析用户可访问的所有组织节点ID列表。
+
+    规则:
+    - tenant_admin / admin（租户内管理员）: 返回 None（表示全部可访问，不限制）
+    - operator / viewer 且有 org_node_id: 返回自身节点 + 所有后代节点ID
+    - operator / viewer 但无 org_node_id: 返回空列表（无任何数据权限）
+    - super_admin: 返回 None（平台级）
+    """
+    if is_super_admin():
+        return None
+
+    role = (user_role or "").lower()
+    if role not in ORG_RESTRICTED_ROLES:
+        return None
+
+    if not user_org_node_id:
+        return []
+
+    return _get_descendant_ids(db, tenant_id, user_org_node_id)
+
+
+def enforce_org_node_access(
+    resource_org_node_id: Optional[int],
+    resource_id: Optional[Any] = None,
+    resource_type: str = "resource",
+) -> None:
+    """
+    检查资源的 org_node_id 是否在当前用户可访问范围内。
+    不在范围内 → 404（防枚举）。
+
+    规则:
+    - 超级管理员 / 租户管理员：放行（tenant级校验已在 enforce_tenant_access 完成）
+    - operator / viewer：resource_org_node_id 必须在用户可访问集合内
+    - resource_org_node_id 为空且用户是受限角色：放行（兼容旧数据，但建议绑定）
+    """
+    if is_super_admin():
+        return
+
+    user_role = get_current_user_role() or ""
+    if user_role.lower() not in ORG_RESTRICTED_ROLES:
+        return
+
+    if resource_org_node_id is None:
+        return
+
+    user_org = get_current_user_org_node_id()
+    tenant_id = get_effective_tenant_id()
+    if not user_org or not tenant_id:
+        raise not_found_404()
+
+    with get_db() as db:
+        if db is None:
+            raise not_found_404()
+        allowed = resolve_user_accessible_org_node_ids(
+            db, tenant_id, user_role, user_org
+        )
+
+    if allowed is None:
+        return
+
+    if int(resource_org_node_id) not in allowed:
+        logger.warning(
+            f"Org node access blocked: type={resource_type}, id={resource_id}, "
+            f"resource_org={resource_org_node_id}, user_role={user_role}, user_org={user_org}"
+        )
+        raise not_found_404()
+
+
+def enforce_org_query(
+    query: Query,
+    model_class: Any,
+    user_role: Optional[str] = None,
+    user_org_node_id: Optional[int] = None,
+    tenant_id: Optional[int] = None,
+) -> Query:
+    """
+    为查询自动注入 org_node_id IN (...) 过滤条件。
+
+    与 enforce_tenant_query 组合使用：
+        q = enforce_tenant_query(q, Model)
+        q = enforce_org_query(q, Model)
+
+    Args:
+        query: SQLAlchemy Query
+        model_class: ORM模型类（检查 org_node_id 字段）
+        user_role: 覆盖当前上下文的角色（后台任务场景）
+        user_org_node_id: 覆盖当前上下文的用户组织节点（后台任务场景）
+        tenant_id: 覆盖当前上下文的租户ID（后台任务场景）
+
+    Returns:
+        加了 org_node_id 过滤的 Query
+    """
+    if not hasattr(model_class, "org_node_id"):
+        return query
+
+    if is_super_admin():
+        return query
+
+    effective_role = user_role or get_current_user_role() or ""
+    if effective_role.lower() not in ORG_RESTRICTED_ROLES:
+        return query
+
+    effective_org = user_org_node_id or get_current_user_org_node_id()
+    effective_tid = tenant_id or get_effective_tenant_id()
+
+    if not effective_org or not effective_tid:
+        return query.filter(model_class.org_node_id == -1)
+
+    with get_db() as db:
+        if db is None:
+            return query.filter(model_class.org_node_id == -1)
+        ids = resolve_user_accessible_org_node_ids(
+            db, effective_tid, effective_role, effective_org
+        )
+
+    if ids is None:
+        return query
+    if not ids:
+        return query.filter(model_class.org_node_id == -1)
+
+    return query.filter(model_class.org_node_id.in_(ids))
