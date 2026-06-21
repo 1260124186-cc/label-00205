@@ -17,13 +17,19 @@
 import numpy as np
 import pandas as pd
 from typing import Tuple, List, Optional, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.ensemble import IsolationForest
 from scipy import interpolate
 from loguru import logger
 
 from app.utils.config import config
+from app.services.kalman_filter import (
+    KalmanFilterFactory,
+    KalmanDiagnostics,
+    StreamingKalmanManager,
+    KalmanStreamingState,
+)
 
 
 @dataclass
@@ -37,142 +43,101 @@ class PreprocessingResult:
         anomaly_indices: 异常数据的索引
         interpolated_count: 插值填充的数据点数量
         scaler: 使用的缩放器（用于逆变换）
+        kalman_diagnostics: 卡尔曼滤波诊断信息（增益、新息、误差协方差等）
+        kalman_mode: 使用的滤波模式 simple/adaptive/extended
     """
     data: np.ndarray
     anomalies: Optional[np.ndarray] = None
     anomaly_indices: Optional[List[int]] = None
     interpolated_count: int = 0
     scaler: Optional[Any] = None
+    kalman_diagnostics: Optional[KalmanDiagnostics] = None
+    kalman_mode: Optional[str] = None
 
 
+# 兼容旧引用：内部委托给高级 KalmanFilterFactory
 class KalmanFilter:
     """
-    卡尔曼滤波器
-    
-    用于对时间序列数据进行平滑处理，减少噪声影响。
-    
-    Attributes:
-        process_noise: 过程噪声协方差
-        measurement_noise: 测量噪声协方差
-        estimate: 当前状态估计
-        estimate_error: 估计误差协方差
+    兼容旧接口的卡尔曼滤波器（内部委托给 SimpleKalmanFilter）
     """
-    
+
     def __init__(self, process_noise: float = 0.01, measurement_noise: float = 0.1):
-        """
-        初始化卡尔曼滤波器
-        
-        Args:
-            process_noise: 过程噪声协方差，控制模型对变化的敏感度
-            measurement_noise: 测量噪声协方差，控制对测量值的信任程度
-        """
+        from app.services.kalman_filter import SimpleKalmanFilter
+        self._impl = SimpleKalmanFilter(
+            process_noise=process_noise,
+            measurement_noise=measurement_noise,
+        )
         self.process_noise = process_noise
         self.measurement_noise = measurement_noise
         self.estimate = 0.0
         self.estimate_error = 1.0
-        
+
     def reset(self, initial_value: float = 0.0) -> None:
-        """
-        重置滤波器状态
-        
-        Args:
-            initial_value: 初始估计值
-        """
+        self._impl.reset(initial_value)
         self.estimate = initial_value
-        self.estimate_error = 1.0
-        
+        self.estimate_error = self._impl.initial_P
+
     def update(self, measurement: float) -> float:
-        """
-        更新滤波器状态
-        
-        Args:
-            measurement: 新的测量值
-            
-        Returns:
-            float: 滤波后的估计值
-        """
-        # 预测步骤
-        prediction = self.estimate
-        prediction_error = self.estimate_error + self.process_noise
-        
-        # 更新步骤
-        kalman_gain = prediction_error / (prediction_error + self.measurement_noise)
-        self.estimate = prediction + kalman_gain * (measurement - prediction)
-        self.estimate_error = (1 - kalman_gain) * prediction_error
-        
-        return self.estimate
-    
+        state = self._impl.update(float(measurement))
+        self.estimate = state.estimate
+        self.estimate_error = state.error_covariance
+        return state.estimate
+
     def filter(self, data: np.ndarray) -> np.ndarray:
-        """
-        对整个数据序列进行滤波
-        
-        Args:
-            data: 输入数据数组
-            
-        Returns:
-            np.ndarray: 滤波后的数据数组
-        """
         if len(data) == 0:
             return data
-        
-        self.reset(data[0])
-        filtered = np.zeros_like(data, dtype=float)
-        filtered[0] = data[0]
-        
-        for i in range(1, len(data)):
-            filtered[i] = self.update(data[i])
-        
-        return filtered
+        self._impl.reset()
+        result = self._impl.filter(data, collect_diagnostics=False)
+        self.estimate = float(result.estimates[-1]) if len(result.estimates) > 0 else 0.0
+        self.estimate_error = float(result.error_covariances[-1]) if len(result.error_covariances) > 0 else 1.0
+        return result.smoothed_data
 
 
 class DataPreprocessor:
     """
     数据预处理器
-    
+
     集成了多种数据预处理方法，提供完整的数据清洗流程。
-    
+    高级特性：
+    - 卡尔曼滤波三种模式：simple / adaptive / extended
+    - per-sensor 参数覆盖（高噪声传感器单独配置）
+    - kalman_diagnostics 诊断输出（增益、新息、误差协方差）
+    - 流式增量处理（与 StreamingKalmanManager / SlidingWindowManager 配合）
+
     Attributes:
         config: 预处理配置
         scaler: 数据缩放器
         isolation_forest: 孤立森林模型
-        kalman_filter: 卡尔曼滤波器
+        kalman_factory: 卡尔曼滤波器工厂
+        streaming_kalman: 流式增量卡尔曼管理器
     """
-    
+
     def __init__(self):
-        """
-        初始化数据预处理器
-        """
-        self.config = config.get('preprocessing', {})
+        self.config = config.get("preprocessing", {})
         self._init_components()
-        
+
     def _init_components(self) -> None:
-        """
-        初始化预处理组件
-        """
-        # 初始化缩放器
-        norm_method = self.config.get('normalization', {}).get('method', 'minmax')
-        if norm_method == 'zscore':
-            self.scaler = StandardScaler()
-        else:
-            self.scaler = MinMaxScaler()
-        
-        # 初始化孤立森林
-        iso_config = self.config.get('isolation_forest', {})
+        norm_method = self.config.get("normalization", {}).get("method", "minmax")
+        self.scaler = StandardScaler() if norm_method == "zscore" else MinMaxScaler()
+
+        iso_config = self.config.get("isolation_forest", {})
         self.isolation_forest = IsolationForest(
-            contamination=iso_config.get('contamination', 0.1),
-            n_estimators=iso_config.get('n_estimators', 100),
-            random_state=iso_config.get('random_state', 42),
-            n_jobs=-1
+            contamination=iso_config.get("contamination", 0.1),
+            n_estimators=iso_config.get("n_estimators", 100),
+            random_state=iso_config.get("random_state", 42),
+            n_jobs=-1,
         )
-        
-        # 初始化卡尔曼滤波器
-        kalman_config = self.config.get('kalman_filter', {})
+
+        self.kalman_factory = KalmanFilterFactory()
+        self.streaming_kalman = StreamingKalmanManager(self.kalman_factory)
+
+        kalman_config = self.config.get("kalman_filter", {})
         self.kalman_filter = KalmanFilter(
-            process_noise=kalman_config.get('process_noise', 0.01),
-            measurement_noise=kalman_config.get('measurement_noise', 0.1)
+            process_noise=kalman_config.get("process_noise", 0.01),
+            measurement_noise=kalman_config.get("measurement_noise", 0.1),
         )
-        
-        logger.info("数据预处理器初始化完成")
+
+        logger.info("数据预处理器初始化完成（高级卡尔曼模式已启用）")
     
     def normalize(self, data: np.ndarray, fit: bool = True) -> np.ndarray:
         """
@@ -451,21 +416,38 @@ class DataPreprocessor:
         
         return np.array(new_data), np.array(new_times), insert_count
     
-    def smooth(self, data: np.ndarray) -> np.ndarray:
+    def smooth(
+        self,
+        data: np.ndarray,
+        sensor_id: Optional[str] = None,
+        mode: Optional[str] = None,
+        collect_diagnostics: bool = True,
+    ) -> Tuple[np.ndarray, Optional[KalmanDiagnostics], Optional[str]]:
         """
-        使用卡尔曼滤波对数据进行平滑
-        
+        使用高级卡尔曼滤波对数据进行平滑
+
         Args:
             data: 输入数据
-            
+            sensor_id: 传感器ID，用于查找 per-sensor 覆盖
+            mode: 强制指定模式 simple/adaptive/extended
+            collect_diagnostics: 是否收集诊断信息
+
         Returns:
-            np.ndarray: 平滑后的数据
+            (smoothed_data, diagnostics, used_mode)
         """
-        return self.kalman_filter.filter(data)
+        if len(data) == 0:
+            return data, None, None
+
+        kf = self.kalman_factory.create_filter(
+            sensor_id=sensor_id, mode=mode, collect_diagnostics=collect_diagnostics
+        )
+        used_mode = kf.mode
+        result = kf.filter(data, collect_diagnostics=collect_diagnostics)
+        return result.smoothed_data, result.diagnostics, used_mode
     
     def process(
-        self, 
-        data: np.ndarray, 
+        self,
+        data: np.ndarray,
         timestamps: Optional[np.ndarray] = None,
         remove_anomalies: bool = True,
         normalize: bool = True,
@@ -473,10 +455,12 @@ class DataPreprocessor:
         fit_scaler: bool = True,
         sensor_id: Optional[str] = None,
         store_anomalies: bool = False,
+        kalman_mode: Optional[str] = None,
+        collect_kalman_diagnostics: bool = True,
     ) -> PreprocessingResult:
         """
         执行完整的数据预处理流程
-        
+
         Args:
             data: 原始预紧力数据
             timestamps: 时间戳数组，可选
@@ -484,22 +468,22 @@ class DataPreprocessor:
             normalize: 是否归一化
             smooth: 是否平滑
             fit_scaler: 是否拟合缩放器
-            sensor_id: 传感器ID（存储异常时需要）
+            sensor_id: 传感器ID（用于 per-sensor 参数覆盖和异常存储）
             store_anomalies: 是否将检测到的异常写入数据库
-            
+            kalman_mode: 强制指定滤波模式 simple/adaptive/extended（None 则使用配置）
+            collect_kalman_diagnostics: 是否收集卡尔曼诊断信息
+
         Returns:
-            PreprocessingResult: 预处理结果
+            PreprocessingResult: 预处理结果，包含 kalman_diagnostics
         """
         result = PreprocessingResult(data=data.copy())
-        
-        # 1. 异常值检测
+
         if remove_anomalies:
             normal_data, anomalies, anomaly_indices = self.detect_anomalies(data)
             result.data = normal_data
             result.anomalies = anomalies
             result.anomaly_indices = anomaly_indices
-            
-            # 存储异常到数据库
+
             if store_anomalies and sensor_id and anomalies is not None and len(anomalies) > 0:
                 self.store_anomalies_to_db(
                     sensor_id=sensor_id,
@@ -507,32 +491,39 @@ class DataPreprocessor:
                     anomaly_indices=anomaly_indices,
                     timestamps=timestamps,
                 )
-        
-        # 2. 缺失值插值
+
         if timestamps is not None:
-            # 需要根据异常值移除后的索引调整时间戳
             if remove_anomalies and result.anomaly_indices:
                 valid_mask = np.ones(len(data), dtype=bool)
                 valid_mask[result.anomaly_indices] = False
                 valid_timestamps = timestamps[valid_mask]
             else:
                 valid_timestamps = timestamps
-            
+
             result.data, _, result.interpolated_count = self.interpolate_missing(
                 result.data, valid_timestamps
             )
-        
-        # 3. 卡尔曼滤波平滑
+
         if smooth:
-            result.data = self.smooth(result.data)
-        
-        # 4. 归一化
+            smoothed, diag, mode = self.smooth(
+                result.data,
+                sensor_id=sensor_id,
+                mode=kalman_mode,
+                collect_diagnostics=collect_kalman_diagnostics,
+            )
+            result.data = smoothed
+            result.kalman_diagnostics = diag
+            result.kalman_mode = mode
+
         if normalize:
             result.data = self.normalize(result.data, fit=fit_scaler)
             result.scaler = self.scaler
-        
-        logger.info(f"数据预处理完成: 原始数据 {len(data)}, 处理后 {len(result.data)}")
-        
+
+        logger.info(
+            f"数据预处理完成: 原始数据 {len(data)}, 处理后 {len(result.data)}, "
+            f"kalman_mode={result.kalman_mode}, diagnostics={'on' if result.kalman_diagnostics else 'off'}"
+        )
+
         return result
     
     def process_dataframe(
@@ -614,6 +605,8 @@ class MultivariatePreprocessingResult:
         missing_channels: 缺失/降级的通道名称列表
         complete_ratio: 完整数据占比（非插值非缺失的比例）
         interpolation_count: 总插值填充点数
+        channel_kalman_diagnostics: 各通道卡尔曼诊断信息
+        channel_kalman_modes: 各通道实际使用的滤波模式
     """
     data: np.ndarray
     timestamps: np.ndarray
@@ -621,10 +614,12 @@ class MultivariatePreprocessingResult:
     channel_means: Optional[np.ndarray] = None
     channel_stds: Optional[np.ndarray] = None
     interpolation_flags: Optional[np.ndarray] = None
-    data_quality: str = 'full'
+    data_quality: str = "full"
     missing_channels: List[str] = None
     complete_ratio: float = 1.0
     interpolation_count: int = 0
+    channel_kalman_diagnostics: Dict[str, Optional[KalmanDiagnostics]] = field(default_factory=dict)
+    channel_kalman_modes: Dict[str, Optional[str]] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.missing_channels is None:
@@ -646,34 +641,25 @@ class MultivariatePreprocessor:
 
     def __init__(
         self,
-        interpolation_method: str = 'linear',
-        normalize_mode: str = 'channel_wise',
+        interpolation_method: str = "linear",
+        normalize_mode: str = "channel_wise",
         smooth_each_channel: bool = True,
         min_complete_ratio: float = 0.5,
         allow_degraded: bool = True,
-        fallback_channel: str = 'preload',
+        fallback_channel: str = "preload",
+        collect_kalman_diagnostics: bool = True,
     ):
-        """
-        初始化多变量预处理器
-
-        Args:
-            interpolation_method: 插值方法 linear/spline/time_aware
-            normalize_mode: 归一化方式 channel_wise/global/none
-            smooth_each_channel: 是否对各通道分别进行卡尔曼平滑
-            min_complete_ratio: 最低完整数据比例，低于此比例则降级
-            allow_degraded: 是否允许降级为单变量（fallback_channel）
-            fallback_channel: 降级时保留的通道（通常是预紧力）
-        """
         self.interpolation_method = interpolation_method
         self.normalize_mode = normalize_mode
         self.smooth_each_channel = smooth_each_channel
         self.min_complete_ratio = min_complete_ratio
         self.allow_degraded = allow_degraded
         self.fallback_channel = fallback_channel
+        self.collect_kalman_diagnostics = collect_kalman_diagnostics
 
-        # 内部状态
         self._channel_scalers: Dict[str, StandardScaler] = {}
         self._kalman_filters: Dict[str, KalmanFilter] = {}
+        self._kalman_factory = KalmanFilterFactory()
 
     # ---------- 核心：多通道时间对齐与插值 ----------
 
@@ -849,6 +835,8 @@ class MultivariatePreprocessor:
         if not self.smooth_each_channel:
             return result
 
+        from app.services.kalman_filter import BaseKalmanFilter
+
         N, C = result.data.shape
 
         for c, ch in enumerate(result.channels):
@@ -863,20 +851,29 @@ class MultivariatePreprocessor:
                     process_noise=0.01, measurement_noise=0.1
                 )
 
-            kf = self._kalman_filters[ch]
+            kf_advanced: BaseKalmanFilter = self._kalman_factory.create_filter(
+                sensor_id=ch, collect_diagnostics=self.collect_kalman_diagnostics
+            )
+
             first_valid_idx = np.argmax(valid)
-            kf.reset(float(col[first_valid_idx]))
+            init_val = float(col[first_valid_idx])
+            kf_advanced.reset(init_val)
 
             for i in range(N):
                 if np.isnan(col[i]):
                     continue
-                # 跳过插值标记的点（不做滤波，保持插值原样）
                 if result.interpolation_flags[i, c] == 1:
-                    kf.estimate = float(col[i])
+                    kf_advanced.x = float(col[i])
+                    kf_advanced._initialized = True
                     continue
-                col[i] = kf.update(float(col[i]))
+                state = kf_advanced.update(float(col[i]))
+                col[i] = state.estimate
 
             result.data[:, c] = col
+
+            diag = kf_advanced.get_diagnostics()
+            result.channel_kalman_diagnostics[ch] = diag
+            result.channel_kalman_modes[ch] = kf_advanced.mode
 
         return result
 

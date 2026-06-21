@@ -103,7 +103,58 @@ preprocessing:
     n_estimators: 100         # 树数量
     random_state: 42
 
-  # 卡尔曼滤波参数
+  # 卡尔曼滤波高级配置
+  kalman:
+    # 滤波模式: simple(标准) | adaptive(自适应) | extended(扩展)
+    mode: "simple"
+
+    # 是否输出诊断信息（增益序列、新息、误差协方差）供可解释性报告
+    enable_diagnostics: true
+
+    # 基础参数（所有传感器默认使用）
+    base:
+      process_noise: 0.01
+      measurement_noise: 0.1
+      initial_error_covariance: 1.0
+
+    # 自适应模式专用参数
+    adaptive:
+      adaptation_rate: 0.1        # 自适应率 (0-1)
+      innovation_window: 10       # 新息窗口大小
+      upper_threshold: 1.5        # 新息方差超过预期倍数时调高R
+      lower_threshold: 0.5        # 新息方差低于预期倍数时调低R
+      min_measurement_noise_ratio: 0.1  # R最低为 base_R 的比例
+
+    # 扩展卡尔曼（EKF）专用参数
+    extended:
+      # 状态转移函数类型: constant | linear_drift | custom
+      state_transition: "constant"
+      drift_rate: 0.0              # linear_drift 模式下的漂移率
+      # 非线性观测函数（预留，当前实现为线性观测）
+      observation_type: "linear"
+
+    # 高噪声传感器 per-sensor 参数覆盖
+    # key 为 sensor_id / bolt_id，value 为覆盖的参数
+    sensor_overrides: {}
+      # 示例:
+      # "BOLT-001-HIGHNOISE":
+      #   process_noise: 0.05
+      #   measurement_noise: 0.5
+      #   mode: "adaptive"
+      # "BOLT-007-DRIFT":
+      #   mode: "extended"
+      #   extended:
+      #     state_transition: "linear_drift"
+      #     drift_rate: 0.001
+
+    # 流式增量卡尔曼配置（与 SlidingWindowManager 配合）
+    streaming:
+      # 是否启用增量滤波（流式场景每条数据仅 update，不从头 filter）
+      enabled: true
+      # 滤波器状态持久化窗口（与滑动窗口同步 TTL）
+      state_ttl_seconds: 3600
+
+  # 兼容旧版配置（保留读取）
   kalman_filter:
     process_noise: 0.01
     measurement_noise: 0.1
