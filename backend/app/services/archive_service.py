@@ -705,6 +705,33 @@ class ArchiveService:
         Returns:
             ArchiveResult
         """
+        from app.utils.db_pool import db_pool
+
+        quota_name = "archive"
+        quota = db_pool.get_quota(quota_name)
+        quota_acquired = False
+        if quota:
+            quota_acquired = quota.acquire(timeout=30.0)
+            if not quota_acquired:
+                logger.warning(f"归档连接池配额获取超时 ({quota.current}/{quota.max_connections})")
+
+        try:
+            return self._run_monthly_archive_impl(
+                tenant_id=tenant_id,
+                table_name=table_name,
+                hot_threshold_days=hot_threshold_days,
+                trigger_type=trigger_type,
+                operator=operator,
+            )
+        finally:
+            if quota and quota_acquired:
+                quota.release()
+
+    def _run_monthly_archive_impl(self, tenant_id: int,
+                            table_name: Optional[str] = None,
+                            hot_threshold_days: Optional[int] = None,
+                            trigger_type: str = "scheduled",
+                            operator: Optional[str] = None) -> ArchiveResult:
         policy = self.get_retention_policy(tenant_id)
 
         if hot_threshold_days is None:

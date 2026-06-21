@@ -2761,8 +2761,19 @@ class PredictionOrchestrator:
             node_type: 'bolt' 或 'flange'
             specific_bolt_id: 可选，指定要预测的单个螺栓ID（用于分片执行）
         """
+        from app.utils.db_pool import db_pool
+
         task_type = f"batch_{node_type}"
         logger.info(f"开始批量预测: {node_type}" + (f" (指定螺栓: {specific_bolt_id})" if specific_bolt_id else ""))
+
+        quota_name = "batch_prediction"
+        quota = db_pool.get_quota(quota_name)
+        quota_acquired = False
+        if quota:
+            quota_acquired = quota.acquire(timeout=30.0)
+            if not quota_acquired:
+                logger.warning(f"批量预测连接池配额获取超时 ({quota.current}/{quota.max_connections})")
+
         try:
             if node_type == 'bolt':
                 if specific_bolt_id:
@@ -2776,14 +2787,15 @@ class PredictionOrchestrator:
                 metrics.record_prediction_task(task_type, success=False, error_type="unknown_node_type")
                 return
 
-            # 记录任务成功
             if not specific_bolt_id:
                 metrics.record_prediction_task(task_type, success=True)
         except Exception as e:
             logger.error(f"批量预测失败: {e}")
             if not specific_bolt_id:
                 metrics.record_prediction_task(task_type, success=False, error_type=str(type(e).__name__))
-            raise
+        finally:
+            if quota and quota_acquired:
+                quota.release()
 
     def _predict_single_bolt(self, bolt_id: str) -> None:
         """预测单个螺栓（用于分片执行）"""

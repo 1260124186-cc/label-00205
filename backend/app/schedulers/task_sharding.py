@@ -529,25 +529,43 @@ class ShardedTaskExecutor:
         Returns:
             ShardResult: 分片执行结果
         """
-        with job_execution_context(
-            job_name=f"{task_name}_shard_{shard.shard_index}",
-            job_type=task_type,
-            trigger_type=trigger_type,
-            service=self.job_service,
-            shard_index=shard.shard_index,
-            shard_total=shard.shard_total,
-        ) as ctx:
-            result = self._process_shard(
-                shard=shard,
-                process_func=process_func,
-                ctx=ctx,
-                error_filter=error_filter,
-            )
+        from app.utils.db_pool import db_pool
 
-            ctx.bolt_id_min = str(shard.item_min) if shard.item_min else None
-            ctx.bolt_id_max = str(shard.item_max) if shard.item_max else None
+        quota_name = "shard_task"
+        quota = db_pool.get_quota(quota_name)
+        quota_acquired = False
 
-            return result
+        if quota:
+            quota_acquired = quota.acquire(timeout=30.0)
+            if not quota_acquired:
+                logger.warning(
+                    f"分片 {shard.shard_index} 连接池配额获取超时 "
+                    f"({quota.current}/{quota.max_connections}), 继续执行但可能影响连接池"
+                )
+
+        try:
+            with job_execution_context(
+                job_name=f"{task_name}_shard_{shard.shard_index}",
+                job_type=task_type,
+                trigger_type=trigger_type,
+                service=self.job_service,
+                shard_index=shard.shard_index,
+                shard_total=shard.shard_total,
+            ) as ctx:
+                result = self._process_shard(
+                    shard=shard,
+                    process_func=process_func,
+                    ctx=ctx,
+                    error_filter=error_filter,
+                )
+
+                ctx.bolt_id_min = str(shard.item_min) if shard.item_min else None
+                ctx.bolt_id_max = str(shard.item_max) if shard.item_max else None
+
+                return result
+        finally:
+            if quota and quota_acquired:
+                quota.release()
 
     def _process_shard(
         self,

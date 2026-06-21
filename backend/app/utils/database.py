@@ -2988,13 +2988,18 @@ class DatabaseManager:
 db_manager = DatabaseManager()
 
 
+from app.utils.db_pool import db_pool
+
+
 @contextmanager
-def get_db() -> Generator[Optional[Session], None, None]:
+def get_db(read_only: bool = False) -> Generator[Optional[Session], None, None]:
     """
     获取数据库会话的上下文管理器
 
-    自动处理会话的提交和回滚。
-    如果数据库不可用，yield None。
+    统一委托给 DatabasePool 单例，所有 Repository / Service 经同一入口获取 Session。
+
+    Args:
+        read_only: 是否使用只读从库（需启用读写分离）
 
     Yields:
         Session: 数据库会话，如果不可用则为None
@@ -3003,21 +3008,12 @@ def get_db() -> Generator[Optional[Session], None, None]:
         with get_db() as db:
             if db is not None:
                 data = db.query(BoltData).all()
-    """
-    session = db_manager.get_session()
-    if session is None:
-        yield None
-        return
 
-    try:
+        with get_db(read_only=True) as db:
+            data = db.query(BoltData).all()
+    """
+    with db_pool.get_session(read_only=read_only) as session:
         yield session
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        logger.error(f"数据库操作错误: {e}")
-        raise
-    finally:
-        session.close()
 
 
 def get_bolt_recent_data(sensor_id: int, limit: int = 100) -> List[BoltData]:

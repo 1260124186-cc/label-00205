@@ -2222,16 +2222,30 @@ class TrainingService:
 
     def train_model(self, model_type, node_id=None, force_retrain=False):
         """兼容旧接口的同步训练方法"""
-        session_id = self.start_training(
-            model_type=model_type, node_id=node_id, force_retrain=force_retrain
-        )
-        result = self.execute_training(session_id)
-        status = result.get('status', 'unknown')
-        if status == 'completed':
-            return {'status': 'success', 'session_id': session_id, **result}
-        if status == 'failed':
-            return {'status': 'failed', 'session_id': session_id, 'error': result.get('error')}
-        return {'status': status, 'session_id': session_id, **result}
+        from app.utils.db_pool import db_pool
+
+        quota_name = "training"
+        quota = db_pool.get_quota(quota_name)
+        quota_acquired = False
+        if quota:
+            quota_acquired = quota.acquire(timeout=30.0)
+            if not quota_acquired:
+                logger.warning(f"训练连接池配额获取超时 ({quota.current}/{quota.max_connections})")
+
+        try:
+            session_id = self.start_training(
+                model_type=model_type, node_id=node_id, force_retrain=force_retrain
+            )
+            result = self.execute_training(session_id)
+            status = result.get('status', 'unknown')
+            if status == 'completed':
+                return {'status': 'success', 'session_id': session_id, **result}
+            if status == 'failed':
+                return {'status': 'failed', 'session_id': session_id, 'error': result.get('error')}
+            return {'status': status, 'session_id': session_id, **result}
+        finally:
+            if quota and quota_acquired:
+                quota.release()
 
 
 _training_service_instance = None

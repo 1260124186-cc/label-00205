@@ -502,6 +502,63 @@ class AppMetrics:
         )
         self.registry.register(self.redis_window_expire_rate)
 
+        # 数据库连接池指标
+        self.db_pool_checkout_count = Gauge(
+            "db_pool_checkout_count",
+            "Total number of connection checkouts from the database pool",
+            []
+        )
+        self.registry.register(self.db_pool_checkout_count)
+
+        self.db_pool_overflow = Gauge(
+            "db_pool_overflow",
+            "Number of overflow connections in the database pool",
+            []
+        )
+        self.registry.register(self.db_pool_overflow)
+
+        self.db_pool_latency_ms = Gauge(
+            "db_pool_latency_ms",
+            "Average database query latency in milliseconds",
+            []
+        )
+        self.registry.register(self.db_pool_latency_ms)
+
+        self.db_pool_active = Gauge(
+            "db_pool_active",
+            "Number of active (checked out) connections in the database pool",
+            []
+        )
+        self.registry.register(self.db_pool_active)
+
+        self.db_pool_idle = Gauge(
+            "db_pool_idle",
+            "Number of idle (checked in) connections in the database pool",
+            []
+        )
+        self.registry.register(self.db_pool_idle)
+
+        self.db_pool_size = Gauge(
+            "db_pool_size",
+            "Total size of the database connection pool",
+            []
+        )
+        self.registry.register(self.db_pool_size)
+
+        self.db_pool_slow_query_count = Gauge(
+            "db_pool_slow_query_count",
+            "Total number of slow queries detected (>500ms)",
+            []
+        )
+        self.registry.register(self.db_pool_slow_query_count)
+
+        self.db_pool_n_plus_one_detected = Gauge(
+            "db_pool_n_plus_one_detected",
+            "Total number of N+1 query patterns detected",
+            []
+        )
+        self.registry.register(self.db_pool_n_plus_one_detected)
+
         logger.info("Prometheus metrics initialized")
 
     # ========== 便捷方法 ==========
@@ -654,9 +711,28 @@ class AppMetrics:
                 label_values=(component,)
             )
 
+    def _update_db_pool_metrics(self) -> None:
+        """更新数据库连接池指标"""
+        try:
+            from app.utils.db_pool import db_pool
+            snapshot = db_pool.get_metrics_snapshot()
+            if not snapshot:
+                return
+            self.db_pool_checkout_count.set(snapshot.get('db_pool_checkout_count', 0))
+            self.db_pool_overflow.set(snapshot.get('db_pool_overflow', 0))
+            self.db_pool_latency_ms.set(snapshot.get('db_pool_latency_ms', 0.0))
+            self.db_pool_active.set(snapshot.get('db_pool_active', 0))
+            self.db_pool_idle.set(snapshot.get('db_pool_idle', 0))
+            self.db_pool_size.set(snapshot.get('db_pool_size', 0))
+            self.db_pool_slow_query_count.set(snapshot.get('db_pool_slow_query_count', 0))
+            self.db_pool_n_plus_one_detected.set(snapshot.get('db_pool_n_plus_one_detected', 0))
+        except Exception as e:
+            logger.debug(f"Failed to update DB pool metrics: {e}")
+
     def generate_metrics_text(self) -> str:
         """生成 Prometheus 格式的指标文本"""
         self.update_gpu_metrics()
+        self._update_db_pool_metrics()
         return self.registry.generate_text()
 
 

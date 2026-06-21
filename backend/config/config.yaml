@@ -13,6 +13,36 @@ database:
   pool_size: 10
   max_overflow: 20
 
+  # 慢查询日志阈值（毫秒），超过此值的查询将被记录
+  slow_query_threshold_ms: 500
+
+  # N+1 检测配置
+  n_plus_one_window_seconds: 2.0    # 检测窗口（秒）
+  n_plus_one_threshold: 10          # 窗口内查询次数阈值
+
+  # 批量/分片任务连接池配额（防止连接耗尽）
+  quotas:
+    batch_prediction:
+      max_connections: 3            # 批量预测最多占用 3 个连接
+    shard_task:
+      max_connections: 4            # 分片任务最多占用 4 个连接
+    training:
+      max_connections: 2            # 训练任务最多占用 2 个连接
+    archive:
+      max_connections: 2            # 归档任务最多占用 2 个连接
+
+  # 读写分离配置（预留开关，启用后主库写、从库读）
+  read_write_split:
+    enabled: false                  # 是否启用读写分离
+    slave:
+      host: ""                      # 从库主机地址（留空则不启用）
+      port: 3306
+      user: "readonly"
+      password: ""
+      # database: ""                # 从库数据库名（留空则与主库相同）
+      pool_size: 10
+      max_overflow: 20
+
 # API服务配置
 api:
   host: "0.0.0.0"
