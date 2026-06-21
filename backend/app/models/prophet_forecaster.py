@@ -857,14 +857,29 @@ class ProphetForecaster:
         values: np.ndarray,
         lower_bound: np.ndarray,
         upper_bound: np.ndarray,
+        node_type: Optional[str] = None,
+        node_id: Optional[str] = None,
     ) -> Tuple[List[Tuple[datetime, datetime]], str]:
-        """
-        检测预测中的异常时间段
-        """
         min_normal = self.thresholds['min_normal']
         max_normal = self.thresholds['max_normal']
         warning_dev = self.thresholds['warning_deviation']
         critical_dev = self.thresholds['critical_deviation']
+
+        if node_type and node_id:
+            try:
+                from app.services.prediction.threshold_service import get_effective_threshold
+                effective = get_effective_threshold(node_type, node_id, 'preload')
+                params = effective.get('parameters', {})
+                if 'min_normal' in params:
+                    min_normal = params['min_normal']
+                if 'max_normal' in params:
+                    max_normal = params['max_normal']
+                if 'warning_deviation' in params:
+                    warning_dev = params['warning_deviation']
+                if 'critical_deviation' in params:
+                    critical_dev = params['critical_deviation']
+            except Exception:
+                pass
 
         warning_min = min_normal * (1 - warning_dev)
         warning_max = max_normal * (1 + warning_dev)
@@ -1020,10 +1035,21 @@ class ProphetForecaster:
             'forecast_dates': forecast_result.dates,
         }
 
-    def _determine_warning_type(self, result: ForecastResult) -> str:
-        """确定预警类型"""
+    def _determine_warning_type(self, result: ForecastResult, node_type: Optional[str] = None, node_id: Optional[str] = None) -> str:
         min_normal = self.thresholds['min_normal']
         max_normal = self.thresholds['max_normal']
+
+        if node_type and node_id:
+            try:
+                from app.services.prediction.threshold_service import get_effective_threshold
+                effective = get_effective_threshold(node_type, node_id, 'preload')
+                params = effective.get('parameters', {})
+                if 'min_normal' in params:
+                    min_normal = params['min_normal']
+                if 'max_normal' in params:
+                    max_normal = params['max_normal']
+            except Exception:
+                pass
 
         min_pred = np.min(result.values) if len(result.values) > 0 else min_normal
         max_pred = np.max(result.values) if len(result.values) > 0 else max_normal

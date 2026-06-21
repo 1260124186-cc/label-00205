@@ -123,6 +123,7 @@ class BoltPredictionResponse(BaseModel):
     fault_detail: Optional[FaultDetailSchema] = Field(None, description="故障类型细分详情")
     prediction_source: Optional[str] = Field(None, description="预测来源: lstm / ensemble / rule")
     ensemble: Optional[Dict[str, Any]] = Field(None, description="Ensemble集成学习详情（触发时返回）")
+    threshold_version: Optional[str] = Field(None, description="生效阈值版本号")
 
 
 class EnsemblePredictorResultSchema(BaseModel):
@@ -526,6 +527,7 @@ class FlangePredictionResponse(BaseModel):
     shadow_version: Optional[str] = Field(None, description="Shadow模式版本号")
     shadow_result: Optional[Dict[str, Any]] = Field(None, description="Shadow模式预测结果")
     fault_detail: Optional[FaultDetailSchema] = Field(None, description="故障类型细分详情")
+    threshold_version: Optional[str] = Field(None, description="生效阈值版本号")
 
 
 # ==================== 风险评估 ====================

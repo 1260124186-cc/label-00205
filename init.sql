@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS sci_abnormal_prediction (
     fault_type VARCHAR(10) COMMENT '故障类型：loosening/overload/fracture/fatigue/corrosion',
     fault_confidence FLOAT COMMENT '故障分类置信度',
     fault_evidence TEXT COMMENT '故障证据JSON',
+    threshold_version VARCHAR(50) COMMENT '生效阈值版本号',
     tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_node_type (node_type),
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS ci_month_prediction_details (
     fault_type VARCHAR(10) COMMENT '故障类型：loosening/overload/fracture/fatigue/corrosion',
     fault_confidence FLOAT COMMENT '故障分类置信度',
     fault_evidence TEXT COMMENT '故障证据JSON',
+    threshold_version VARCHAR(50) COMMENT '生效阈值版本号',
     tenant_id BIGINT COMMENT '租户ID',
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX idx_node_type (node_type),
@@ -3083,3 +3085,80 @@ INSERT IGNORE INTO sc_scheduler_leader (leader_key, leader_id, lease_expire_time
 -- 显示灾备模块表
 SHOW TABLES LIKE 'sc_backup%';
 SHOW TABLES LIKE 'sc_%restore%';
+
+-- ============================================================
+-- 节点级动态阈值模块
+-- ============================================================
+
+-- ============================================================
+-- 节点阈值配置表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_node_thresholds (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型 bolt/flange',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID',
+    scope VARCHAR(20) NOT NULL DEFAULT 'node' COMMENT '作用域 global/flange/node',
+    source VARCHAR(30) NOT NULL DEFAULT 'design' COMMENT '来源: design=设计值±偏差, statistical=历史稳态统计, manual=人工覆盖',
+    threshold_type VARCHAR(50) NOT NULL COMMENT '阈值类型: preload/risk/health_index/confidence 等',
+    parameters TEXT NOT NULL COMMENT '阈值参数 JSON, 如 {"min_normal":400,"max_normal":800,"warning_deviation":0.1,"critical_deviation":0.2}',
+    version INT NOT NULL DEFAULT 1 COMMENT '版本号，每次变更自增',
+    is_active TINYINT(1) DEFAULT 1 COMMENT '是否为当前生效版本',
+    description VARCHAR(500) COMMENT '变更说明',
+    design_value DOUBLE COMMENT '设计值（来源为design时记录）',
+    deviation_ratio DOUBLE COMMENT '偏差比例（来源为design时记录）',
+    statistical_mean DOUBLE COMMENT '统计均值（来源为statistical时记录）',
+    statistical_std DOUBLE COMMENT '统计标准差（来源为statistical时记录）',
+    statistical_sample_count INT COMMENT '统计样本数（来源为statistical时记录）',
+    statistical_window_days INT COMMENT '统计窗口天数（来源为statistical时记录）',
+    operator_id VARCHAR(50) COMMENT '操作人ID',
+    operator_name VARCHAR(100) COMMENT '操作人姓名',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY uk_node_threshold_active (node_type, node_id, threshold_type, scope, is_active),
+    INDEX idx_nt_scope (scope),
+    INDEX idx_nt_node_type (node_type),
+    INDEX idx_nt_source (source),
+    INDEX idx_nt_version (node_type, node_id, threshold_type, version),
+    INDEX idx_nt_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='节点阈值配置表';
+
+-- ============================================================
+-- 阈值变更审计日志表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_threshold_audit_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    threshold_id BIGINT NOT NULL COMMENT '关联阈值配置ID',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID',
+    scope VARCHAR(20) NOT NULL COMMENT '作用域',
+    threshold_type VARCHAR(50) NOT NULL COMMENT '阈值类型',
+    source VARCHAR(30) NOT NULL COMMENT '来源',
+    action VARCHAR(30) NOT NULL COMMENT '操作类型 create/update/delete/rollback',
+    old_value TEXT COMMENT '变更前值 JSON',
+    new_value TEXT COMMENT '变更后值 JSON',
+    version_before INT COMMENT '变更前版本号',
+    version_after INT COMMENT '变更后版本号',
+    change_summary VARCHAR(500) COMMENT '变更摘要',
+    operator_id VARCHAR(50) COMMENT '操作人ID',
+    operator_name VARCHAR(100) COMMENT '操作人姓名',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_tal_threshold (threshold_id),
+    INDEX idx_tal_scope (scope, node_type, node_id),
+    INDEX idx_tal_action (action),
+    INDEX idx_tal_time (create_time),
+    INDEX idx_tal_operator (operator_id),
+    INDEX idx_tal_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='阈值变更审计日志表';
+
+-- 插入默认全局预紧力阈值
+INSERT INTO sc_node_thresholds (node_type, node_id, scope, source, threshold_type, parameters, version, is_active, description) VALUES
+('bolt', 'global', 'global', 'design', 'preload', '{"min_normal":400,"max_normal":800,"warning_deviation":0.1,"critical_deviation":0.2}', 1, 1, '默认全局螺栓预紧力阈值'),
+('flange', 'global', 'global', 'design', 'preload', '{"min_normal":400,"max_normal":800,"warning_deviation":0.1,"critical_deviation":0.2}', 1, 1, '默认全局法兰面预紧力阈值'),
+('bolt', 'global', 'global', 'design', 'risk', '{"high":3,"medium":7}', 1, 1, '默认全局螺栓风险等级阈值'),
+('flange', 'global', 'global', 'design', 'risk', '{"high":3,"medium":7}', 1, 1, '默认全局法兰面风险等级阈值');
+
+-- 显示阈值模块新增的表
+SHOW TABLES LIKE '%node_threshold%';
+SHOW TABLES LIKE '%threshold_audit%';

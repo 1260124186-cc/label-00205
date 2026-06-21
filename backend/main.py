@@ -35,6 +35,7 @@ from app.api.sso_routes import router as sso_router
 from app.api.timeseries_routes import router as timeseries_router
 from app.api.sync_routes import router as sync_router
 from app.api.model_drift_routes import router as model_drift_router
+from app.api.threshold_routes import router as threshold_router
 from app.schedulers.scheduler import scheduler
 from app.utils.config import config
 from app.utils.database import db_manager
@@ -182,6 +183,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"数据表创建失败（数据库可能未配置）: {e}")
 
+    try:
+        from app.services.prediction.threshold_service import load_cache as load_threshold_cache
+        load_threshold_cache()
+        logger.info("阈值缓存已加载")
+    except Exception as e:
+        logger.warning(f"阈值缓存加载失败: {e}")
+
     # 启动调度器
     scheduler.start()
 
@@ -306,6 +314,7 @@ def create_app() -> FastAPI:
     app.include_router(timeseries_router, prefix="/api/v1")
     app.include_router(sync_router, prefix="/api/v1")
     app.include_router(model_drift_router, prefix="/api/v1")
+    app.include_router(threshold_router, prefix="/api/v1")
 
     from app.api.routes import public_router
     app.include_router(public_router, prefix="/api/v1")

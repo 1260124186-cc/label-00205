@@ -1,0 +1,19 @@
+{
+  "repo_id": "label-00205",
+  "submitted_at": "2026-06-21 19:05",
+  "trae_session_id": ".538128058159683:ea9094c15dab211e9f26b874be113ca4_6a37c045b9d68543d277ae87.6a37c12bb9d68543d277aeef.6a37c12b9bbfa990bad8ccd7:Trae CN.T(2026/6/21 18:47:07)",
+  "user_prompt": "实现依赖注入容器全面替换手工单例。main.py 启动时初始化 Container，注册 PredictionOrchestrator、TrainingService、各 Repository。路由通过 Depends(get_prediction_service) 注入，支持 per-request scoped 会话。生命周期管理：应用关闭时释放模型缓存、关闭连接池。",
+  "repo_url": "https://github.com/1260124186-cc/label-00205",
+  "commit_id": "1b2c62a9cea896f02f4741bc6d51ddbe4cdebf53",
+  "task_type": "代码重构",
+  "business_domain": "AI/ML应用",
+  "change_scope": "跨模块多文件",
+  "task_difficulty": "一般",
+  "task_completed": "未完成任务",
+  "satisfaction": "不满意",
+  "dissatisfaction_reason": "过程不满意：模型对“全面替换手工单例并打通请求级作用域”这条主要求拆解不完整，容器注册、路由注入和 scoped 会话没有按同一条依赖链闭环校验，导致代码看起来接入了 DI，但请求级实例隔离并没有真正成立。产物不满意：main.py 的容器初始化、作用域中间件和关闭释放已经补上，但路由层仍保留手工单例回退，绝大多数接口没有改成 Depends 注入，PredictionService 也没有真正拿到 scoped 的 repository，请求级会话目标还没落地。",
+  "single_choice": "",
+  "qa_status": "",
+  "qa_note": "",
+  "submitted_to_byte": ""
+}

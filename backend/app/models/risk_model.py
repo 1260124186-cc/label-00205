@@ -228,6 +228,31 @@ class BayesianRiskModel:
             cal = _load_node_calibration(node_type, node_id)
             if 'risk_thresholds' in cal:
                 thresholds.update(cal['risk_thresholds'])
+            try:
+                from app.services.prediction.threshold_service import get_effective_threshold
+                effective = get_effective_threshold(node_type, node_id, 'risk')
+                params = effective.get('parameters', {})
+                if params:
+                    thresholds.update(params)
+            except Exception:
+                pass
+        return thresholds
+
+    def get_effective_preload_thresholds(
+        self,
+        node_type: Optional[str] = None,
+        node_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        thresholds = dict(self.thresholds)
+        if node_type and node_id:
+            try:
+                from app.services.prediction.threshold_service import get_effective_threshold
+                effective = get_effective_threshold(node_type, node_id, 'preload')
+                params = effective.get('parameters', {})
+                if params:
+                    thresholds.update(params)
+            except Exception:
+                pass
         return thresholds
 
     def calculate_deviation_score(self, data: np.ndarray) -> float:

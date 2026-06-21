@@ -1,0 +1,20 @@
+{
+  "repo_id": "label-00205",
+  "author": "",
+  "submitted_at": "2026-06-21 20:00",
+  "trae_session_id": ".538128058159683:9db884c14014f35eac66b7fcbd61c1d1_6a37ce04b9d68543d277b61a.6a37ced8b9d68543d277b66e.6a37ced89bbfa990bad8ccda:Trae CN.T(2026/6/21 19:45:28)",
+  "user_prompt": "实现维护窗口与告警静默策略。新增维护窗口表：node_scope（装置/法兰/螺栓）、start_time、end_time、window_type（计划检修/临时作业）、suppress_level（全部静默 / 仅静默非紧急）。窗口内：预测照常执行并写库，但 AlertService 不创建事件/工单，或降级为 INFO 日志。窗口结束自动恢复；支持提前结束与延期。",
+  "repo_url": "https://github.com/1260124186-cc/label-00205",
+  "commit_id": "cb21a169af52164a880da47faf5898a6eb389c5f",
+  "task_type": "Feature迭代",
+  "business_domain": "纯后端服务",
+  "change_scope": "跨模块多文件",
+  "task_difficulty": "一般",
+  "task_completed": "未完成任务",
+  "satisfaction": "不满意",
+  "dissatisfaction_reason": "过程不满意：模型任务拆解漏掉了把未来生效窗口自动接入现有告警链路这一步。当前静默查询只筛 status='active' 的窗口，但生产预测调用 AlertService 时没有任何定时刷新或入链前状态推进，导致预先创建的维护窗口到了开始时间仍可能继续产生日志/事件，维护期主链路没有真正闭环。产物不满意：维护窗口表、CRUD、提前结束和延期接口已经补齐，但未来开始的窗口不会在告警评估时自动激活，而且装置级静默匹配所需的 device_id 也没有从预测链路传入，导致装置级维护窗口无法按需求生效。",
+  "single_choice": "",
+  "qa_status": "",
+  "qa_note": "",
+  "submitted_to_byte": ""
+}

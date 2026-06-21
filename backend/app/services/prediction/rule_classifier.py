@@ -12,57 +12,59 @@ from app.utils.config import config
 
 
 class RuleBasedClassifier:
-    """
-    基于规则的分类器
 
-    当模型文件不存在或未训练时，使用预定义阈值进行状态判断。
-    同时提供法兰面的多螺栓状态聚合能力。
-
-    Attributes:
-        min_normal: 正常预紧力下限
-        max_normal: 正常预紧力上限
-    """
-
-    def __init__(self):
-        """
-        初始化规则分类器，从配置中读取阈值
-        """
+    def __init__(self, node_type: Optional[str] = None, node_id: Optional[str] = None):
         thresholds = config.get('risk_assessment.preload_thresholds', {})
         self.min_normal = thresholds.get('min_normal', 400)
         self.max_normal = thresholds.get('max_normal', 800)
+        self._node_type = node_type
+        self._node_id = node_id
+
+        if node_type and node_id:
+            try:
+                from app.services.prediction.threshold_service import get_effective_threshold
+                effective = get_effective_threshold(node_type, node_id, 'preload')
+                params = effective.get('parameters', {})
+                if 'min_normal' in params:
+                    self.min_normal = params['min_normal']
+                if 'max_normal' in params:
+                    self.max_normal = params['max_normal']
+            except Exception:
+                pass
+
         logger.debug(
-            f"规则分类器初始化: 正常范围 [{self.min_normal}, {self.max_normal}]"
+            f"Rule classifier init: range [{self.min_normal}, {self.max_normal}]"
         )
 
     def predict(
         self,
-        data: np.ndarray
+        data: np.ndarray,
+        node_type: Optional[str] = None,
+        node_id: Optional[str] = None,
     ) -> Tuple[int, float, Optional[np.ndarray]]:
-        """
-        基于规则预测单条螺栓状态
+        min_normal = self.min_normal
+        max_normal = self.max_normal
 
-        判断逻辑（优先级从高到低）：
-        1. 均值超出正常范围 50% → 故障(4)
-        2. 均值超出正常范围 20% → 紧急预警(3)
-        3. 均值超出正常范围 → 检查预警(2)
-        4. 标准差大于均值 20% → 关注预警(1)
-        5. 其他 → 正常(0)
+        if node_type and node_id and (node_type != self._node_type or node_id != self._node_id):
+            try:
+                from app.services.prediction.threshold_service import get_effective_threshold
+                effective = get_effective_threshold(node_type, node_id, 'preload')
+                params = effective.get('parameters', {})
+                if 'min_normal' in params:
+                    min_normal = params['min_normal']
+                if 'max_normal' in params:
+                    max_normal = params['max_normal']
+            except Exception:
+                pass
 
-        Args:
-            data: 预紧力数据数组
-
-        Returns:
-            (状态码, 置信度, 概率分布)
-            概率分布在规则模式下始终为 None
-        """
         mean_val = float(np.mean(data))
         std_val = float(np.std(data))
 
-        if mean_val < self.min_normal * 0.5 or mean_val > self.max_normal * 1.5:
+        if mean_val < min_normal * 0.5 or mean_val > max_normal * 1.5:
             return 4, 0.8, None
-        elif mean_val < self.min_normal * 0.8 or mean_val > self.max_normal * 1.2:
+        elif mean_val < min_normal * 0.8 or mean_val > max_normal * 1.2:
             return 3, 0.7, None
-        elif mean_val < self.min_normal or mean_val > self.max_normal:
+        elif mean_val < min_normal or mean_val > max_normal:
             return 2, 0.7, None
         elif std_val > mean_val * 0.2:
             return 1, 0.6, None

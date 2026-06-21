@@ -103,6 +103,17 @@ class WarningStrategyPolicy:
         lstm_confidence: Optional[float] = None,
         epistemic_uncertainty: Optional[float] = None,
     ) -> Tuple[int, str]:
+        effective_threshold = None
+        if node_type and node_id:
+            try:
+                from app.services.prediction.threshold_service import get_effective_threshold
+                t = get_effective_threshold(node_type, node_id, 'preload')
+                params = t.get('parameters', {})
+                if 'confidence_threshold' in params:
+                    effective_threshold = params['confidence_threshold']
+            except Exception:
+                pass
+
         if node_type and node_id and (
             node_type != self._node_type or node_id != self._node_id
         ):
@@ -116,6 +127,9 @@ class WarningStrategyPolicy:
             except Exception:
                 st = self.strategy_type
                 ct = self.strategy_1_threshold
+
+            if effective_threshold is not None:
+                ct = effective_threshold
 
             if st == self.STRATEGY_REPORT_ALL:
                 return self._apply_with_threshold(

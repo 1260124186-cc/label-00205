@@ -1,0 +1,20 @@
+{
+  "repo_id": "label-00205",
+  "author": "",
+  "submitted_at": "2026-06-21 19:43",
+  "trae_session_id": ".538128058159683:77a8a0aa2379ecd027980cb628f6aedf_6a37c7a3b9d68543d277b32d.6a37c7b4b9d68543d277b32f.6a37c7b49bbfa990bad8ccd9:Trae CN.T(2026/6/21 19:15:01)",
+  "user_prompt": "实现卡尔曼滤波高级模式接入预处理流水线。配置项 preprocessing.kalman.mode: simple | adaptive | extended。自适应模式根据新息（innovation）序列动态调整 measurement_noise。预处理结果附带 kalman_diagnostics：增益序列、新息、估计误差协方差，供可解释性报告引用。高噪声传感器可 per-sensor 覆盖滤波参数。流式场景下支持增量卡尔曼（与 SlidingWindowManager 配合）。",
+  "repo_url": "https://github.com/1260124186-cc/label-00205",
+  "commit_id": "ebfd7b502da0741b8e85a2df467dc803398ab215",
+  "task_type": "Feature迭代",
+  "business_domain": "纯后端服务",
+  "change_scope": "跨模块多文件",
+  "task_difficulty": "一般",
+  "task_completed": "未完成任务",
+  "satisfaction": "不满意",
+  "dissatisfaction_reason": "过程不满意：模型任务拆解漏掉了把增量卡尔曼状态接入现有 SlidingWindowManager 持久化链路这一步。当前只新增了独立 StreamingKalmanManager 和状态序列化接口，但窗口数据结构与流式引擎没有保存或恢复该状态，导致流式场景还不能沿现有窗口机制稳定续算。。产物不满意：高级卡尔曼模式、诊断输出和 per-sensor 覆盖已经接入预处理，但与 SlidingWindowManager 的状态持久化/恢复链路没有真正打通，流式增量场景仍停留在独立 manager 层。",
+  "single_choice": "",
+  "qa_status": "",
+  "qa_note": "",
+  "submitted_to_byte": ""
+}
