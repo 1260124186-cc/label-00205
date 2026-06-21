@@ -3897,3 +3897,171 @@ class ModelDriftEvent(Base):
     def updated_at(self):
         """update_time 的别名"""
         return self.update_time
+
+
+class ShadowComparison(Base):
+    """
+    影子模式预测对比记录表模型
+
+    对应数据库表: sc_shadow_comparison
+    记录主版本与影子版本的预测结果对比，用于A/B测试与版本晋升评估。
+    """
+    __tablename__ = 'sc_shadow_comparison'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
+    model_type = Column(String(20), nullable=False, comment='模型类型: bolt/flange')
+    node_id = Column(String(100), nullable=False, comment='节点ID（螺栓ID或法兰ID）')
+    node_type = Column(String(20), comment='节点类型: bolt/flange')
+    main_version = Column(String(20), nullable=False, comment='主版本号')
+    shadow_version = Column(String(20), nullable=False, comment='影子版本号')
+
+    main_status_code = Column(Integer, nullable=False, comment='主版本状态码 0-4')
+    main_status = Column(String(50), comment='主版本状态文本')
+    main_confidence = Column(Float, comment='主版本置信度 0-1')
+
+    shadow_status_code = Column(Integer, nullable=False, comment='影子版本状态码 0-4')
+    shadow_status = Column(String(50), comment='影子版本状态文本')
+    shadow_confidence = Column(Float, comment='影子版本置信度 0-1')
+
+    is_agreement = Column(Boolean, default=False, comment='是否预测一致（状态码相同）')
+    is_shadow_more_sensitive = Column(Boolean, default=False, comment='影子版本是否更敏感')
+    is_shadow_more_conservative = Column(Boolean, default=False, comment='影子版本是否更保守')
+
+    main_latency_ms = Column(Integer, comment='主版本预测耗时(毫秒)')
+    shadow_latency_ms = Column(Integer, comment='影子版本预测耗时(毫秒)')
+
+    prediction_time = Column(DateTime, comment='预测时间')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_tenant_version_shadow', 'tenant_id', 'model_type', 'main_version', 'shadow_version'),
+        Index('idx_node_shadow', 'node_type', 'node_id'),
+        Index('idx_prediction_time_shadow', 'prediction_time'),
+        Index('idx_agreement_shadow', 'is_agreement'),
+        Index('idx_sensitive_shadow', 'is_shadow_more_sensitive'),
+        Index('idx_conservative_shadow', 'is_shadow_more_conservative'),
+        Index('idx_create_time_shadow', 'create_time'),
+        Index('idx_tenant_model_shadow', 'tenant_id', 'model_type'),
+    )
+
+    def to_dict(self) -> Dict:
+        return {
+            'id': self.id,
+            'tenant_id': self.tenant_id,
+            'model_type': self.model_type,
+            'node_id': self.node_id,
+            'node_type': self.node_type,
+            'main_version': self.main_version,
+            'shadow_version': self.shadow_version,
+            'main_status_code': self.main_status_code,
+            'main_status': self.main_status,
+            'main_confidence': self.main_confidence,
+            'shadow_status_code': self.shadow_status_code,
+            'shadow_status': self.shadow_status,
+            'shadow_confidence': self.shadow_confidence,
+            'is_agreement': self.is_agreement,
+            'is_shadow_more_sensitive': self.is_shadow_more_sensitive,
+            'is_shadow_more_conservative': self.is_shadow_more_conservative,
+            'main_latency_ms': self.main_latency_ms,
+            'shadow_latency_ms': self.shadow_latency_ms,
+            'prediction_time': self.prediction_time,
+            'create_time': self.create_time,
+        }
+
+
+class ModelPromotionSuggestion(Base):
+    """
+    模型版本晋升建议工单表模型
+
+    对应数据库表: sc_model_promotion_suggestions
+    当影子版本满足晋升条件时自动生成的晋升建议工单。
+    """
+    __tablename__ = 'sc_model_promotion_suggestions'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(BigInteger, comment='租户ID')
+    model_type = Column(String(20), nullable=False, comment='模型类型: bolt/flange')
+    model_id = Column(String(100), nullable=False, comment='模型标识（节点ID）')
+    main_version = Column(String(20), nullable=False, comment='当前主版本号')
+    shadow_version = Column(String(20), nullable=False, comment='待晋升影子版本号')
+
+    suggestion_no = Column(String(64), unique=True, nullable=False, comment='建议工单编号')
+    status = Column(String(20), default='pending', comment='状态: pending/approved/rejected/executed')
+
+    agreement_rate = Column(Float, comment='预测一致率 0-1')
+    shadow_more_sensitive_rate = Column(Float, comment='影子版本更敏感率 0-1')
+    shadow_more_conservative_rate = Column(Float, comment='影子版本更保守率 0-1')
+
+    main_false_negative_rate = Column(Float, comment='主版本漏报率')
+    shadow_false_negative_rate = Column(Float, comment='影子版本漏报率')
+    false_negative_improvement_rate = Column(Float, comment='漏报率下降比例')
+
+    shadow_run_days = Column(Integer, comment='影子运行天数')
+    total_comparisons = Column(Integer, comment='总对比样本数')
+
+    per_status_stats = Column(Text, comment='按状态分桶统计结果 JSON')
+    latency_stats = Column(Text, comment='延迟对比统计 JSON')
+
+    work_order_id = Column(BigInteger, comment='关联的系统工单ID')
+
+    approver_id = Column(String(50), comment='审批人ID')
+    approver_name = Column(String(100), comment='审批人姓名')
+    approve_time = Column(DateTime, comment='审批时间')
+    approve_note = Column(Text, comment='审批备注')
+
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_tenant_model_promo', 'tenant_id', 'model_type', 'model_id'),
+        Index('idx_versions_promo', 'main_version', 'shadow_version'),
+        Index('idx_status_promo', 'status'),
+        Index('idx_create_time_promo', 'create_time'),
+        Index('idx_tenant_status_promo', 'tenant_id', 'status'),
+    )
+
+    @property
+    def per_status_stats_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.per_status_stats) if self.per_status_stats else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    @property
+    def latency_stats_dict(self) -> Dict:
+        import json as _json
+        try:
+            return _json.loads(self.latency_stats) if self.latency_stats else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+
+    def to_dict(self) -> Dict:
+        return {
+            'id': self.id,
+            'tenant_id': self.tenant_id,
+            'model_type': self.model_type,
+            'model_id': self.model_id,
+            'main_version': self.main_version,
+            'shadow_version': self.shadow_version,
+            'suggestion_no': self.suggestion_no,
+            'status': self.status,
+            'agreement_rate': self.agreement_rate,
+            'shadow_more_sensitive_rate': self.shadow_more_sensitive_rate,
+            'shadow_more_conservative_rate': self.shadow_more_conservative_rate,
+            'main_false_negative_rate': self.main_false_negative_rate,
+            'shadow_false_negative_rate': self.shadow_false_negative_rate,
+            'false_negative_improvement_rate': self.false_negative_improvement_rate,
+            'shadow_run_days': self.shadow_run_days,
+            'total_comparisons': self.total_comparisons,
+            'per_status_stats': self.per_status_stats_dict,
+            'latency_stats': self.latency_stats_dict,
+            'work_order_id': self.work_order_id,
+            'approver_id': self.approver_id,
+            'approver_name': self.approver_name,
+            'approve_time': self.approve_time,
+            'approve_note': self.approve_note,
+            'create_time': self.create_time,
+            'update_time': self.update_time,
+        }

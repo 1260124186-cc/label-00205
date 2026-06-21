@@ -406,6 +406,7 @@ class PredictionOrchestrator:
         logger.info(f"开始螺栓预测: {bolt_id}, 数据点数: {len(data)}, version={version or 'active'}, shadow_version={shadow_version}, generate_diagnosis={generate_diagnosis}")
 
         # 主版本预测
+        main_start = time.time()
         main_result = self._run_bolt_prediction(
             bolt_id=bolt_id,
             data=data,
@@ -415,10 +416,12 @@ class PredictionOrchestrator:
             is_shadow=False,
             generate_diagnosis=generate_diagnosis,
         )
+        main_latency_ms = int((time.time() - main_start) * 1000)
 
         # Shadow Mode：副版本仅预测，不写库，不触发告警
         if shadow_version and shadow_version != version:
             try:
+                shadow_start = time.time()
                 shadow_result = self._run_bolt_prediction(
                     bolt_id=bolt_id,
                     data=data,
@@ -428,8 +431,20 @@ class PredictionOrchestrator:
                     is_shadow=True,
                     generate_diagnosis=False,
                 )
+                shadow_latency_ms = int((time.time() - shadow_start) * 1000)
                 main_result['shadow_result'] = shadow_result
                 main_result['shadow_version'] = shadow_version
+
+                self._record_shadow_comparison(
+                    model_type='bolt',
+                    node_id=str(bolt_id),
+                    main_version=main_result.get('model_version', version or 'unknown'),
+                    shadow_version=shadow_version,
+                    main_result=main_result,
+                    shadow_result=shadow_result,
+                    main_latency_ms=main_latency_ms,
+                    shadow_latency_ms=shadow_latency_ms,
+                )
 
                 logger.info(
                     f"Shadow模式预测完成: 螺栓 {bolt_id}, "
@@ -1889,6 +1904,7 @@ class PredictionOrchestrator:
         )
 
         # 主版本预测
+        main_start = time.time()
         main_result = self._run_flange_prediction(
             flange_id=flange_id,
             multi_bolt_data=multi_bolt_data,
@@ -1901,10 +1917,12 @@ class PredictionOrchestrator:
             is_shadow=False,
             generate_diagnosis=generate_diagnosis,
         )
+        main_latency_ms = int((time.time() - main_start) * 1000)
 
         # Shadow Mode：副版本仅预测，不写库，不触发告警
         if shadow_version and shadow_version != version:
             try:
+                shadow_start = time.time()
                 shadow_result = self._run_flange_prediction(
                     flange_id=flange_id,
                     multi_bolt_data=multi_bolt_data,
@@ -1917,8 +1935,20 @@ class PredictionOrchestrator:
                     is_shadow=True,
                     generate_diagnosis=False,
                 )
+                shadow_latency_ms = int((time.time() - shadow_start) * 1000)
                 main_result['shadow_result'] = shadow_result
                 main_result['shadow_version'] = shadow_version
+
+                self._record_shadow_comparison(
+                    model_type='flange',
+                    node_id=str(flange_id),
+                    main_version=main_result.get('model_version', version or 'unknown'),
+                    shadow_version=shadow_version,
+                    main_result=main_result,
+                    shadow_result=shadow_result,
+                    main_latency_ms=main_latency_ms,
+                    shadow_latency_ms=shadow_latency_ms,
+                )
 
                 logger.info(
                     f"Shadow模式预测完成: 法兰面 {flange_id}, "
@@ -3274,3 +3304,45 @@ class PredictionOrchestrator:
                 )
         except Exception as e:
             logger.error(f"告警评估失败 node={node_type}/{node_id}: {e}")
+
+    # ---------- Shadow 模式对比记录 ----------
+
+    def _record_shadow_comparison(
+        self,
+        model_type: str,
+        node_id: str,
+        main_version: str,
+        shadow_version: str,
+        main_result: Dict[str, Any],
+        shadow_result: Dict[str, Any],
+        main_latency_ms: int,
+        shadow_latency_ms: int,
+    ) -> None:
+        """
+        记录 Shadow 模式主版本与影子版本的预测对比
+
+        异步调用 ShadowComparisonService 记录数据，失败不影响主流程。
+        """
+        try:
+            from app.services.shadow_comparison_service import get_shadow_comparison_service
+
+            service = get_shadow_comparison_service()
+            from datetime import datetime
+
+            service.record_comparison(
+                model_type=model_type,
+                node_id=node_id,
+                main_version=main_version,
+                shadow_version=shadow_version,
+                main_status_code=int(main_result.get('status_code', 0)),
+                main_status=main_result.get('status', ''),
+                main_confidence=float(main_result.get('confidence', 0.0)),
+                shadow_status_code=int(shadow_result.get('status_code', 0)),
+                shadow_status=shadow_result.get('status', ''),
+                shadow_confidence=float(shadow_result.get('confidence', 0.0)),
+                main_latency_ms=main_latency_ms,
+                shadow_latency_ms=shadow_latency_ms,
+                prediction_time=datetime.now(),
+            )
+        except Exception as e:
+            logger.warning(f"记录Shadow对比数据失败（不影响主流程）: {e}")

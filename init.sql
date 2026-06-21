@@ -2816,3 +2816,95 @@ INSERT INTO sc_model_drift_config (
 
 -- 显示漂移检测模块表
 SHOW TABLES LIKE 'sc_model_drift%';
+
+-- ============================================================
+-- 影子模式对比记录表
+-- 记录主版本与影子版本的预测结果对比，用于A/B测试与版本晋升评估
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_shadow_comparison (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT COMMENT '租户ID',
+    model_type VARCHAR(20) NOT NULL COMMENT '模型类型: bolt/flange',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID（螺栓ID或法兰ID）',
+    node_type VARCHAR(20) COMMENT '节点类型: bolt/flange（冗余字段便于查询）',
+    main_version VARCHAR(20) NOT NULL COMMENT '主版本号',
+    shadow_version VARCHAR(20) NOT NULL COMMENT '影子版本号',
+
+    main_status_code INT NOT NULL COMMENT '主版本状态码 0-4',
+    main_status VARCHAR(50) COMMENT '主版本状态文本',
+    main_confidence FLOAT COMMENT '主版本置信度 0-1',
+
+    shadow_status_code INT NOT NULL COMMENT '影子版本状态码 0-4',
+    shadow_status VARCHAR(50) COMMENT '影子版本状态文本',
+    shadow_confidence FLOAT COMMENT '影子版本置信度 0-1',
+
+    is_agreement TINYINT(1) DEFAULT 0 COMMENT '是否预测一致（状态码相同）',
+    is_shadow_more_sensitive TINYINT(1) DEFAULT 0 COMMENT '影子版本是否更敏感（影子检测到异常而主版本没有）',
+    is_shadow_more_conservative TINYINT(1) DEFAULT 0 COMMENT '影子版本是否更保守（主版本检测到异常而影子版本没有）',
+
+    main_latency_ms INT COMMENT '主版本预测耗时(毫秒)',
+    shadow_latency_ms INT COMMENT '影子版本预测耗时(毫秒)',
+
+    prediction_time DATETIME COMMENT '预测时间',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+
+    INDEX idx_tenant_version (tenant_id, model_type, main_version, shadow_version),
+    INDEX idx_node (node_type, node_id),
+    INDEX idx_prediction_time (prediction_time),
+    INDEX idx_agreement (is_agreement),
+    INDEX idx_sensitive (is_shadow_more_sensitive),
+    INDEX idx_conservative (is_shadow_more_conservative),
+    INDEX idx_create_time (create_time),
+    INDEX idx_tenant_model (tenant_id, model_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='影子模式预测对比记录表';
+
+-- ============================================================
+-- 模型版本晋升建议工单表
+-- 当影子版本满足晋升条件时自动生成的晋升建议工单
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sc_model_promotion_suggestions (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    tenant_id BIGINT COMMENT '租户ID',
+    model_type VARCHAR(20) NOT NULL COMMENT '模型类型: bolt/flange',
+    model_id VARCHAR(100) NOT NULL COMMENT '模型标识（节点ID）',
+    main_version VARCHAR(20) NOT NULL COMMENT '当前主版本号',
+    shadow_version VARCHAR(20) NOT NULL COMMENT '待晋升影子版本号',
+
+    suggestion_no VARCHAR(64) UNIQUE NOT NULL COMMENT '建议工单编号',
+    status VARCHAR(20) DEFAULT 'pending' COMMENT '状态: pending待审批/approved已批准/rejected已拒绝/executed已执行',
+
+    agreement_rate FLOAT COMMENT '预测一致率 0-1',
+    shadow_more_sensitive_rate FLOAT COMMENT '影子版本更敏感率 0-1',
+    shadow_more_conservative_rate FLOAT COMMENT '影子版本更保守率 0-1',
+
+    main_false_negative_rate FLOAT COMMENT '主版本漏报率（主版本0而影子>0的比例）',
+    shadow_false_negative_rate FLOAT COMMENT '影子版本漏报率（影子0而主版本>0的比例，用于反向验证）',
+    false_negative_improvement_rate FLOAT COMMENT '漏报率下降比例 (main_fn - shadow_fn) / main_fn',
+
+    shadow_run_days INT COMMENT '影子运行天数',
+    total_comparisons INT COMMENT '总对比样本数',
+
+    per_status_stats TEXT COMMENT '按状态分桶统计结果 JSON',
+    latency_stats TEXT COMMENT '延迟对比统计 JSON',
+
+    work_order_id BIGINT COMMENT '关联的系统工单ID（sc_work_orders）',
+
+    approver_id VARCHAR(50) COMMENT '审批人ID',
+    approver_name VARCHAR(100) COMMENT '审批人姓名',
+    approve_time DATETIME COMMENT '审批时间',
+    approve_note TEXT COMMENT '审批备注',
+
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE KEY uk_suggestion_no (suggestion_no),
+    INDEX idx_tenant_model (tenant_id, model_type, model_id),
+    INDEX idx_versions (main_version, shadow_version),
+    INDEX idx_status (status),
+    INDEX idx_create_time (create_time),
+    INDEX idx_tenant_status (tenant_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='模型版本晋升建议工单表';
+
+-- 显示影子模式模块表
+SHOW TABLES LIKE 'sc_shadow%';
+SHOW TABLES LIKE 'sc_model_promotion%';

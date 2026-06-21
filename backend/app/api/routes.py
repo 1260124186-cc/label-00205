@@ -263,6 +263,12 @@ from app.api.schemas import (
     FeatureVersionCompatibilityCheckResponse,
     TrainingFeatureLoadRequest,
     TrainingFeatureLoadResponse,
+    ShadowComparisonRecordSchema, ShadowComparisonListResponse,
+    ShadowStatsResponse,
+    PromotionEvaluationResponse,
+    ModelPromotionSuggestionSchema, PromotionSuggestionListResponse,
+    CreatePromotionSuggestionResponse,
+    ApprovePromotionRequest, ApprovePromotionResponse,
 )
 from app.services.prediction_service import PredictionService
 from app.services.training_service import TrainingService
@@ -15263,4 +15269,253 @@ async def load_training_features(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"加载训练特征失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# Shadow 模式对比分析与版本晋升
+# ============================================================
+
+@router.get(
+    "/shadow/comparison/stats",
+    tags=["Shadow模式对比"],
+    summary="查询影子模式对比统计指标",
+    response_model=ShadowStatsResponse,
+)
+async def get_shadow_comparison_stats(
+    model_type: str = Query(..., description="模型类型: bolt/flange", regex="^(bolt|flange)$"),
+    main_version: str = Query(..., description="主版本号"),
+    shadow_version: str = Query(..., description="影子版本号"),
+    node_id: Optional[str] = Query(None, description="节点ID（可选，不传则统计该版本所有节点）"),
+    start_time: Optional[datetime] = Query(None, description="统计起始时间"),
+    end_time: Optional[datetime] = Query(None, description="统计结束时间"),
+):
+    """
+    查询影子模式对比统计指标，包括：
+    - 一致率、影子更敏感率、影子更保守率
+    - 主/副版本漏报率及下降比例
+    - 按状态分桶对比统计
+    - 运行天数、延迟对比等
+    """
+    try:
+        from app.services.shadow_comparison_service import get_shadow_comparison_service
+        service = get_shadow_comparison_service()
+        stats = service.get_stats(
+            model_type=model_type,
+            main_version=main_version,
+            shadow_version=shadow_version,
+            node_id=node_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        return ShadowStatsResponse(**stats)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询影子对比统计失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/shadow/comparison/list",
+    tags=["Shadow模式对比"],
+    summary="查询影子对比记录列表",
+    response_model=ShadowComparisonListResponse,
+)
+async def list_shadow_comparisons(
+    model_type: Optional[str] = Query(None, description="模型类型: bolt/flange"),
+    node_id: Optional[str] = Query(None, description="节点ID"),
+    main_version: Optional[str] = Query(None, description="主版本号"),
+    shadow_version: Optional[str] = Query(None, description="影子版本号"),
+    start_time: Optional[datetime] = Query(None, description="起始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    only_disagreement: bool = Query(False, description="仅查看预测不一致的记录"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """
+    分页查询影子模式的预测对比记录，支持按多种条件筛选。
+    """
+    try:
+        from app.services.shadow_comparison_service import get_shadow_comparison_service
+        service = get_shadow_comparison_service()
+        result = service.list_comparisons(
+            model_type=model_type,
+            node_id=node_id,
+            main_version=main_version,
+            shadow_version=shadow_version,
+            start_time=start_time,
+            end_time=end_time,
+            only_disagreement=only_disagreement,
+            limit=limit,
+            offset=offset,
+        )
+        return ShadowComparisonListResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询影子对比列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/shadow/promotion/evaluate",
+    tags=["Shadow模式对比"],
+    summary="评估影子版本是否满足晋升条件",
+    response_model=PromotionEvaluationResponse,
+)
+async def evaluate_shadow_promotion(
+    model_type: str = Query(..., description="模型类型: bolt/flange", regex="^(bolt|flange)$"),
+    model_id: str = Query(..., description="模型ID（节点ID）"),
+    main_version: str = Query(..., description="当前主版本号"),
+    shadow_version: str = Query(..., description="待评估的影子版本号"),
+):
+    """
+    评估影子版本是否满足自动晋升条件：
+    1. 影子运行 >= 7 天
+    2. 一致率 > 95%
+    3. 漏报率下降 > 10%
+    4. 样本量 >= 100
+
+    返回详细的评估结果与各维度检查状态。
+    """
+    try:
+        from app.services.shadow_comparison_service import get_shadow_comparison_service
+        service = get_shadow_comparison_service()
+        result = service.evaluate_promotion(
+            model_type=model_type,
+            model_id=model_id,
+            main_version=main_version,
+            shadow_version=shadow_version,
+        )
+        return PromotionEvaluationResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"评估版本晋升失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/shadow/promotion/create",
+    tags=["Shadow模式对比"],
+    summary="创建版本晋升建议工单",
+    response_model=CreatePromotionSuggestionResponse,
+)
+async def create_shadow_promotion_suggestion(
+    model_type: str = Query(..., description="模型类型: bolt/flange", regex="^(bolt|flange)$"),
+    model_id: str = Query(..., description="模型ID（节点ID）"),
+    main_version: str = Query(..., description="当前主版本号"),
+    shadow_version: str = Query(..., description="待晋升的影子版本号"),
+):
+    """
+    先评估是否满足晋升条件，满足则创建晋升建议工单并联动生成系统工单。
+    """
+    try:
+        from app.services.shadow_comparison_service import get_shadow_comparison_service
+        service = get_shadow_comparison_service()
+        result = service.create_promotion_suggestion(
+            model_type=model_type,
+            model_id=model_id,
+            main_version=main_version,
+            shadow_version=shadow_version,
+        )
+        return CreatePromotionSuggestionResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建晋升建议失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/shadow/promotion/suggestions",
+    tags=["Shadow模式对比"],
+    summary="查询版本晋升建议工单列表",
+    response_model=PromotionSuggestionListResponse,
+)
+async def list_shadow_promotion_suggestions(
+    status: Optional[str] = Query(None, description="状态: pending/approved/rejected/executed"),
+    model_type: Optional[str] = Query(None, description="模型类型: bolt/flange"),
+    model_id: Optional[str] = Query(None, description="模型ID"),
+    limit: int = Query(50, ge=1, le=200, description="返回数量"),
+    offset: int = Query(0, ge=0, description="偏移量"),
+):
+    """
+    查询模型版本晋升建议工单列表。
+    """
+    try:
+        from app.services.shadow_comparison_service import get_shadow_comparison_service
+        service = get_shadow_comparison_service()
+        result = service.list_promotion_suggestions(
+            status=status,
+            model_type=model_type,
+            model_id=model_id,
+            limit=limit,
+            offset=offset,
+        )
+        return PromotionSuggestionListResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"查询晋升建议列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/shadow/promotion/approve",
+    tags=["Shadow模式对比"],
+    summary="审批通过晋升建议（自动切换版本）",
+    response_model=ApprovePromotionResponse,
+)
+async def approve_shadow_promotion(
+    request: ApprovePromotionRequest,
+):
+    """
+    审批通过版本晋升建议，系统自动切换活动版本为影子版本。
+    同时将建议工单状态更新为 executed。
+    """
+    try:
+        from app.services.shadow_comparison_service import get_shadow_comparison_service
+        service = get_shadow_comparison_service()
+        result = service.approve_promotion(
+            suggestion_id=request.suggestion_id,
+            approver_id=request.approver_id,
+            approver_name=request.approver_name,
+            approve_note=request.approve_note,
+        )
+        return ApprovePromotionResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"审批晋升失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/shadow/promotion/reject",
+    tags=["Shadow模式对比"],
+    summary="驳回晋升建议",
+    response_model=ApprovePromotionResponse,
+)
+async def reject_shadow_promotion(
+    request: ApprovePromotionRequest,
+):
+    """
+    驳回版本晋升建议，状态更新为 rejected。
+    """
+    try:
+        from app.services.shadow_comparison_service import get_shadow_comparison_service
+        service = get_shadow_comparison_service()
+        result = service.reject_promotion(
+            suggestion_id=request.suggestion_id,
+            approver_id=request.approver_id,
+            approver_name=request.approver_name,
+            approve_note=request.approve_note,
+        )
+        return ApprovePromotionResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"驳回晋升失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

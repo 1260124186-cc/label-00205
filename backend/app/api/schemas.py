@@ -6607,5 +6607,165 @@ class TrainingFeatureLoadResponse(BaseModel):
     feature_dim: int = Field(..., description="特征维度")
     feature_version: str = Field(..., description="使用的特征版本")
     node_count: int = Field(..., description="涉及的节点数量")
-    snapshot_ids: List[int] = Field(default_factory=list, description="加载的快照ID列表")
-    message: Optional[str] = Field(None, description="说明信息")
+
+
+# ==================== Shadow 模式对比分析 ====================
+
+class ShadowComparisonRecordSchema(BaseModel):
+    """影子对比记录"""
+    id: int = Field(..., description="记录ID")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+    model_type: str = Field(..., description="模型类型 bolt/flange")
+    node_id: str = Field(..., description="节点ID")
+    node_type: Optional[str] = Field(None, description="节点类型")
+    main_version: str = Field(..., description="主版本号")
+    shadow_version: str = Field(..., description="影子版本号")
+    main_status_code: int = Field(..., description="主版本状态码")
+    main_status: Optional[str] = Field(None, description="主版本状态文本")
+    main_confidence: Optional[float] = Field(None, description="主版本置信度")
+    shadow_status_code: int = Field(..., description="影子版本状态码")
+    shadow_status: Optional[str] = Field(None, description="影子版本状态文本")
+    shadow_confidence: Optional[float] = Field(None, description="影子版本置信度")
+    is_agreement: bool = Field(False, description="是否预测一致")
+    is_shadow_more_sensitive: bool = Field(False, description="影子是否更敏感")
+    is_shadow_more_conservative: bool = Field(False, description="影子是否更保守")
+    main_latency_ms: Optional[int] = Field(None, description="主版本耗时(ms)")
+    shadow_latency_ms: Optional[int] = Field(None, description="影子版本耗时(ms)")
+    prediction_time: Optional[datetime] = Field(None, description="预测时间")
+    create_time: Optional[datetime] = Field(None, description="创建时间")
+
+
+class ShadowComparisonListResponse(BaseModel):
+    """影子对比记录列表响应"""
+    total: int = Field(..., description="总记录数")
+    items: List[ShadowComparisonRecordSchema] = Field(default_factory=list, description="记录列表")
+
+
+class ShadowStatsPerStatusBucket(BaseModel):
+    """按状态分桶统计"""
+    label: str = Field(..., description="状态标签")
+    count: int = Field(..., description="该状态样本数")
+    ratio_in_total: float = Field(..., description="占总样本比例")
+    agreement_count: int = Field(..., description="该状态下预测一致的数量")
+    agreement_rate_in_bucket: float = Field(..., description="该状态下的一致率")
+    shadow_distribution: Dict[str, Any] = Field(default_factory=dict, description="影子版本在该桶中的分布")
+
+
+class ShadowLatencyStats(BaseModel):
+    """延迟统计"""
+    count: Optional[int] = Field(None, description="样本数")
+    avg_ms: Optional[float] = Field(None, description="平均延迟(ms)")
+    min_ms: Optional[int] = Field(None, description="最小延迟(ms)")
+    max_ms: Optional[int] = Field(None, description="最大延迟(ms)")
+    p50_ms: Optional[int] = Field(None, description="P50延迟(ms)")
+    p95_ms: Optional[int] = Field(None, description="P95延迟(ms)")
+    p99_ms: Optional[int] = Field(None, description="P99延迟(ms)")
+
+
+class ShadowStatsResponse(BaseModel):
+    """影子模式统计指标响应"""
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+    model_type: str = Field(..., description="模型类型")
+    node_id: Optional[str] = Field(None, description="节点ID")
+    main_version: str = Field(..., description="主版本号")
+    shadow_version: str = Field(..., description="影子版本号")
+    total_comparisons: int = Field(..., description="总对比样本数")
+    shadow_run_days: int = Field(..., description="影子运行天数")
+    first_prediction_time: Optional[datetime] = Field(None, description="首次预测时间")
+    last_prediction_time: Optional[datetime] = Field(None, description="最近预测时间")
+    agreement_count: int = Field(..., description="预测一致数量")
+    agreement_rate: float = Field(..., description="预测一致率")
+    shadow_more_sensitive_count: int = Field(..., description="影子更敏感数量")
+    shadow_more_sensitive_rate: float = Field(..., description="影子更敏感率")
+    shadow_more_conservative_count: int = Field(..., description="影子更保守数量")
+    shadow_more_conservative_rate: float = Field(..., description="影子更保守率")
+    main_abnormal_count: int = Field(..., description="主版本异常检测数")
+    shadow_abnormal_count: int = Field(..., description="影子版本异常检测数")
+    main_false_negative_count: int = Field(..., description="主版本漏报数")
+    main_false_negative_rate: float = Field(..., description="主版本漏报率")
+    shadow_false_negative_count: int = Field(..., description="影子版本漏报数")
+    shadow_false_negative_rate: float = Field(..., description="影子版本漏报率")
+    false_negative_improvement_rate: float = Field(..., description="漏报率下降比例")
+    per_status_stats: Dict[str, ShadowStatsPerStatusBucket] = Field(default_factory=dict, description="按状态分桶统计")
+    latency_stats: Dict[str, Any] = Field(default_factory=dict, description="延迟对比统计")
+
+
+class PromotionCheckItemSchema(BaseModel):
+    """晋升条件检查项"""
+    label: str = Field(..., description="检查项名称")
+    required: str = Field(..., description="要求")
+    actual: Any = Field(..., description="实际值")
+    actual_value: Optional[Any] = Field(None, description="实际数值（用于计算）")
+    detail: Optional[str] = Field(None, description="详细说明")
+    passed: bool = Field(..., description="是否通过")
+
+
+class PromotionEvaluationResponse(BaseModel):
+    """晋升评估响应"""
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+    model_type: str = Field(..., description="模型类型")
+    model_id: str = Field(..., description="模型ID（节点ID）")
+    main_version: str = Field(..., description="主版本号")
+    shadow_version: str = Field(..., description="影子版本号")
+    promotable: bool = Field(..., description="是否满足晋升条件")
+    checks: Dict[str, PromotionCheckItemSchema] = Field(default_factory=dict, description="各检查项结果")
+    missing_reasons: List[str] = Field(default_factory=list, description="未满足条件的原因列表")
+    stats: ShadowStatsResponse = Field(..., description="详细统计指标")
+
+
+class ModelPromotionSuggestionSchema(BaseModel):
+    """模型晋升建议工单"""
+    id: int = Field(..., description="建议ID")
+    tenant_id: Optional[int] = Field(None, description="租户ID")
+    model_type: str = Field(..., description="模型类型")
+    model_id: str = Field(..., description="模型ID")
+    main_version: str = Field(..., description="主版本号")
+    shadow_version: str = Field(..., description="影子版本号")
+    suggestion_no: str = Field(..., description="建议工单编号")
+    status: str = Field(..., description="状态 pending/approved/rejected/executed")
+    agreement_rate: Optional[float] = Field(None, description="一致率")
+    shadow_more_sensitive_rate: Optional[float] = Field(None, description="影子更敏感率")
+    shadow_more_conservative_rate: Optional[float] = Field(None, description="影子更保守率")
+    main_false_negative_rate: Optional[float] = Field(None, description="主版本漏报率")
+    shadow_false_negative_rate: Optional[float] = Field(None, description="影子版本漏报率")
+    false_negative_improvement_rate: Optional[float] = Field(None, description="漏报率下降比例")
+    shadow_run_days: Optional[int] = Field(None, description="影子运行天数")
+    total_comparisons: Optional[int] = Field(None, description="总对比样本数")
+    per_status_stats: Optional[Dict[str, Any]] = Field(None, description="按状态分桶统计")
+    latency_stats: Optional[Dict[str, Any]] = Field(None, description="延迟统计")
+    work_order_id: Optional[int] = Field(None, description="关联系统工单ID")
+    approver_id: Optional[str] = Field(None, description="审批人ID")
+    approver_name: Optional[str] = Field(None, description="审批人姓名")
+    approve_time: Optional[datetime] = Field(None, description="审批时间")
+    approve_note: Optional[str] = Field(None, description="审批备注")
+    create_time: Optional[datetime] = Field(None, description="创建时间")
+    update_time: Optional[datetime] = Field(None, description="更新时间")
+
+
+class PromotionSuggestionListResponse(BaseModel):
+    """晋升建议列表响应"""
+    total: int = Field(..., description="总记录数")
+    items: List[ModelPromotionSuggestionSchema] = Field(default_factory=list, description="建议列表")
+
+
+class CreatePromotionSuggestionResponse(BaseModel):
+    """创建晋升建议响应"""
+    success: bool = Field(..., description="是否成功")
+    reason: Optional[str] = Field(None, description="失败原因")
+    suggestion: Optional[ModelPromotionSuggestionSchema] = Field(None, description="创建的建议工单")
+    evaluation: Optional[PromotionEvaluationResponse] = Field(None, description="晋升评估结果")
+
+
+class ApprovePromotionRequest(BaseModel):
+    """审批晋升请求"""
+    suggestion_id: int = Field(..., description="建议ID")
+    approver_id: Optional[str] = Field(None, description="审批人ID")
+    approver_name: Optional[str] = Field(None, description="审批人姓名")
+    approve_note: Optional[str] = Field(None, description="审批备注")
+
+
+class ApprovePromotionResponse(BaseModel):
+    """审批晋升响应"""
+    success: bool = Field(..., description="是否成功")
+    reason: Optional[str] = Field(None, description="失败原因")
+    suggestion: Optional[ModelPromotionSuggestionSchema] = Field(None, description="更新后的建议工单")
