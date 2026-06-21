@@ -8,10 +8,10 @@
 
 使用示例:
     from app.middleware import RequestContextMiddleware, get_request_id
-    
+
     # 在 FastAPI 应用中添加中间件
     app.add_middleware(RequestContextMiddleware)
-    
+
     # 获取当前请求 ID
     request_id = get_request_id()
 """
@@ -27,6 +27,7 @@ from starlette.responses import Response
 from loguru import logger
 
 from app.core.prometheus import metrics
+from app.core.container import container
 
 # 请求上下文变量
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('request_id', default='')
@@ -169,29 +170,29 @@ def clear_tenant_context() -> None:
 class RequestContextMiddleware(BaseHTTPMiddleware):
     """
     请求上下文中间件
-    
+
     为每个请求生成唯一的 request_id，并记录请求指标。
-    
+
     功能:
     1. 生成/传递 X-Request-ID
     2. 记录请求开始时间
     3. 采集 HTTP 请求指标（Prometheus）
     4. 计算请求耗时
     """
-    
+
     async def dispatch(self, request: Request, call_next):
         # 从请求头获取或生成 request_id
         request_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
         _request_id_var.set(request_id)
-        
+
         # 记录开始时间
         start_time = time.time()
         _request_start_time_var.set(start_time)
-        
+
         # 获取请求路径（去掉查询参数）
         path = request.url.path
         method = request.method
-        
+
         # 结构化日志 - 请求开始
         logger.bind(
             request_id=request_id,
@@ -199,20 +200,20 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             path=path,
             client_ip=request.client.host if request.client else 'unknown'
         ).info(f"Request started: {method} {path}")
-        
+
         try:
             # 处理请求
             response = await call_next(request)
-            
+
             # 计算耗时
             duration = time.time() - start_time
-            
+
             # 获取状态码
             status_code = str(response.status_code)
-            
+
             # 添加 request_id 到响应头
             response.headers['X-Request-ID'] = request_id
-            
+
             # 记录 Prometheus 指标
             metrics.record_http_request(
                 method=method,
@@ -220,7 +221,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 status_code=status_code,
                 duration=duration
             )
-            
+
             # 结构化日志 - 请求完成
             logger.bind(
                 request_id=request_id,
@@ -229,13 +230,13 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 status_code=status_code,
                 duration_ms=round(duration * 1000, 2)
             ).info(f"Request completed: {method} {path} - {status_code}")
-            
+
             return response
-            
+
         except Exception as e:
             # 计算耗时
             duration = time.time() - start_time
-            
+
             # 记录错误指标
             metrics.record_http_request(
                 method=method,
@@ -243,7 +244,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 status_code="500",
                 duration=duration
             )
-            
+
             # 结构化日志 - 请求错误
             logger.bind(
                 request_id=request_id,
@@ -252,7 +253,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 duration_ms=round(duration * 1000, 2),
                 error=str(e)
             ).exception(f"Request failed: {method} {path}")
-            
+
             raise
 
 
@@ -485,10 +486,10 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
 class StructuredLogFilter:
     """
     结构化日志过滤器
-    
+
     为 loguru 日志添加上下文信息。
     """
-    
+
     @staticmethod
     def patch(record: Dict[str, Any]) -> None:
         """
@@ -567,3 +568,73 @@ def setup_structured_logging() -> None:
     )
 
     logger.info("Structured logging initialized")
+
+
+# 请求作用域上下文变量
+_scope_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('scope_id', default=None)
+
+
+def get_current_scope_id() -> Optional[str]:
+    """获取当前请求的作用域ID"""
+    return _scope_id_var.get()
+
+
+def set_current_scope_id(scope_id: Optional[str]) -> None:
+    """设置当前请求的作用域ID"""
+    _scope_id_var.set(scope_id)
+
+
+class ScopeMiddleware(BaseHTTPMiddleware):
+    """
+    请求作用域中间件
+
+    为每个 HTTP 请求创建独立的依赖注入作用域：
+    1. 请求开始时创建 scope
+    2. 将 scope_id 存入 request.state 和 contextvar
+    3. 请求结束时销毁 scope，释放所有 scoped 服务
+
+    作用域服务的生命周期与单个请求绑定，适用于：
+    - 数据库会话（per-request session）
+    - 请求级别的缓存
+    - 请求级别的状态管理
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        scope_id = None
+        try:
+            scope_id = container.create_scope()
+            request.state.scope_id = scope_id
+            set_current_scope_id(scope_id)
+
+            logger.bind(
+                request_id=get_request_id(),
+                scope_id=scope_id,
+            ).debug(f"Request scope created: {scope_id}")
+
+            response = await call_next(request)
+
+            return response
+
+        except Exception as e:
+            logger.bind(
+                request_id=get_request_id(),
+                scope_id=scope_id,
+                error=str(e),
+            ).debug(f"Request scope error")
+            raise
+
+        finally:
+            if scope_id is not None:
+                try:
+                    container.dispose_scope(scope_id)
+                    set_current_scope_id(None)
+                    logger.bind(
+                        request_id=get_request_id(),
+                        scope_id=scope_id,
+                    ).debug(f"Request scope disposed: {scope_id}")
+                except Exception as e:
+                    logger.bind(
+                        request_id=get_request_id(),
+                        scope_id=scope_id,
+                        error=str(e),
+                    ).warning(f"Failed to dispose request scope")

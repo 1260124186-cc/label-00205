@@ -39,11 +39,12 @@ from app.schedulers.scheduler import scheduler
 from app.utils.config import config
 from app.utils.database import db_manager
 from app.utils.device import get_all_device_info
-from app.middleware import RequestContextMiddleware, TenantContextMiddleware, setup_structured_logging
+from app.middleware import RequestContextMiddleware, TenantContextMiddleware, ScopeMiddleware, setup_structured_logging
 from app.core.prometheus import metrics
 from app.core.redis_broadcast import config_sync
 from app.core.event_bus import event_bus, EventType
 from app.core.config_manager import config_manager
+from app.core.container import container, ServiceProvider
 
 
 def setup_logging() -> None:
@@ -158,6 +159,10 @@ async def lifespan(app: FastAPI):
     # 启动时
     logger.info(f"螺栓预紧力预测系统启动中... 版本: {__version__}")
 
+    # 初始化依赖注入容器，注册所有服务
+    ServiceProvider.register_all(container)
+    logger.info("依赖注入容器初始化完成")
+
     setup_log_level_hot_reload()
 
     # 启动Redis配置同步（多实例广播）
@@ -209,7 +214,10 @@ async def lifespan(app: FastAPI):
         logger.warning(f"流式预测引擎停止失败: {e}")
 
     scheduler.stop()
-    db_manager.close()
+
+    # 关闭依赖注入容器，释放所有资源（模型缓存、数据库连接池等）
+    container.shutdown()
+
     logger.info("系统已关闭")
 
 
@@ -276,6 +284,9 @@ def create_app() -> FastAPI:
 
     # 请求上下文中间件（必须放在最前面）
     app.add_middleware(RequestContextMiddleware)
+
+    # 依赖注入作用域中间件（每个请求创建独立作用域）
+    app.add_middleware(ScopeMiddleware)
 
     # 租户上下文中间件
     app.add_middleware(TenantContextMiddleware)

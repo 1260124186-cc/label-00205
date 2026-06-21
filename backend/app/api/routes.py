@@ -276,6 +276,7 @@ from app.services.visualization_3d import Visualization3DService
 from app.services.risk_visualization.service import RiskVisualizationService
 from app.services.risk_visualization import RiskPropagationService
 from app.services.what_if_simulation import WhatIfSimulator
+from app.core.container import container
 from app.api.validators import (
     DataValidator,
     ValidationMode,
@@ -305,11 +306,14 @@ federated_clients: Dict[str, Any] = {}
 
 
 def get_prediction_service() -> PredictionService:
-    """获取预测服务实例"""
-    global prediction_service
-    if prediction_service is None:
-        prediction_service = PredictionService()
-    return prediction_service
+    """获取预测服务实例（从依赖注入容器）"""
+    try:
+        return container.resolve("prediction_service")
+    except Exception:
+        global prediction_service
+        if prediction_service is None:
+            prediction_service = PredictionService()
+        return prediction_service
 
 
 def get_what_if_simulator() -> WhatIfSimulator:
@@ -321,11 +325,14 @@ def get_what_if_simulator() -> WhatIfSimulator:
 
 
 def get_training_service() -> TrainingService:
-    """获取训练服务实例"""
-    global training_service
-    if training_service is None:
-        training_service = TrainingService()
-    return training_service
+    """获取训练服务实例（从依赖注入容器）"""
+    try:
+        return container.resolve("training_service")
+    except Exception:
+        global training_service
+        if training_service is None:
+            training_service = TrainingService()
+        return training_service
 
 
 def get_visualization_3d_service() -> Visualization3DService:
@@ -437,6 +444,7 @@ async def predict_bolt(
     shadow_version: Optional[str] = Query(None, description="Shadow模式版本号，仅预测不写库，用于A/B对比"),
     feature_version: str = Query("v1.0", description="特征存储版本 v1.0(58维)/v1.1(65维含工况)"),
     save_feature_snapshot: bool = Query(True, description="是否异步保存特征快照供后续分析"),
+    service: PredictionService = Depends(get_prediction_service),
 ):
     """
     预测单个螺栓的状态
@@ -455,7 +463,6 @@ async def predict_bolt(
     - lenient: 宽松模式，自动截断/填充数据
     """
     try:
-        service = get_prediction_service()
         validator = get_validator()
 
         # 获取螺栓ID（支持中文字段名）

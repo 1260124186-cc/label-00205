@@ -371,6 +371,36 @@ class PredictionOrchestrator:
                     f"{node_id} v{cache_key_ver}"
                 )
 
+    def clear_model_cache(self) -> None:
+        """
+        清除所有模型缓存（应用关闭时调用）
+
+        释放所有加载的模型实例，包括：
+        - 螺栓 LSTM 模型缓存
+        - 法兰面 Attention 模型缓存
+        - 螺栓 Ensemble 模型缓存
+        """
+        total_bolt_models = sum(
+            len(versions) for versions in self.bolt_models.values()
+        )
+        total_flange_models = sum(
+            len(versions) for versions in self.flange_models.values()
+        )
+        total_ensembles = sum(
+            len(versions) for versions in self.bolt_ensembles.values()
+        )
+
+        self.bolt_models.clear()
+        self.flange_models.clear()
+        self.bolt_ensembles.clear()
+
+        logger.info(
+            f"已清除所有模型缓存: "
+            f"螺栓模型={total_bolt_models}, "
+            f"法兰面模型={total_flange_models}, "
+            f"集成模型={total_ensembles}"
+        )
+
     # ---------- 螺栓预测 ----------
 
     def predict_bolt(
