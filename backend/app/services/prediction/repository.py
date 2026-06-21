@@ -774,9 +774,73 @@ class PredictionRepository:
 
         return bolt_series
 
-    # ---------- 结果持久化 ----------
+    # ---------- 结果持久化（含状态机幂等写入） ----------
 
-    def save_bolt_prediction(self, bolt_id: str, result: Dict[str, Any], org_node_id: Optional[int] = None) -> None:
+    def save_bolt_prediction(
+        self,
+        bolt_id: str,
+        result: Dict[str, Any],
+        org_node_id: Optional[int] = None,
+        trigger_source: str = 'scheduled',
+    ) -> Dict[str, Any]:
+        """
+        保存螺栓预测结果（经状态机裁决）
+
+        状态机裁决后再决定是否写入变更表、是否触发告警。
+        同窗口内重复预测幂等：状态未变则只更新 recent_time，不重复触发告警/工单。
+
+        Args:
+            bolt_id: 螺栓ID
+            result: 预测结果字典
+            org_node_id: 组织节点ID
+            trigger_source: 触发来源 scheduled/streaming/manual
+
+        Returns:
+            Dict: {'state_transition': StateTransitionResult 的字典形式,
+                   'should_trigger_alert': bool}
+        """
+        from app.services.prediction.prediction_state_machine import get_state_machine
+
+        state_machine = get_state_machine()
+
+        recent_time = result.get('recent_time')
+        if isinstance(recent_time, str):
+            try:
+                recent_time = datetime.fromisoformat(recent_time.replace('Z', '+00:00'))
+            except Exception:
+                recent_time = None
+
+        transition_result = state_machine.evaluate(
+            node_type='bolt',
+            node_id=str(bolt_id),
+            new_status_code=result.get('status_code', 0),
+            confidence=result.get('confidence', 0.0),
+            risk_score=result.get('risk_score', 0.0),
+            risk_level=result.get('risk_level', ''),
+            trigger_source=trigger_source,
+            prediction_source=result.get('prediction_source', ''),
+            model_version=result.get('model_version', ''),
+            recent_time=recent_time,
+        )
+
+        if transition_result.state_changed and not transition_result.is_idempotent:
+            self._persist_bolt_prediction_record(bolt_id, result, org_node_id)
+
+        return {
+            'state_changed': transition_result.state_changed,
+            'should_trigger_alert': transition_result.should_trigger_alert,
+            'transition_type': transition_result.transition_type.value if transition_result.transition_type else None,
+            'old_status_code': transition_result.old_status_code,
+            'new_status_code': transition_result.new_status_code,
+            'is_idempotent': transition_result.is_idempotent,
+        }
+
+    def _persist_bolt_prediction_record(
+        self,
+        bolt_id: str,
+        result: Dict[str, Any],
+        org_node_id: Optional[int] = None,
+    ) -> None:
         try:
             with get_db() as db:
                 fault_detail = result.get('fault_detail')
@@ -814,7 +878,67 @@ class PredictionRepository:
         except Exception as e:
             logger.error(f"保存螺栓预测失败 [{bolt_id}]: {e}")
 
-    def save_flange_prediction(self, flange_id: str, result: Dict[str, Any], org_node_id: Optional[int] = None) -> None:
+    def save_flange_prediction(
+        self,
+        flange_id: str,
+        result: Dict[str, Any],
+        org_node_id: Optional[int] = None,
+        trigger_source: str = 'scheduled',
+    ) -> Dict[str, Any]:
+        """
+        保存法兰面预测结果（经状态机裁决）
+
+        Args:
+            flange_id: 法兰面ID
+            result: 预测结果字典
+            org_node_id: 组织节点ID
+            trigger_source: 触发来源
+
+        Returns:
+            Dict: {'state_changed': bool, 'should_trigger_alert': bool, ...}
+        """
+        from app.services.prediction.prediction_state_machine import get_state_machine
+
+        state_machine = get_state_machine()
+
+        recent_time = result.get('recent_time')
+        if isinstance(recent_time, str):
+            try:
+                recent_time = datetime.fromisoformat(recent_time.replace('Z', '+00:00'))
+            except Exception:
+                recent_time = None
+
+        transition_result = state_machine.evaluate(
+            node_type='flange',
+            node_id=str(flange_id),
+            new_status_code=result.get('status_code', 0),
+            confidence=result.get('confidence', 0.0),
+            risk_score=result.get('risk_score', 0.0),
+            risk_level=result.get('risk_level', ''),
+            trigger_source=trigger_source,
+            prediction_source=result.get('prediction_source', ''),
+            model_version=result.get('model_version', ''),
+            recent_time=recent_time,
+        )
+
+        if transition_result.state_changed and not transition_result.is_idempotent:
+            self._persist_flange_prediction_record(flange_id, result, org_node_id)
+
+        return {
+            'state_changed': transition_result.state_changed,
+            'should_trigger_alert': transition_result.should_trigger_alert,
+            'transition_type': transition_result.transition_type.value if transition_result.transition_type else None,
+            'old_status_code': transition_result.old_status_code,
+            'new_status_code': transition_result.new_status_code,
+            'is_idempotent': transition_result.is_idempotent,
+        }
+
+    def _persist_flange_prediction_record(
+        self,
+        flange_id: str,
+        result: Dict[str, Any],
+        org_node_id: Optional[int] = None,
+    ) -> None:
         try:
             with get_db() as db:
                 recommendations = result.get('recommendations', [])

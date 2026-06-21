@@ -1912,6 +1912,74 @@ CREATE TABLE IF NOT EXISTS sc_hpo_node_overrides (
 SHOW TABLES LIKE '%hpo%';
 
 -- ============================================================
+-- 预测结果状态机与幂等写入
+-- ============================================================
+
+-- ============================================================
+-- 预测快照表（每个 bolt_id / flm_id 维护当前有效预测快照）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sci_prediction_snapshot (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型 bolt/flange',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID（bolt_id 或 flm_id）',
+    status_code INT NOT NULL DEFAULT 0 COMMENT '当前状态码 0-4',
+    status_label VARCHAR(20) NOT NULL DEFAULT '正常' COMMENT '当前状态标签',
+    confidence FLOAT COMMENT '当前置信度',
+    risk_score FLOAT COMMENT '当前风险评分',
+    risk_level VARCHAR(20) COMMENT '当前风险等级',
+    consecutive_normal_count INT NOT NULL DEFAULT 0 COMMENT '连续正常预测次数（用于降级确认）',
+    consecutive_same_count INT NOT NULL DEFAULT 0 COMMENT '连续相同状态预测次数',
+    recent_time DATETIME COMMENT '最近状态时间',
+    prediction_source VARCHAR(20) COMMENT '预测来源 lstm/rule/ensemble',
+    model_version VARCHAR(50) COMMENT '模型版本',
+    idempotency_key VARCHAR(128) COMMENT '幂等键（窗口+来源标识）',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '首次创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近更新时间',
+    UNIQUE KEY uk_node (node_type, node_id),
+    INDEX idx_snapshot_status (status_code),
+    INDEX idx_snapshot_tenant (tenant_id),
+    INDEX idx_snapshot_tenant_node (tenant_id, node_type, node_id),
+    INDEX idx_snapshot_recent_time (recent_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='预测快照表';
+
+-- ============================================================
+-- 预测状态变更历史表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sci_prediction_state_change (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键',
+    node_type VARCHAR(20) NOT NULL COMMENT '节点类型 bolt/flange',
+    node_id VARCHAR(100) NOT NULL COMMENT '节点ID',
+    old_status_code INT NOT NULL COMMENT '变更前状态码',
+    old_status_label VARCHAR(20) COMMENT '变更前状态标签',
+    new_status_code INT NOT NULL COMMENT '变更后状态码',
+    new_status_label VARCHAR(20) COMMENT '变更后状态标签',
+    transition_type VARCHAR(30) NOT NULL COMMENT '跃迁类型: upgrade/confirm_downgrade/manual_downgrade/idempotent_touch',
+    confidence FLOAT COMMENT '预测置信度',
+    risk_score FLOAT COMMENT '风险评分',
+    consecutive_normal_count INT COMMENT '当时连续正常次数',
+    trigger_source VARCHAR(30) COMMENT '触发来源 scheduled/streaming/manual',
+    prediction_source VARCHAR(20) COMMENT '预测来源 lstm/rule/ensemble',
+    model_version VARCHAR(50) COMMENT '模型版本',
+    idempotency_key VARCHAR(128) COMMENT '幂等键',
+    snapshot_before TEXT COMMENT '变更前快照 JSON',
+    snapshot_after TEXT COMMENT '变更后快照 JSON',
+    tenant_id BIGINT COMMENT '租户ID',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_change_node (node_type, node_id),
+    INDEX idx_change_type (transition_type),
+    INDEX idx_change_old_status (old_status_code),
+    INDEX idx_change_new_status (new_status_code),
+    INDEX idx_change_time (create_time),
+    INDEX idx_change_tenant (tenant_id),
+    INDEX idx_change_tenant_node (tenant_id, node_type, node_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='预测状态变更历史表';
+
+-- 显示状态机相关表
+SHOW TABLES LIKE '%prediction_snapshot%';
+SHOW TABLES LIKE '%prediction_state_change%';
+
+-- ============================================================
 -- 采集器/传感器设备健康监控模块
 -- ============================================================
 

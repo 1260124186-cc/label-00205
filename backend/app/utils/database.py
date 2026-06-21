@@ -231,6 +231,66 @@ class MonthPrediction(Base):
     )
 
 
+class PredictionSnapshot(Base):
+    __tablename__ = 'sci_prediction_snapshot'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    node_id = Column(String(100), nullable=False, comment='节点ID')
+    status_code = Column(Integer, nullable=False, default=0, comment='当前状态码 0-4')
+    status_label = Column(String(20), nullable=False, default='正常', comment='当前状态标签')
+    confidence = Column(Float, comment='当前置信度')
+    risk_score = Column(Float, comment='当前风险评分')
+    risk_level = Column(String(20), comment='当前风险等级')
+    consecutive_normal_count = Column(Integer, nullable=False, default=0, comment='连续正常预测次数')
+    consecutive_same_count = Column(Integer, nullable=False, default=0, comment='连续相同状态预测次数')
+    recent_time = Column(DateTime, comment='最近状态时间')
+    prediction_source = Column(String(20), comment='预测来源')
+    model_version = Column(String(50), comment='模型版本')
+    idempotency_key = Column(String(128), comment='幂等键')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='首次创建时间')
+    update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='最近更新时间')
+
+    __table_args__ = (
+        Index('uk_node', 'node_type', 'node_id', unique=True),
+        Index('idx_snapshot_status', 'status_code'),
+        Index('idx_snapshot_tenant', 'tenant_id'),
+        Index('idx_snapshot_tenant_node', 'tenant_id', 'node_type', 'node_id'),
+    )
+
+
+class PredictionStateChange(Base):
+    __tablename__ = 'sci_prediction_state_change'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    node_type = Column(String(20), nullable=False, comment='节点类型 bolt/flange')
+    node_id = Column(String(100), nullable=False, comment='节点ID')
+    old_status_code = Column(Integer, nullable=False, comment='变更前状态码')
+    old_status_label = Column(String(20), comment='变更前状态标签')
+    new_status_code = Column(Integer, nullable=False, comment='变更后状态码')
+    new_status_label = Column(String(20), comment='变更后状态标签')
+    transition_type = Column(String(30), nullable=False, comment='跃迁类型')
+    confidence = Column(Float, comment='预测置信度')
+    risk_score = Column(Float, comment='风险评分')
+    consecutive_normal_count = Column(Integer, comment='当时连续正常次数')
+    trigger_source = Column(String(30), comment='触发来源')
+    prediction_source = Column(String(20), comment='预测来源')
+    model_version = Column(String(50), comment='模型版本')
+    idempotency_key = Column(String(128), comment='幂等键')
+    snapshot_before = Column(Text, comment='变更前快照 JSON')
+    snapshot_after = Column(Text, comment='变更后快照 JSON')
+    tenant_id = Column(BigInteger, comment='租户ID')
+    create_time = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_change_node', 'node_type', 'node_id'),
+        Index('idx_change_type', 'transition_type'),
+        Index('idx_change_time', 'create_time'),
+        Index('idx_change_tenant_node', 'tenant_id', 'node_type', 'node_id'),
+    )
+
+
 # ============================================================
 # 告警与通知模块数据表模型
 # ============================================================

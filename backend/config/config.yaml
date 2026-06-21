@@ -179,6 +179,16 @@ warning_strategy:
     confidence_threshold: 0.95        # 置信度阈值
     medium_risk_lstm_confidence_threshold: 0.6  # 中风险+低LSTM置信度时提高报警门槛
 
+# ============================================================
+# 预测结果状态机配置
+# ============================================================
+state_machine:
+  # 关注→正常降级需连续正常确认次数（连续N次预测为正常才降级）
+  downgrade_confirm_n: 3
+
+  # 幂等窗口（秒）：同一窗口内重复预测（定时+流式）只更新recent_time
+  idempotency_window_seconds: 300
+
 # 风险评估配置
 risk_assessment:
   # 风险等级阈值

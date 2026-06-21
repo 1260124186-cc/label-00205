@@ -1170,11 +1170,21 @@ class PredictionOrchestrator:
             logger.warning(f"螺栓 {bolt_id} 审计快照记录异常: {e}")
 
         # Step 6: 持久化（Shadow 模式不写库）
+        # 经状态机裁决：幂等窗口内重复预测仅更新 recent_time，不重复写变更表
+        transition_info = None
         if save_to_db and not is_shadow:
-            self.repository.save_bolt_prediction(bolt_id, result, org_node_id=org_node_id)
+            transition_info = self.repository.save_bolt_prediction(
+                bolt_id, result, org_node_id=org_node_id,
+                trigger_source='streaming' if hasattr(self, '_streaming_mode') and self._streaming_mode else 'scheduled',
+            )
 
         # Step 7: 告警评估（Shadow 模式不触发告警）
-        if not is_shadow:
+        # 状态机裁决：幂等命中或降级等待确认时不重复触发告警/工单
+        should_trigger_alert = True
+        if transition_info is not None:
+            should_trigger_alert = transition_info.get('should_trigger_alert', True)
+
+        if not is_shadow and should_trigger_alert:
             try:
                 self._evaluate_alert(
                     node_type='bolt',
@@ -1605,15 +1615,22 @@ class PredictionOrchestrator:
 
         if save_to_db:
             try:
-                self.repository.save_bolt_prediction(bolt_id, result, org_node_id=org_node_id)
+                mv_transition_info = self.repository.save_bolt_prediction(
+                    bolt_id, result, org_node_id=org_node_id,
+                )
             except Exception as e:
                 logger.warning(f"多变量预测持久化失败: {e}")
+                mv_transition_info = None
 
-        # 告警评估
-        try:
-            self._evaluate_alert(node_type='bolt', node_id=bolt_id, result=result)
-        except Exception as e:
-            logger.warning(f"多变量预测告警评估异常: {e}")
+        # 告警评估（状态机裁决）
+        mv_should_trigger = True
+        if mv_transition_info is not None:
+            mv_should_trigger = mv_transition_info.get('should_trigger_alert', True)
+        if mv_should_trigger:
+            try:
+                self._evaluate_alert(node_type='bolt', node_id=bolt_id, result=result)
+            except Exception as e:
+                logger.warning(f"多变量预测告警评估异常: {e}")
 
         duration = time.time() - start_time
         logger.info(
@@ -2457,11 +2474,21 @@ class PredictionOrchestrator:
             logger.warning(f"法兰面 {flange_id} 审计快照记录异常: {e}")
 
         # Step 6: 持久化（Shadow 模式不写库）
+        # 经状态机裁决：幂等窗口内重复预测仅更新 recent_time，不重复写变更表
+        flange_transition_info = None
         if save_to_db and not is_shadow:
-            self.repository.save_flange_prediction(flange_id, result, org_node_id=org_node_id)
+            flange_transition_info = self.repository.save_flange_prediction(
+                flange_id, result, org_node_id=org_node_id,
+                trigger_source='streaming' if hasattr(self, '_streaming_mode') and self._streaming_mode else 'scheduled',
+            )
 
         # Step 7: 告警评估（Shadow 模式不触发告警）
-        if not is_shadow:
+        # 状态机裁决：幂等命中或降级等待确认时不重复触发告警/工单
+        flange_should_trigger_alert = True
+        if flange_transition_info is not None:
+            flange_should_trigger_alert = flange_transition_info.get('should_trigger_alert', True)
+
+        if not is_shadow and flange_should_trigger_alert:
             try:
                 self._evaluate_alert(
                     node_type='flange',
