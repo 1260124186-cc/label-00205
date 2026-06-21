@@ -41,6 +41,10 @@ from app.api.timeseries_schemas import (
     TieredQueryRequest,
     TieredQueryResponse,
     SuggestedTimeRangeResponse,
+    ProphetMultiHorizonRequest,
+    ProphetMultiHorizonResponse,
+    SingleHorizonForecastSchema,
+    SeasonalDecompositionSchema,
 )
 
 from app.timeseries.base import (
@@ -961,4 +965,206 @@ async def suggest_time_range(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception(f"时间范围建议失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# Prophet 多周期预测与季节性分解
+# ============================================================
+
+@router.post(
+    "/prophet/multi-horizon",
+    response_model=ProphetMultiHorizonResponse,
+    tags=["Prophet预测"],
+    summary="Prophet 多周期预测（7天/30天/90天）+ 季节性分解"
+)
+async def prophet_multi_horizon_forecast(request: ProphetMultiHorizonRequest):
+    """
+    Prophet 多周期预测与季节性分解（核心接口）
+
+    功能特性:
+    - **多 horizon 预测**: 支持 7天 / 30天 / 90天 同时预测，各 horizon 独立建模，独立置信区间
+    - **季节性分解**: 输出趋势项、周周期、日周期（数据足够时含年周期）分量，运维可据此区分周期性载荷 vs 真实劣化
+    - **节假日/停产日**: 作为 Prophet regressor 输入，自动处理节假日效应和停产异常点
+    - **异常检测**: 基于阈值自动识别预测中的松动/过载/预警区间
+    - **置信度评估**: 基于预测区间宽度自动计算各 horizon 置信度
+
+    **请求示例**:
+    ```json
+    {
+      "sensor_id": "BOLT_001",
+      "data_points": [
+        {"timestamp": "2024-01-01T00:00:00", "value": 580.0},
+        {"timestamp": "2024-01-02T00:00:00", "value": 579.5}
+      ],
+      "horizons": [7, 30, 90],
+      "holidays": [
+        {"ds": "2024-02-10T00:00:00", "holiday": "春节", "lower_window": 3, "upper_window": 7}
+      ],
+      "shutdown_dates": ["2024-02-15T00:00:00", "2024-02-16T00:00:00"],
+      "include_decomposition": true,
+      "uncertainty_samples": 1000
+    }
+    ```
+    """
+    import time
+    import numpy as np
+
+    start_ts = time.time()
+
+    try:
+        service = get_timeseries_analysis_service()
+
+        result = service.prophet_multi_horizon_forecast(
+            sensor_id=request.sensor_id,
+            data_points=[
+                {'timestamp': p.timestamp, 'value': p.value}
+                for p in request.data_points
+            ],
+            horizons=request.horizons,
+            holidays=[
+                {
+                    'ds': h.ds,
+                    'holiday': h.holiday,
+                    'lower_window': h.lower_window,
+                    'upper_window': h.upper_window,
+                }
+                for h in (request.holidays or [])
+            ] if request.holidays else None,
+            shutdown_dates=request.shutdown_dates,
+            include_decomposition=request.include_decomposition,
+            uncertainty_samples=request.uncertainty_samples,
+        )
+
+        forecasts_dict: Dict[str, SingleHorizonForecastSchema] = {}
+        for h_key, fr in result.get('forecasts', {}).items():
+            h_int = int(h_key)
+            forecasts_dict[str(h_int)] = SingleHorizonForecastSchema(
+                horizon_days=fr['horizon_days'],
+                dates=fr['dates'],
+                values=fr['values'],
+                lower_bound=fr['lower_bound'],
+                upper_bound=fr['upper_bound'],
+                anomaly_dates=[
+                    (s, e) for s, e in fr.get('anomaly_dates', [])
+                ],
+                anomaly_type=fr.get('anomaly_type', '正常'),
+                confidence=fr['confidence'],
+                confidence_level=fr.get('confidence_level', 0.95),
+            )
+
+        decomposition_schema: Optional[SeasonalDecompositionSchema] = None
+        dec = result.get('decomposition')
+        if dec is not None:
+            decomposition_schema = SeasonalDecompositionSchema(
+                dates=dec['dates'],
+                trend=dec['trend'],
+                weekly=dec.get('weekly'),
+                daily=dec.get('daily'),
+                yearly=dec.get('yearly'),
+                holidays=dec.get('holidays'),
+                regressors=dec.get('regressors'),
+                residuals=dec.get('residuals'),
+            )
+
+        execution_ms = round((time.time() - start_ts) * 1000, 2)
+
+        return ProphetMultiHorizonResponse(
+            sensor_id=request.sensor_id,
+            historical=result.get('historical', {}),
+            forecasts=forecasts_dict,
+            decomposition=decomposition_schema,
+            model_parameters=result.get('model_parameters', {}),
+            holidays_used=result.get('holidays_used'),
+            shutdown_dates_used=result.get('shutdown_dates_used'),
+            execution_ms=execution_ms,
+        )
+
+    except ValueError as e:
+        logger.error(f"Prophet预测参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Prophet多周期预测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/prophet/multi-horizon/decompose-only",
+    response_model=ProphetMultiHorizonResponse,
+    tags=["Prophet预测"],
+    summary="仅季节性分解（无未来预测）"
+)
+async def prophet_decompose_only(request: ProphetMultiHorizonRequest):
+    """
+    对历史数据仅执行季节性分解（不做未来预测）
+
+    用于运维分析：将载荷分解为
+    - **趋势项**: 长期真实劣化趋势
+    - **周周期**: 每周固定循环载荷（如工作日/周末差异）
+    - **日周期**: 每日昼夜循环载荷（如温度昼夜差引起的预紧力波动）
+    - **节假日效应**: 节假日和停产日的特殊影响
+
+    传入 horizons=[] 或任意空列表即可。
+    """
+    import time
+    import numpy as np
+
+    start_ts = time.time()
+
+    try:
+        service = get_timeseries_analysis_service()
+
+        result = service.prophet_multi_horizon_forecast(
+            sensor_id=request.sensor_id,
+            data_points=[
+                {'timestamp': p.timestamp, 'value': p.value}
+                for p in request.data_points
+            ],
+            horizons=[],
+            holidays=[
+                {
+                    'ds': h.ds,
+                    'holiday': h.holiday,
+                    'lower_window': h.lower_window,
+                    'upper_window': h.upper_window,
+                }
+                for h in (request.holidays or [])
+            ] if request.holidays else None,
+            shutdown_dates=request.shutdown_dates,
+            include_decomposition=True,
+            uncertainty_samples=request.uncertainty_samples,
+        )
+
+        decomposition_schema: Optional[SeasonalDecompositionSchema] = None
+        dec = result.get('decomposition')
+        if dec is not None:
+            decomposition_schema = SeasonalDecompositionSchema(
+                dates=dec['dates'],
+                trend=dec['trend'],
+                weekly=dec.get('weekly'),
+                daily=dec.get('daily'),
+                yearly=dec.get('yearly'),
+                holidays=dec.get('holidays'),
+                regressors=dec.get('regressors'),
+                residuals=dec.get('residuals'),
+            )
+
+        execution_ms = round((time.time() - start_ts) * 1000, 2)
+
+        return ProphetMultiHorizonResponse(
+            sensor_id=request.sensor_id,
+            historical=result.get('historical', {}),
+            forecasts={},
+            decomposition=decomposition_schema,
+            model_parameters=result.get('model_parameters', {}),
+            holidays_used=result.get('holidays_used'),
+            shutdown_dates_used=result.get('shutdown_dates_used'),
+            execution_ms=execution_ms,
+        )
+
+    except ValueError as e:
+        logger.error(f"Prophet分解参数错误: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Prophet季节性分解失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

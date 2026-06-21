@@ -392,6 +392,90 @@ class TimeSeriesAnalysisService:
         return AggregationLevel.HOUR
 
 
+    def prophet_multi_horizon_forecast(
+        self,
+        sensor_id: str,
+        data_points: List[Dict[str, Any]],
+        horizons: Optional[List[int]] = None,
+        holidays: Optional[List[Dict[str, Any]]] = None,
+        shutdown_dates: Optional[List[Any]] = None,
+        extra_regressors: Optional[Dict[str, List[float]]] = None,
+        include_decomposition: bool = True,
+        uncertainty_samples: int = 1000,
+    ) -> Dict[str, Any]:
+        """
+        Prophet 多周期预测 + 季节性分解（服务层入口）
+
+        Args:
+            sensor_id: 传感器ID
+            data_points: 历史数据点列表 [{'timestamp': datetime, 'value': float}, ...]
+            horizons: 预测horizon列表，默认 [7, 30, 90]
+            holidays: 节假日列表 [{'ds': datetime, 'holiday': str, 'lower_window': int, 'upper_window': int}, ...]
+            shutdown_dates: 停产日列表
+            extra_regressors: 额外 regressor {name: values_list}
+            include_decomposition: 是否包含季节性分解
+            uncertainty_samples: 不确定性采样数
+
+        Returns:
+            可序列化的结果字典
+        """
+        import numpy as np
+        import pandas as pd
+        from app.models.prophet_forecaster import ProphetForecaster
+
+        if not data_points or len(data_points) < 2:
+            raise ValueError("历史数据点不足，至少需要2个数据点")
+
+        try:
+            timestamps = np.array([
+                pd.Timestamp(p['timestamp']).to_pydatetime()
+                for p in data_points
+            ])
+            values = np.array([float(p['value']) for p in data_points], dtype=np.float64)
+        except Exception as e:
+            raise ValueError(f"历史数据解析失败: {e}")
+
+        valid_mask = ~np.isnan(values)
+        if np.sum(valid_mask) < 2:
+            raise ValueError("有效值数据点不足（NaN过多）")
+        timestamps = timestamps[valid_mask]
+        values = values[valid_mask]
+
+        sort_idx = np.argsort(timestamps)
+        timestamps = timestamps[sort_idx]
+        values = values[sort_idx]
+
+        regressors_np = None
+        if extra_regressors:
+            regressors_np = {}
+            for name, vals in extra_regressors.items():
+                arr = np.array(vals, dtype=np.float64)
+                if len(arr) == len(valid_mask):
+                    arr = arr[valid_mask][sort_idx]
+                regressors_np[name] = arr
+
+        if horizons is None:
+            horizons = [7, 30, 90]
+
+        forecaster = ProphetForecaster(uncertainty_samples=uncertainty_samples)
+
+        try:
+            forecast_result = forecaster.forecast_multi_horizon(
+                historical_data=values,
+                historical_timestamps=timestamps,
+                horizons=horizons,
+                holidays=holidays,
+                shutdown_dates=shutdown_dates,
+                extra_regressors=regressors_np,
+                include_decomposition=include_decomposition,
+            )
+        except Exception as e:
+            logger.error(f"ProphetForecaster执行失败: {e}")
+            raise
+
+        return forecast_result.to_dict()
+
+
 # 全局服务单例
 _analysis_service: Optional[TimeSeriesAnalysisService] = None
 
@@ -403,4 +487,6 @@ def get_timeseries_analysis_service() -> Optional[TimeSeriesAnalysisService]:
         repo = get_timeseries_repository()
         if repo is not None:
             _analysis_service = TimeSeriesAnalysisService(repo)
+    if _analysis_service is None:
+        _analysis_service = TimeSeriesAnalysisService(repository=None)
     return _analysis_service

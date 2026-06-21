@@ -511,3 +511,116 @@ class SuggestedTimeRangeResponse(BaseModel):
     cold_retention_days: int
     warning: Optional[str] = None
     tier_upgrade_will_happen: bool = False
+
+
+# ==================== Prophet 多周期预测与季节性分解 ====================
+
+class HolidayItemSchema(BaseModel):
+    """节假日配置项"""
+    ds: datetime = Field(..., description="节假日日期")
+    holiday: str = Field(..., max_length=100, description="节假日名称")
+    lower_window: int = Field(0, ge=0, le=30, description="节前影响天数")
+    upper_window: int = Field(0, ge=0, le=30, description="节后影响天数")
+
+
+class ProphetDataPointSchema(BaseModel):
+    """时序数据点（Prophet专用简化版）"""
+    timestamp: datetime = Field(..., description="时间戳")
+    value: float = Field(..., description="观测值（如预紧力）")
+
+
+class SingleHorizonForecastSchema(BaseModel):
+    """单 horizon 预测结果"""
+    horizon_days: int = Field(..., description="预测horizon天数")
+    dates: List[datetime] = Field(..., description="预测日期列表")
+    values: List[float] = Field(..., description="预测值列表(yhat)")
+    lower_bound: List[float] = Field(..., description="置信区间下界(yhat_lower)")
+    upper_bound: List[float] = Field(..., description="置信区间上界(yhat_upper)")
+    anomaly_dates: List[Tuple[datetime, datetime]] = Field(
+        default_factory=list,
+        description="异常时间段列表 [(开始, 结束), ...]"
+    )
+    anomaly_type: str = Field(
+        default="正常",
+        description="异常类型: 正常/关注级预警/检查级预警/紧急级预警/松动/过载/断裂"
+    )
+    confidence: float = Field(..., ge=0, le=1, description="预测置信度")
+    confidence_level: float = Field(
+        default=0.95, ge=0.5, le=0.99,
+        description="置信区间水平（如0.95表示95%CI）"
+    )
+
+
+class SeasonalDecompositionSchema(BaseModel):
+    """季节性分解结果"""
+    dates: List[datetime] = Field(..., description="日期列表(历史+预测)")
+    trend: List[float] = Field(..., description="趋势项分量")
+    weekly: Optional[List[float]] = Field(None, description="周周期分量")
+    daily: Optional[List[float]] = Field(None, description="日周期分量")
+    yearly: Optional[List[float]] = Field(None, description="年周期分量")
+    holidays: Optional[List[float]] = Field(None, description="节假日效应分量")
+    regressors: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="额外regressor效应分量 {regressor_name: values}"
+    )
+    residuals: Optional[List[float]] = Field(None, description="残差项")
+
+
+class ProphetMultiHorizonRequest(BaseModel):
+    """Prophet 多周期预测请求"""
+    sensor_id: str = Field(..., description="传感器/节点ID")
+    data_points: List[ProphetDataPointSchema] = Field(
+        ...,
+        min_length=30,
+        description="历史时序数据点（建议至少90天以上效果更好）"
+    )
+    horizons: List[int] = Field(
+        default_factory=lambda: [7, 30, 90],
+        description="预测horizon列表，支持7/30/90天等任意正整数"
+    )
+    holidays: Optional[List[HolidayItemSchema]] = Field(
+        None,
+        description="节假日列表（可选，作为Prophet regressor）"
+    )
+    shutdown_dates: Optional[List[datetime]] = Field(
+        None,
+        description="停产日列表（可选，作为Prophet regressor）"
+    )
+    include_decomposition: bool = Field(
+        True,
+        description="是否输出季节性分解结果"
+    )
+    uncertainty_samples: int = Field(
+        1000, ge=100, le=10000,
+        description="不确定性采样数，越大置信区间越准确但越慢"
+    )
+
+
+class ProphetMultiHorizonResponse(BaseModel):
+    """Prophet 多周期预测响应"""
+    sensor_id: str = Field(..., description="传感器/节点ID")
+    historical: Dict[str, Any] = Field(
+        ...,
+        description="历史数据回显 {'dates': [...], 'values': [...]}"
+    )
+    forecasts: Dict[str, SingleHorizonForecastSchema] = Field(
+        ...,
+        description="各horizon预测结果字典，key为horizon天数字符串"
+    )
+    decomposition: Optional[SeasonalDecompositionSchema] = Field(
+        None,
+        description="季节性分解结果（若include_decomposition=True）"
+    )
+    model_parameters: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="模型参数摘要"
+    )
+    holidays_used: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="实际使用的节假日信息"
+    )
+    shutdown_dates_used: Optional[List[str]] = Field(
+        None,
+        description="实际使用的停产日列表"
+    )
+    execution_ms: float = Field(0, description="执行耗时(毫秒)")
